@@ -10,7 +10,8 @@
  * 调 tool → SSE 推给 extension → extension 执行 → POST 结果回来 → Agent SDK 继续。
  *
  * Endpoints:
- *   POST /register        — new install gets a trial token
+ *   POST /auth/start       — email sign-in: a code is mailed (auth.mjs, a copy of trial-server/auth.mjs)
+ *   POST /auth/verify      — the code buys a trial token; the person is a row in the customer list
  *   GET  /status           — remaining budget for this token
  *   GET  /v1/models        — allowed models
  *   POST /v1/agent         — MCP bridge: tool calls bridged to extension via SSE
@@ -21,6 +22,7 @@
 import * as http from "node:http";
 import { Readable } from "node:stream";
 import { init as initToken, getAccessToken } from "./token-manager.mjs";
+import { budgetOwner, createEmailAuth, createMailer, loadAuthConfig } from "./auth.mjs";
 import { createSdkMcpServer, query as agentQuery, tool as sdkTool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 
@@ -43,12 +45,10 @@ const TOKEN_RPM        = Number(process.env.TOKEN_RPM        || 60);     // requ
 const IP_RPM           = Number(process.env.IP_RPM           || 240);    // requests per minute per IP
 const MAX_CONCURRENT   = Number(process.env.MAX_CONCURRENT   || 24);     // total concurrent requests
 const MAX_BODY_BYTES   = 6 * 1024 * 1024;
-const MAX_REGISTERED   = Number(process.env.MAX_REGISTERED   || 100000);
-const REG_PER_IP_DAY   = Number(process.env.REG_PER_IP_DAY   || 5);
 const UPSTREAM_TIMEOUT  = 10 * 60_000;
 const MAX_PARALLEL_PER_TOKEN = 3;
 const SHARED_SECRET    = process.env.SHARED_SECRET || "";  // optional gateway auth
-const REGISTER_SECRET  = process.env.REGISTER_SECRET || "dcx-ag7k-9mR2-pLw4";  // required to register new trial tokens
+const REGISTER_SECRET  = process.env.REGISTER_SECRET || "dcx-ag7k-9mR2-pLw4";  // no longer used for sign-up (that is by email now, auth.mjs)
 
 // ─── Crypto helpers ──────────────────────────────────────────────────────────
 
@@ -58,12 +58,6 @@ const enc = new TextEncoder();
 async function sha256(s) {
   const d = await subtle.digest("SHA-256", enc.encode(s));
   return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, "0")).join("");
-}
-
-function newToken() {
-  const b = new Uint8Array(32);
-  crypto.getRandomValues(b);
-  return "trl_" + btoa(String.fromCharCode(...b)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
 // ─── In-memory store (good for single process, persist to disk) ──────────────
@@ -79,6 +73,8 @@ class Store {
   constructor() {
     this.tokens = new Map();
     this.counters = new Map();
+    this.users = new Map(); // email -> customer (auth.mjs)
+    this.codes = new Map(); // email -> pending sign-in code (hash only)
     this.dirty = false;
     this.saveTimer = null;
     this.load();
@@ -90,6 +86,8 @@ class Store {
       const data = JSON.parse(raw);
       this.tokens = new Map(Object.entries(data.tokens || {}));
       this.counters = new Map(Object.entries(data.counters || {}));
+      this.users = new Map(Object.entries(data.users || {}));
+      this.codes = new Map(Object.entries(data.codes || {}).filter(([, c]) => c.expiresAt > Date.now()));
       console.log(`[store] loaded ${this.tokens.size} tokens, ${this.counters.size} counters`);
     } catch {
       console.log("[store] starting fresh (no state file)");
@@ -105,7 +103,7 @@ class Store {
   save() {
     try {
       mkdirSync(dirname(DATA_FILE), { recursive: true });
-      const data = { tokens: Object.fromEntries(this.tokens), counters: Object.fromEntries(this.counters) };
+      const data = { tokens: Object.fromEntries(this.tokens), counters: Object.fromEntries(this.counters), users: Object.fromEntries(this.users), codes: Object.fromEntries(this.codes) };
       writeFileSync(DATA_FILE, JSON.stringify(data), { mode: 0o600 });
       this.dirty = false;
     } catch (e) {
@@ -121,6 +119,14 @@ class Store {
     }, 3000);
     this.saveTimer.unref?.();
   }
+
+  async getUser(email) { return this.users.get(email); }
+  async putUser(email, rec) { this.users.set(email, rec); this.scheduleSave(); }
+  async userCount() { return this.users.size; }
+  async listUsers() { return [...this.users.values()]; }
+  async getCode(email) { return this.codes.get(email); }
+  async putCode(email, rec) { this.codes.set(email, rec); this.scheduleSave(); }
+  async deleteCode(email) { this.codes.delete(email); this.scheduleSave(); }
 
   async getToken(hash) { return this.tokens.get(hash); }
   async putToken(hash, rec) { this.tokens.set(hash, rec); this.scheduleSave(); }
@@ -316,9 +322,9 @@ async function createHandler(store) {
   const ipDailyMicro     = micro(IP_DAILY_USD);
   const globalDailyMicro = micro(GLOBAL_DAILY_USD);
 
-  const budgetKeys = (hash, ip) => {
+  const budgetKeys = (owner, ip) => {
     const d = today();
-    return [`tok:${hash}:${d}`, `tok:${hash}:total`, `ip:${ip}:${d}`, `glob:${d}`];
+    return [`${owner}:${d}`, `${owner}:total`, `ip:${ip}:${d}`, `glob:${d}`];
   };
   const limits = () => [tokenDailyMicro, tokenTotalMicro, ipDailyMicro, globalDailyMicro];
 
@@ -337,19 +343,37 @@ async function createHandler(store) {
     return normalizeIp(raw);
   }
 
+  // Email sign-in. Invite-only here: nobody gets in unless AUTH_ALLOWED_EMAILS names them.
+  const authCfg = loadAuthConfig(process.env);
+  const auth = createEmailAuth({
+    cfg: authCfg,
+    store,
+    sendCode: createMailer(authCfg),
+    clientIp,
+    inviteOnly: true,
+    describe: () => ({
+      models: modelsCache.data?.map(m => m.id) || FALLBACK_MODELS,
+      limits: { dailyUsd: TOKEN_DAILY_USD, totalUsd: TOKEN_TOTAL_USD },
+      transport: "agent", // the extension uses the /v1/agent bridge with this gateway
+    }),
+  });
+  if (!authCfg.allowedEmails.length) console.warn("[auth] AUTH_ALLOWED_EMAILS is empty — nobody can sign in. Add your address(es).");
+
   async function authenticate(req) {
-    const auth = req.headers.get("authorization") || "";
-    const key = req.headers.get("x-api-key") || (/^Bearer\s+(.+)$/i.exec(auth) || [])[1] || "";
-    if (!key.startsWith("trl_")) return { error: error(401, "authentication_error", "Missing or invalid trial token. Open the extension settings and connect again.") };
+    const header = req.headers.get("authorization") || "";
+    const key = req.headers.get("x-api-key") || (/^Bearer\s+(.+)$/i.exec(header) || [])[1] || "";
+    if (!key.startsWith("trl_")) return { error: error(401, "authentication_error", "Missing or invalid trial token. Sign in again in the extension settings.") };
     const hash = await sha256(key);
     const rec = await store.getToken(hash);
-    if (!rec) return { error: error(401, "authentication_error", "Unknown trial token. Reopen the extension settings.") };
+    if (!rec) return { error: error(401, "authentication_error", "Unknown trial token. Sign in again in the extension settings.") };
     if (rec.revoked) return { error: error(403, "permission_error", "This trial token has been disabled.") };
-    return { hash, rec };
+    const blocked = await auth.refuseBlocked(rec);
+    if (blocked) return { error: blocked };
+    return { hash, rec, owner: budgetOwner(rec, hash) }; // budgets and limits count against the signed-in person
   }
 
-  async function reserve(hash, ip, cost) {
-    const keys = budgetKeys(hash, ip);
+  async function reserve(owner, ip, cost) {
+    const keys = budgetKeys(owner, ip);
     const lim = limits();
     const totals = await Promise.all(keys.map(k => store.add(k, cost)));
     const over = totals.findIndex((t, i) => t > lim[i]);
@@ -407,33 +431,11 @@ async function createHandler(store) {
 
   // ── Routes ──────────────────────────────────────────────────────────────
 
-  /**
-   * 背景：open registration lets anyone burn our Claude Max quota.
-   * 设计意图：require REGISTER_SECRET header to create new trial tokens.
-   * Extension ships with the secret baked in; random visitors can't register.
-   * 约束：existing tokens keep working; only new registrations are gated.
-   */
-  async function register(req, ctx) {
-    const secret = req.headers.get("x-register-secret") || "";
-    if (!REGISTER_SECRET || secret !== REGISTER_SECRET) {
-      return error(403, "permission_error", "Registration requires an invite code.");
-    }
-    if ((await store.tokenCount()) >= MAX_REGISTERED) return error(503, "overloaded_error", "Sign-ups are paused.");
-    const ip = clientIp(req, ctx);
-    const n = await store.add(`reg:${ip}:${today()}`, 1);
-    if (n > REG_PER_IP_DAY) return error(429, "rate_limit_error", "Too many sign-ups from this network today.", { "retry-after": String(secondsUntilMidnight()) });
-    const token = newToken();
-    await store.putToken(await sha256(token), { createdAt: Date.now(), ip });
-    console.log(`[register] new user from ${ip}, total=${await store.tokenCount()}`);
-    const modelList = modelsCache.data?.map(m => m.id) || FALLBACK_MODELS;
-    return json(200, { token, models: modelList, limits: { dailyUsd: TOKEN_DAILY_USD, totalUsd: TOKEN_TOTAL_USD } });
-  }
-
   async function status(req, ctx) {
     const a = await authenticate(req);
     if (a.error) return a.error;
     const ip = clientIp(req, ctx);
-    const keys = budgetKeys(a.hash, ip);
+    const keys = budgetKeys(a.owner, ip);
     const [tokDay, tokTotal] = await Promise.all(keys.slice(0, 2).map(k => store.get(k)));
     return json(200, {
       enabled: true,
@@ -480,22 +482,22 @@ async function createHandler(store) {
     if (a.error) return a.error;
     const ip = clientIp(req, ctx);
 
-    if (!allow(`rpm:tok:${a.hash}`, TOKEN_RPM) || !allow(`rpm:ip:${ip}`, IP_RPM))
+    if (!allow(`rpm:${a.owner}`, TOKEN_RPM) || !allow(`rpm:ip:${ip}`, IP_RPM))
       return error(429, "rate_limit_error", "Too many requests. Slow down.", { "retry-after": "10" });
     if (inflightTotal >= MAX_CONCURRENT)
       return error(503, "overloaded_error", "Service busy. Try again.", { "retry-after": "3" });
 
-    const mine = inflight.get(a.hash) || new Map();
+    const mine = inflight.get(a.owner) || new Map();
     for (const [id, t] of mine) if (Date.now() - t > UPSTREAM_TIMEOUT + 60_000) { mine.delete(id); inflightTotal--; }
     if (mine.size >= MAX_PARALLEL_PER_TOKEN)
       return error(429, "rate_limit_error", "Too many parallel requests. Wait for the current one.", { "retry-after": "2" });
 
     const id = ++seq;
     mine.set(id, Date.now());
-    inflight.set(a.hash, mine);
+    inflight.set(a.owner, mine);
     inflightTotal++;
     let released = false;
-    const release = () => { if (released) return; released = true; if (mine.delete(id)) inflightTotal--; if (!mine.size) inflight.delete(a.hash); };
+    const release = () => { if (released) return; released = true; if (mine.delete(id)) inflightTotal--; if (!mine.size) inflight.delete(a.owner); };
 
     let reservation = null, reserved = 0, settled = false;
     const settle = async (actual, note) => {
@@ -556,7 +558,7 @@ async function createHandler(store) {
       // Reserve budget
       const inputTok = estimateInputTokens(body);
       reserved = reserveMicro(body.model, inputTok, body.max_tokens);
-      const r = await reserve(a.hash, ip, reserved);
+      const r = await reserve(a.owner, ip, reserved);
       if (r.error) { release(); return r.error; }
       reservation = r;
 
@@ -668,7 +670,7 @@ async function createHandler(store) {
     if (a.error) return a.error;
     const ip = clientIp(req, ctx);
 
-    if (!allow(`rpm:tok:${a.hash}`, TOKEN_RPM) || !allow(`rpm:ip:${ip}`, IP_RPM))
+    if (!allow(`rpm:${a.owner}`, TOKEN_RPM) || !allow(`rpm:ip:${ip}`, IP_RPM))
       return error(429, "rate_limit_error", "Too many requests. Slow down.", { "retry-after": "10" });
     if (inflightTotal >= MAX_CONCURRENT)
       return error(503, "overloaded_error", "Service busy. Try again.", { "retry-after": "3" });
@@ -702,7 +704,7 @@ async function createHandler(store) {
     // Budget
     const inputTok = estimateInputTokens(body);
     const reserved = reserveMicro(body.model, inputTok, body.max_tokens);
-    const r = await reserve(a.hash, ip, reserved);
+    const r = await reserve(a.owner, ip, reserved);
     if (r.error) return r.error;
     const reservation = r;
     let settled = false;
@@ -1093,7 +1095,7 @@ async function createHandler(store) {
       const url = new URL(req.url);
       const p = url.pathname;
       if (p === "/health")       res = json(200, { ok: true, inflight: inflightTotal, tokens: await store.tokenCount(), bridges: bridgeSessions.size });
-      else if (p === "/register" && req.method === "POST") res = await register(req, ctx);
+      else if (p === "/register" && req.method === "POST") res = error(410, "invalid_request_error", "Sign-up is by email now. Update the extension and sign in from its settings.");
       else if (p === "/status"   && req.method === "GET")  res = await status(req, ctx);
       else if (p === "/v1/models" && req.method === "GET") res = await models(req);
       else if (p === "/v1/agent" && req.method === "POST") res = await agentBridge(req, ctx);
@@ -1101,7 +1103,7 @@ async function createHandler(store) {
       else if (p === "/admin/sessions" && req.method === "GET") res = await adminSessions(req);
       else if (p === "/admin/command" && req.method === "POST") res = await adminCommand(req);
       else if (p === "/v1/messages" && req.method === "POST") res = await messages(req, ctx);
-      else res = error(404, "invalid_request_error", "Not found.");
+      else res = (await auth.route(req, ctx)) || error(404, "invalid_request_error", "Not found.");
     } catch (e) {
       console.error("[handler]", e);
       res = error(500, "api_error", "Internal error.");

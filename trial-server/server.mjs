@@ -80,6 +80,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const port = Number(process.env.PORT || 8787);
   const server = await serve(handler, { port });
   console.log(`trial gateway on :${port} — models ${cfg.models.join(", ")} — ${cfg.enabled ? "enabled" : "PAUSED"} — data ${process.env.TRIAL_DATA_FILE === "memory" ? "in memory" : dataFile}`);
+  console.log(`sign-in codes: ${cfg.auth.resendKey ? "emailed from " + cfg.auth.mailFrom : "PRINTED TO THIS LOG (no RESEND_API_KEY)"} — ${cfg.auth.allowedEmails.length ? cfg.auth.allowedEmails.length + " invited address(es)/domain(s)" : "open to any address"} — admin API ${cfg.auth.adminToken ? "on" : "off (no ADMIN_TOKEN)"}`);
   for (const sig of ["SIGINT", "SIGTERM"]) {
     process.once(sig, async () => {
       // Stop taking new requests, let running ones finish and record their spend, then save.
