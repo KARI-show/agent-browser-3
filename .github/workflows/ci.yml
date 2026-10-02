@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Build (extension + webview)
+        run: npm run build
+      - name: Unit tests
+        run: npm test
+      - name: Build (browser extension + host)
+        run: node browser/build.mjs --zip && for f in browser/extension/*.js; do node --check "$f"; done
+      - name: Relay syntax
+        run: node --check relay/hub.mjs && node --check relay/validate.mjs
+      - name: Trial gateway syntax
+        run: for f in trial-server/*.mjs; do node --check "$f"; done

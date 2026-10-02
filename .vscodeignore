@@ -1,0 +1,20 @@
+.vscode/**
+src/**
+smoke.mjs
+esbuild.js
+tsconfig.json
+**/*.map
+**/*.ts
+.gitignore
+node_modules/.bin/**
+# dev-only / non-shipping artifacts
+demo/**
+.agent-ide/**
+relay/test-relay.mjs
+relay/build-app.mjs
+**/*.vsix
+**/.DS_Store
+.github/**
+browser/**
+dist-browser/**
+trial-server/**

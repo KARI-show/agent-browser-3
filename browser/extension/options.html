@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link href="theme.css" rel="stylesheet" />
+  <link href="options.css" rel="stylesheet" />
+  <title>Agent Browser — settings</title>
+</head>
+<body>
+  <main>
+    <h1>How the agent runs</h1>
+    <p class="lead">Pick one. You can switch any time — chats are kept.</p>
+
+    <div id="agentStatus" class="status off"><span class="dot"></span><span id="agentStatusText">Checking…</span></div>
+
+    <form id="modeForm" autocomplete="off">
+      <label class="mode" id="modeTrial">
+        <input type="radio" name="mode" value="trial" />
+        <span><b>Free trial</b> <span class="hint">— no setup. A small daily allowance; your requests go through our service to Claude.</span>
+          <span class="hint block" id="trialStatus"></span></span>
+      </label>
+
+      <label class="mode">
+        <input type="radio" name="mode" value="api" />
+        <span><b>My API key</b> <span class="hint">— runs right in this extension, billed to your Anthropic account.</span></span>
+      </label>
+      <div class="fields" id="apiFields">
+        <label>Anthropic API key
+          <input id="apiKey" type="password" placeholder="sk-ant-…" spellcheck="false" autocomplete="new-password" />
+        </label>
+        <div class="grid two">
+          <label>Effort <span class="hint">(how long it thinks per step)</span>
+            <select id="effort">
+              <option value="low">Low — fastest</option>
+              <option value="medium">Medium (default)</option>
+              <option value="high">High</option>
+              <option value="xhigh">Extra high</option>
+              <option value="max">Max — slowest</option>
+            </select>
+          </label>
+          <label>Workspace ID <span class="hint">(only if your key isn't tied to a workspace)</span>
+            <input id="workspaceId" placeholder="wrkspc_…" spellcheck="false" />
+          </label>
+        </div>
+        <label>API address <span class="hint">(optional — e.g. a gateway; must be https://)</span>
+          <input id="baseUrl" placeholder="https://api.anthropic.com" spellcheck="false" />
+        </label>
+        <div class="actions">
+          <button type="button" id="testKey">Test key</button>
+          <span id="keyResult" class="result" role="status"></span>
+        </div>
+        <p class="hint">Stored on this computer in this browser profile's extension storage; only ever sent to the address above. Get a key at console.anthropic.com.</p>
+      </div>
+
+      <label class="mode">
+        <input type="radio" name="mode" value="subscription" />
+        <span><b>My Claude subscription</b> <span class="hint">— uses the Claude Code signed in on this computer. Needs the small local helper.</span></span>
+      </label>
+      <div class="fields" id="subFields">
+        <div id="hostStatus" class="hint">Not checked yet.</div>
+        <div class="actions">
+          <button type="button" id="hostCheck">Check connection</button>
+          <button type="button" id="hostLogin">Sign in to Claude</button>
+        </div>
+        <label>Install the helper (Windows, PowerShell)
+          <input id="installCmd" readonly value="irm https://raw.githubusercontent.com/KARI-show/agent-ide-setup/main/install-browser.ps1 | iex" />
+        </label>
+        <div class="actions"><button type="button" id="copyInstall">Copy command</button></div>
+        <p class="hint">Sign-in happens in Anthropic's own flow (claude.ai) inside Claude Code; this extension never sees or stores your Claude login.</p>
+      </div>
+
+      <div class="actions">
+        <button type="submit" id="saveMode" class="primary">Save</button>
+        <span id="modeResult" class="result" role="status"></span>
+      </div>
+    </form>
+
+    <hr />
+
+    <h1>Proxy for this browser profile</h1>
+    <p class="lead">
+      Sends all traffic of <b>this browser profile</b> through your proxy. For a separate address for the agent,
+      create a dedicated Chrome/Edge profile, install Agent Browser there and set the proxy here.
+    </p>
+
+    <div id="status" class="status off"><span class="dot"></span><span id="statusText">Proxy is off</span></div>
+
+    <div class="grid two" id="presetRow">
+      <label>Saved proxies
+        <select id="presetSelect">
+          <option value="">— pick a saved proxy —</option>
+        </select>
+      </label>
+      <div class="actions" style="align-self: end;">
+        <button type="button" id="presetLoad">Load</button>
+        <button type="button" id="presetDelete">Delete</button>
+      </div>
+    </div>
+    <div class="grid two">
+      <label>Save the fields below as
+        <input id="presetName" placeholder="e.g. Home, Client A" spellcheck="false" />
+      </label>
+      <div class="actions" style="align-self: end;">
+        <button type="button" id="presetSave">Save as new proxy</button>
+      </div>
+    </div>
+    <p class="hint" id="presetResult"></p>
+
+    <form id="form" autocomplete="off">
+      <label class="switch"><input type="checkbox" id="enabled" /> Use a proxy</label>
+
+      <div class="grid">
+        <label>Type
+          <select id="type">
+            <option value="http">HTTP</option>
+            <option value="https">HTTPS</option>
+            <option value="socks5">SOCKS5</option>
+          </select>
+        </label>
+        <label>Host <input id="host" placeholder="proxy.example.com" spellcheck="false" /></label>
+        <label>Port <input id="port" type="number" min="1" max="65535" placeholder="8080" /></label>
+        <label>Username <input id="username" spellcheck="false" autocomplete="off" /></label>
+        <label>Password <input id="password" type="password" autocomplete="new-password" /></label>
+      </div>
+
+      <label>Don't proxy these hosts <span class="hint">(comma separated; local addresses are always direct)</span>
+        <input id="bypass" placeholder="*.internal.example.com, 10.0.0.0/8" spellcheck="false" />
+      </label>
+
+      <label class="switch"><input type="checkbox" id="blockCookies" /> Block third-party cookies while the proxy is on</label>
+      <p class="hint">While a proxy is on, WebRTC is restricted so it can't reveal your real IP address around the proxy.</p>
+
+      <div class="actions">
+        <button type="submit" id="save" class="primary">Save</button>
+        <button type="button" id="test">Test connection</button>
+        <span id="testResult" class="result" role="status"></span>
+      </div>
+    </form>
+
+    <p class="hint">
+      The password is stored on this computer, in this browser profile's extension storage. SOCKS5 with a username and
+      password is handled by the local agent host (it must be installed); other types are handled by the browser itself.
+    </p>
+
+    <hr />
+
+    <h1 id="remote">Remote: phone &amp; Telegram</h1>
+    <p class="lead">
+      Work with this browser's agent from your phone — no VS Code needed. Works while the side panel is
+      open (the agent lives there); 🛰 in the panel turns it on and off.
+    </p>
+
+    <div id="remoteStatus" class="status off"><span class="dot"></span><span id="remoteStatusText">Off</span></div>
+
+    <form id="remoteForm" autocomplete="off">
+      <div class="grid two">
+        <label>Telegram bot token <span class="hint">(new bot from @BotFather)</span>
+          <input id="tgToken" type="password" placeholder="123456789:AA…" autocomplete="new-password" spellcheck="false" />
+        </label>
+        <label>Your Telegram user id <span class="hint">(numbers, from @userinfobot)</span>
+          <input id="tgUser" inputmode="numeric" placeholder="7407853189" spellcheck="false" />
+        </label>
+      </div>
+      <p class="hint">The bot answers only this user id, in a private chat. Use a bot of its own — Telegram lets only one program read a bot, so not the one VS Code's Remote runs.</p>
+
+      <label class="mode">
+        <input type="radio" name="remoteMode" value="bot" />
+        <span><b>Telegram chat</b> <span class="hint">— nothing to install. Message your bot a task; it answers in the chat, asks for approvals with buttons, /chats switches chats, /stop stops.</span></span>
+      </label>
+      <label class="mode">
+        <input type="radio" name="remoteMode" value="helper" />
+        <span><b>Telegram + web app</b> <span class="hint">— the full chat UI on the phone (Telegram Mini App or any browser). The local helper runs a relay and a public tunnel — install it under “My Claude subscription” above. The bot is optional here.</span></span>
+      </label>
+      <label class="mode">
+        <input type="radio" name="remoteMode" value="relay" />
+        <span><b>My own relay</b> <span class="hint">— join a relay you run (<code>relay/hub.mjs</code>, with <code>relay/bot.mjs</code> for Telegram).</span></span>
+      </label>
+      <div class="fields" id="relayFields">
+        <label>Relay address
+          <input id="relayUrl" placeholder="wss://relay.example.com" spellcheck="false" />
+        </label>
+        <label>Relay token <span class="hint">(the relay's RELAY_TOKEN)</span>
+          <input id="relayToken" type="password" autocomplete="new-password" spellcheck="false" />
+        </label>
+        <label>Public web address <span class="hint">(optional — what the phone opens; defaults to the relay address)</span>
+          <input id="relayPublicUrl" placeholder="https://relay.example.com" spellcheck="false" />
+        </label>
+      </div>
+
+      <label class="switch"><input type="checkbox" id="remoteEnabled" /> On — start whenever the side panel is open</label>
+      <div class="actions">
+        <button type="submit" class="primary">Save</button>
+        <span id="remoteResult" class="result" role="status"></span>
+      </div>
+    </form>
+    <p class="hint">Tokens are stored in this browser profile's extension storage. Anyone with the bot or relay token can drive the agent — keep them private.</p>
+
+    <hr />
+
+    <h1>Private sessions</h1>
+    <p class="lead">
+      Ask the agent to open a private (Incognito) window when you want a clean session — no cookies, storage
+      or history shared with your other tabs — without changing anything here. It's a separate browser tool
+      the agent uses on request ("open this in a private window").
+    </p>
+    <div id="incognitoStatus" class="status off"><span class="dot"></span><span id="incognitoStatusText">Checking…</span></div>
+    <p class="hint">
+      Chrome keeps this off by default for every extension. Turn it on once at
+      <code>chrome://extensions</code> → Agent Browser → Details → "Allow in Incognito" — otherwise the
+      private-window tool will fail and say so.
+    </p>
+  </main>
+  <script src="agentLocal.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>

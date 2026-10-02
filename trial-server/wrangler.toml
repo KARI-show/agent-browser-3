@@ -1,0 +1,24 @@
+# Cloudflare deployment of the trial gateway.
+#   1. npm i -g wrangler && wrangler login
+#   2. wrangler d1 create agent-trial            → paste the database_id below
+#   3. wrangler d1 execute agent-trial --remote --file=schema.sql
+#   4. wrangler secret put ANTHROPIC_API_KEY     (and ANTHROPIC_WORKSPACE_ID if your key needs it)
+#   5. wrangler deploy                           → the URL it prints is AGENT_TRIAL_URL for the extension build
+# Run these from the trial-server/ directory. Needs a Workers Paid plan for real traffic (CPU time).
+name = "agent-trial-gateway"
+main = "worker.mjs"
+compatibility_date = "2026-09-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "agent-trial"
+database_id = "REPLACE_WITH_YOUR_D1_ID"
+
+# Non-secret settings (all optional — defaults are in README.md).
+[vars]
+# TRIAL_MODELS = "claude-haiku-4-5,claude-sonnet-5-5"
+# TRIAL_TOKEN_DAILY_USD = "0.25"
+# TRIAL_TOKEN_TOTAL_USD = "1.00"
+# TRIAL_IP_DAILY_USD = "0.75"
+# TRIAL_GLOBAL_DAILY_USD = "20"
+# ALLOWED_ORIGINS = "chrome-extension://ppakaagcjnojicbdebhgkpjgikclbnlf"

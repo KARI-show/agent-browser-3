@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <link href="theme.css" rel="stylesheet" />
+  <link href="style.css" rel="stylesheet" />
+  <link href="sidepanel.css" rel="stylesheet" />
+  <title>Agent Browser</title>
+</head>
+<!-- Same markup as the VS Code panel (src/extension.ts html()) so the shared
+     main.js finds every element; editor-only controls are hidden in sidepanel.css. -->
+<body class="browser" data-avatar="avatar.png">
+  <div id="bar">
+    <button id="newBtn" class="icon-btn primary" title="New chat" aria-label="New chat">＋</button>
+    <button id="branchBtn" class="icon-btn" title="Branch this chat" aria-label="Branch this chat">⑂</button>
+    <span class="bar-title">Kari · Browser</span>
+    <span class="bar-spacer"></span>
+    <div id="limits" class="limits hidden" aria-label="Plan usage remaining"></div>
+    <button id="autofixBtn" class="toggle-btn" aria-pressed="false">🩺</button>
+    <button id="superBtn" class="toggle-btn" aria-pressed="false">🧰</button>
+    <button id="orchBtn" class="toggle-btn">🧭</button>
+    <button id="remoteBtn" class="toggle-btn" aria-pressed="false">🛰</button>
+    <div id="ctx-wrap">
+      <button id="ctxBtn" class="toggle-btn" aria-haspopup="true">📑</button>
+      <div id="ctx-menu" role="menu"></div>
+    </div>
+    <span id="ctx-pill" class="ctx-pill hidden" title="Context used last turn"></span>
+    <button id="gitBtn" class="icon-btn">⎇</button>
+    <div id="settings-wrap">
+      <button id="settingsBtn" class="icon-btn" aria-haspopup="true">⚙</button>
+      <div id="settings-menu" role="menu"></div>
+    </div>
+    <button id="cmdBtn" class="icon-btn" title="Quick commands" aria-label="Quick commands">⚡</button>
+    <button id="proxyBtn" class="icon-btn" title="Settings: API key, proxy" aria-label="Settings">🌐</button>
+    <button id="chatsBtn" class="icon-btn" title="All chats" aria-label="All chats" aria-haspopup="true">☰</button>
+  </div>
+  <div id="auth-banner" class="hidden" role="alert"></div>
+  <div id="tabs" role="tablist" aria-label="Chats"></div>
+  <div id="chats" class="hidden"></div>
+  <!-- Commands catalog -->
+  <div id="commands-panel" class="hidden">
+    <div class="cmd-header">
+      <span>⚡ Quick Commands</span>
+      <button id="cmdClose" class="icon-btn" title="Close">✕</button>
+    </div>
+    <div class="cmd-search">
+      <input id="cmdSearch" type="text" placeholder="Search commands..." />
+    </div>
+    <div id="cmdList" class="cmd-list"></div>
+  </div>
+  <div id="log" role="log" aria-live="polite" aria-label="Conversation" aria-atomic="false"></div>
+  <button id="scrollBtn" class="hidden" title="Jump to latest" aria-label="Jump to latest message">↓</button>
+  <div id="changes-bar" class="hidden">
+    <button id="changes-badge">✎ Changes</button>
+    <div id="changes-pop"></div>
+  </div>
+  <div id="composer">
+    <div id="slash" class="hidden"></div>
+    <div id="queue" class="hidden"></div>
+    <div id="attachments" class="hidden"></div>
+    <div id="ctxbar" class="ctxbar hidden">
+      <div class="ctxbar-track"><div class="ctxbar-fill"></div></div>
+      <span class="ctxbar-text"></span>
+      <button id="compactBtn" class="ctxbar-compact hidden" title="Summarize the chat to free up context" aria-label="Compact the chat to free up context">Compact</button>
+    </div>
+    <div id="input-card">
+      <textarea id="input" rows="1" placeholder="What should I do in the browser?   ⏎ send · ⇧⏎ newline · Ctrl+V image"></textarea>
+      <div id="toolbar">
+        <div id="mode-wrap">
+          <button id="modeBtn" class="mode-btn" title="Mode" aria-label="Agent mode" aria-haspopup="true">Agent ▾</button>
+          <div id="mode-menu"></div>
+        </div>
+        <div id="model-wrap">
+          <button id="modelBtn" class="mode-btn" title="Model" aria-label="Model" aria-haspopup="true">Default ▾</button>
+          <div id="model-menu"></div>
+        </div>
+        <button id="attachBtn" class="icon-btn" title="Attach file" aria-label="Attach file">📎</button>
+        <div id="rules-wrap">
+          <button id="rulesBtn" class="mode-btn rules-btn"></button>
+          <div id="rules-menu"></div>
+        </div>
+        <span class="toolbar-spacer"></span>
+        <button id="send" title="Send (Enter)" aria-label="Send message">Send</button>
+        <button id="stop" class="hidden" aria-label="Stop the agent">Stop</button>
+      </div>
+    </div>
+  </div>
+  <script src="converter.js"></script>
+  <script src="browserTools.js"></script>
+  <script src="agentLocal.js"></script>
+  <script src="shim.js"></script>
+  <script src="main.js"></script>
+  <script src="relay.js"></script>
+  <script src="telegram.js"></script>
+  <script src="commands.js"></script>
+  <script src="profiles.js?v=3"></script>
+</body>
+</html>

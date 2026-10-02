@@ -1,0 +1,118 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Fixture Main</title>
+<style>
+  body { font-family: sans-serif; margin: 16px; }
+  #menu { display: inline-block; padding: 4px 8px; border: 1px solid #999; }
+  #menu .sub { display: none; }
+  #menu:hover .sub { display: block; }
+  #cover-wrap { position: relative; width: 220px; height: 40px; }
+  #covered { width: 220px; height: 40px; }
+  #overlay { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.3); }
+  #dragsrc, #drop, #zone-b { width: 200px; height: 40px; border: 1px solid #999; margin: 4px 0; }
+  .spacer { height: 3000px; }
+</style>
+</head>
+<body>
+<h1>Fixture Main</h1>
+<p id="status">idle</p>
+
+<button id="inc" onclick="count.textContent = String(+count.textContent + 1)">Increment</button>
+<span id="count">0</span>
+<button id="dbl" ondblclick="dblstatus.textContent = 'double-clicked'">Double me</button>
+<span id="dblstatus"></span>
+
+<form id="f" action="/search" method="get">
+  <label for="q">Search query</label> <input id="q" name="q" placeholder="Type here">
+  <label for="bio">Bio</label> <textarea id="bio" name="bio"></textarea>
+  <label for="color">Color</label>
+  <select id="color" name="color"><option value="r">Red</option><option value="g">Green</option><option value="b">Blue</option></select>
+  <label for="pw">Password</label> <input id="pw" type="password" name="pw">
+  <label for="email">Email</label> <input id="email" type="email" name="email">
+  <label><input id="agree" type="checkbox" name="agree"> Agree</label>
+  <label for="up">Attachment</label> <input id="up" type="file">
+  <button id="submit" type="submit">Submit</button>
+</form>
+
+<div id="editor" contenteditable="true" aria-label="Rich editor" style="border:1px solid #999;min-height:24px"></div>
+
+<div id="menu"><button id="menubtn" type="button">Menu</button><div class="sub"><a href="#secret">Secret item</a></div></div>
+
+<div id="cover-wrap">
+  <button id="covered" onclick="coveredstatus.textContent = 'covered-clicked'">Covered button</button>
+  <div id="overlay">overlay</div>
+</div>
+<span id="coveredstatus"></span>
+
+<div id="dragsrc" draggable="true">Drag me</div>
+<div id="drop">Drop zone</div>
+<div id="zone-b" tabindex="0">Zone B</div>
+
+<a id="next" href="/page2.html">Go to page two</a>
+<a id="blank" href="/page2.html?blank=1" target="_blank">Open in new tab</a>
+
+<table id="t">
+  <tr><th>Name</th><th>Age</th></tr>
+  <tr><td>Ann</td><td>31</td></tr>
+  <tr><td>Bob</td><td>42</td></tr>
+</table>
+
+<div id="blob" data-content="{{PAYLOAD}}">resource data</div>
+
+<shadow-box></shadow-box>
+
+<iframe id="xframe" src="{{FRAME_ORIGIN}}/frame.html" width="320" height="80"></iframe>
+
+<button id="later" onclick="loadLater()">Load later</button>
+<p id="loading">Loading…</p>
+
+<p id="filler">Filler paragraph for the text budget. Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.</p>
+
+<div class="spacer"></div>
+<p id="bottom">Bottom of page</p>
+
+<script>
+  customElements.define("shadow-box", class extends HTMLElement {
+    constructor() {
+      super();
+      const root = this.attachShadow({ mode: "open" });
+      root.innerHTML = '<button id="sb">Shadow button</button> <span id="sc">0</span>';
+      root.getElementById("sb").onclick = () => {
+        const c = root.getElementById("sc");
+        c.textContent = String(+c.textContent + 1);
+      };
+    }
+  });
+
+  function loadLater() {
+    setTimeout(() => {
+      const p = document.createElement("p");
+      p.id = "late";
+      p.textContent = "Loaded later";
+      document.body.insertBefore(p, document.getElementById("bottom"));
+      document.getElementById("loading").remove();
+    }, 1200);
+  }
+
+  window.__drops = [];
+  for (const id of ["drop", "zone-b"]) {
+    const z = document.getElementById(id);
+    z.addEventListener("dragover", (e) => e.preventDefault());
+    z.addEventListener("drop", (e) => {
+      e.preventDefault();
+      window.__drops.push(id);
+      z.textContent = "Dropped on " + id;
+    });
+  }
+  document.getElementById("dragsrc").addEventListener("dragstart", (e) => e.dataTransfer.setData("text/plain", "drag"));
+
+  window.__upload = null;
+  document.getElementById("up").addEventListener("change", async (e) => {
+    const f = e.target.files[0];
+    window.__upload = f ? { name: f.name, type: f.type, size: f.size, text: await f.text() } : null;
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+node_modules/
+dist/
+*.vsix
+.vscode-test/
+
+# screenshots & local runtime artifacts
+*.png
+.agent-ide/
+.test-dist/
+.playwright-mcp/
+.agent-ide/
+.sqlite-probe/
+
+# browser extension build output
+dist-browser/
+trial-server/data/

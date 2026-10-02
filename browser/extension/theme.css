@@ -1,0 +1,73 @@
+/* In a VS Code webview the --vscode-* variables come from the editor theme; in
+   the side panel they're undefined, so define them here (loaded before
+   style.css). Dark mirrors relay/build-app.mjs THEME; light follows the OS. */
+:root {
+  color-scheme: dark;
+  --vscode-font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+  --vscode-font-size: 13px;
+  --vscode-editor-font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  --vscode-foreground: #cccccc;
+  --vscode-descriptionForeground: #9d9d9d;
+  --vscode-sideBar-background: #1b1b1f;
+  --vscode-editor-background: #1e1e1e;
+  --vscode-editorWidget-background: #252526;
+  --vscode-panel-border: rgba(255, 255, 255, 0.12);
+  --vscode-focusBorder: #4aa3ff;
+  --vscode-textLink-foreground: #4aa3ff;
+  --vscode-terminal-background: #0d1117;
+  --vscode-terminal-foreground: #d4d4d4;
+  --vscode-button-background: #0e639c;
+  --vscode-button-foreground: #ffffff;
+  --vscode-button-hoverBackground: #1177bb;
+  --vscode-button-secondaryBackground: #3a3d41;
+  --vscode-button-secondaryForeground: #ffffff;
+  --vscode-input-background: #2a2a2e;
+  --vscode-input-foreground: #e6edf3;
+  --vscode-input-border: rgba(255, 255, 255, 0.14);
+  --vscode-list-hoverBackground: rgba(255, 255, 255, 0.06);
+  --vscode-toolbar-hoverBackground: rgba(255, 255, 255, 0.1);
+  --vscode-tab-activeBackground: rgba(255, 255, 255, 0.1);
+  --vscode-tab-inactiveForeground: #9d9d9d;
+  --vscode-tab-activeForeground: #ffffff;
+  --vscode-errorForeground: #f85149;
+  --vscode-testing-iconPassed: #3fb950;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --vscode-foreground: #1f2328;
+    --vscode-descriptionForeground: #656d76;
+    --vscode-sideBar-background: #f7f7f8;
+    --vscode-editor-background: #ffffff;
+    --vscode-editorWidget-background: #ffffff;
+    --vscode-panel-border: rgba(0, 0, 0, 0.1);
+    --vscode-focusBorder: #0969da;
+    --vscode-textLink-foreground: #0969da;
+    --vscode-terminal-background: #f6f8fa;
+    --vscode-terminal-foreground: #1f2328;
+    --vscode-button-background: #0969da;
+    --vscode-button-foreground: #ffffff;
+    --vscode-button-hoverBackground: #0860ca;
+    --vscode-button-secondaryBackground: #e7e9ec;
+    --vscode-button-secondaryForeground: #1f2328;
+    --vscode-input-background: #ffffff;
+    --vscode-input-foreground: #1f2328;
+    --vscode-input-border: rgba(0, 0, 0, 0.15);
+    --vscode-list-hoverBackground: rgba(0, 0, 0, 0.04);
+    --vscode-toolbar-hoverBackground: rgba(0, 0, 0, 0.06);
+    --vscode-tab-activeBackground: rgba(0, 0, 0, 0.06);
+    --vscode-tab-inactiveForeground: #656d76;
+    --vscode-tab-activeForeground: #1f2328;
+    --vscode-errorForeground: #cf222e;
+    --vscode-testing-iconPassed: #1a7f37;
+  }
+}
+
+html,
+body {
+  height: 100%;
+}
+body {
+  margin: 0;
+}
