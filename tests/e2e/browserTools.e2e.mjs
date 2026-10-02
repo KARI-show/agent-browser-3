@@ -839,7 +839,7 @@ test("undeclared: browser_download_open / browser_cache_extract / browser_networ
 
 test("every tool declared in browser/host/tools.ts was exercised", { skip }, () => {
   const declared = [...readFileSync(join(root, "browser", "host", "tools.ts"), "utf8").matchAll(/name: "(browser_\w+)"/g)].map((m) => m[1]);
-  assert.equal(declared.length, 38);
+  assert.equal(declared.length, 43);
   assert.deepEqual(declared.filter((n) => !exercised.has(n)), []);
 });
 
