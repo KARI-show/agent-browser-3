@@ -5,6 +5,8 @@ dist/
 
 # screenshots & local runtime artifacts
 *.png
+# …but not the shipped icons (package.json, the browser manifest and the panels load them)
+!media/*.png
 .agent-ide/
 .test-dist/
 .playwright-mcp/

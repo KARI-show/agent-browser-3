@@ -29,9 +29,16 @@ mkdirSync(join(out, "host"), { recursive: true });
 
 // Extension: our side-panel files + the shared UI from media/.
 cpSync(join(here, "extension"), join(out, "extension"), { recursive: true });
-for (const f of ["main.js", "style.css", "avatar.png", "icon.png"]) {
+if (!existsSync(join(root, "media", "icon.png"))) {
+  // The manifest names it: without it Chrome refuses to load the extension at all.
+  console.error("✗ media/icon.png is missing — the extension can't load without its icon. Put the 128×128 icon there.");
+  process.exit(1);
+}
+for (const f of ["main.js", "style.css", "icon.png"]) {
   cpSync(join(root, "media", f), join(out, "extension", f));
 }
+// Optional, like in the VS Code panel and the web app: without it the header shows the name instead.
+if (existsSync(join(root, "media", "avatar.png"))) cpSync(join(root, "media", "avatar.png"), join(out, "extension", "avatar.png"));
 
 // Built-in agent (runs inside the extension with the user's API key). Its tool
 // list is generated from the same zod declarations the host uses.
