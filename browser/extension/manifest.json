@@ -1,0 +1,61 @@
+{
+  "manifest_version": 3,
+  "name": "Agent Browser",
+  "version": "0.1.0",
+  "description": "Claude agent in your browser's side panel — reads pages, clicks, types and switches tabs for you. Works right in the extension with your API key.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmK0M8vYbHk62PY7GEujR0ZxYAOXDX4vqI3fMQ/myd80RHgQ22DPssE0BZynMunn0WE5aBHUVrqaECka9QWjRvRoavP/MaUKs11nQyWmlsaES9DT3YpGmkzI1dyESOsZUoDTXRacCn7SW+ilyreRDdIsJ7cNFMVlclj0jMpBXZ0O9VUdAF4YB9oWmPBDEoP2LgEXX9PocCtAQ/Qz+iP3Sx3Smd8irg1M0Z+eS1PyLsjdsRZsNM+UQ79Pl/euaApV17YI/eo9QLxnSlA2Q5sxxuOh1WwCDLlxZX2MSk9f0lKzPP/lX86ViEMyuv8YNtO2ajL9OdMqWrfzCNMkryOmJzwIDAQAB",
+  "permissions": [
+    "sidePanel",
+    "nativeMessaging",
+    "tabs",
+    "scripting",
+    "storage",
+    "debugger",
+    "proxy",
+    "webRequest",
+    "webRequestAuthProvider",
+    "privacy",
+    "unlimitedStorage",
+    "cookies",
+    "downloads",
+    "downloads.open"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "Agent Browser",
+    "default_icon": "icon.png"
+  },
+  "icons": {
+    "128": "icon.png"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; img-src 'self' data: blob:; frame-src 'none'; base-uri 'none'; form-action 'none'"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["fp-bridge.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["inject-fingerprint.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    }
+  ]
+}

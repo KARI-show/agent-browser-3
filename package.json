@@ -1,0 +1,316 @@
+{
+  "name": "agent-ide",
+  "displayName": "Agent IDE",
+  "description": "Claude-Code-style AI agent in your editor: parallel chats, live diffs, checkpoints, context control — and remote control from your phone & Telegram.",
+  "version": "0.0.68",
+  "publisher": "johnnysilverhe",
+  "private": true,
+  "icon": "media/icon.png",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/KARI-show/agent-ide.git"
+  },
+  "bugs": {
+    "url": "https://github.com/KARI-show/agent-ide/issues"
+  },
+  "homepage": "https://github.com/KARI-show/agent-ide#readme",
+  "keywords": [
+    "ai",
+    "agent",
+    "claude",
+    "anthropic",
+    "assistant",
+    "chat",
+    "remote"
+  ],
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      {
+        "command": "agentIde.open",
+        "title": "Agent IDE: Open Panel"
+      },
+      {
+        "command": "agentIde.newChat",
+        "title": "Agent IDE: New Chat"
+      },
+      {
+        "command": "agentIde.doctor",
+        "title": "Agent IDE: Doctor (health check)"
+      },
+      {
+        "command": "agentIde.exportConversation",
+        "title": "Agent IDE: Export Conversation to Markdown"
+      },
+      {
+        "command": "agentIde.restoreCheckpoint",
+        "title": "Agent IDE: Restore Checkpoint…"
+      },
+      {
+        "command": "agentIde.showUsage",
+        "title": "Agent IDE: Show Session Usage"
+      },
+      {
+        "command": "agentIde.remote",
+        "title": "Agent IDE: Remote (share chat to web)"
+      },
+      {
+        "command": "agentIde.addSelectionToChat",
+        "title": "Agent IDE: Add Selection to Chat"
+      },
+      {
+        "command": "agentIde.gitCommit",
+        "title": "Agent IDE: Commit Changes (AI message)"
+      },
+      {
+        "command": "agentIde.orchestrate",
+        "title": "Agent IDE: Orchestrate (background multi-agent window)"
+      },
+      {
+        "command": "agentIde.showLogs",
+        "title": "Agent IDE: Show Logs"
+      },
+      {
+        "command": "agentIde.startLocalModel",
+        "title": "Agent IDE: Start Local Model (hybrid engine)"
+      },
+      {
+        "command": "agentIde.stopLocalModel",
+        "title": "Agent IDE: Stop Local Model (back to Claude)"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "agentIde.addSelectionToChat",
+          "group": "9_cutcopypaste",
+          "when": "editorTextFocus"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "agentIde.open",
+        "key": "ctrl+alt+a",
+        "mac": "cmd+alt+a"
+      },
+      {
+        "command": "agentIde.newChat",
+        "key": "ctrl+alt+n",
+        "mac": "cmd+alt+n"
+      },
+      {
+        "command": "agentIde.addSelectionToChat",
+        "key": "ctrl+alt+k",
+        "mac": "cmd+alt+k",
+        "when": "editorTextFocus"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "agentIde",
+          "title": "Agent IDE",
+          "icon": "media/robot.svg"
+        }
+      ]
+    },
+    "views": {
+      "agentIde": [
+        {
+          "type": "webview",
+          "id": "agentIde.panel",
+          "name": "Agent",
+          "icon": "media/robot.svg"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Agent IDE",
+      "properties": {
+        "agentIde.assistantName": {
+          "type": "string",
+          "default": "Kari",
+          "description": "Display name of the assistant in the chat (header + reply labels)."
+        },
+        "agentIde.autoCompact": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically compact (summarize) a chat when its context window crosses ~85%, instead of waiting for it to overflow mid-task."
+        },
+        "agentIde.shadowGit": {
+          "type": "boolean",
+          "default": true,
+          "description": "Deep checkpoints: snapshot the whole workspace into a shadow git repo at each turn start, so even files changed by terminal commands can be restored. Requires git; the first snapshot of a big repo can take a moment."
+        },
+        "agentIde.autoResume": {
+          "type": "boolean",
+          "default": true,
+          "description": "Self-healing: when a turn stalls (watchdog) or dies on a transient failure mid-stream, automatically resume the session and continue — up to 2 times per task. A manual message resets the budget."
+        },
+        "agentIde.stallTimeoutSec": {
+          "type": "number",
+          "default": 300,
+          "description": "Watchdog: interrupt a run that has streamed nothing (no text/thinking/tools) for this many seconds. Keep generous — approval waits also look silent."
+        },
+        "agentIde.model": {
+          "type": "string",
+          "default": "default",
+          "description": "Default model. The dropdown is populated live from the models your account supports."
+        },
+        "agentIde.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "ANTHROPIC_API_KEY. Leave empty to use the environment / claude login."
+        },
+        "agentIde.baseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "ANTHROPIC_BASE_URL override. Point at a translation proxy to use local models (LM Studio) later. Empty = Anthropic API."
+        },
+        "agentIde.showStatusBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the Agent IDE status-bar HUD (live state, active model, and running session cost)."
+        },
+        "agentIde.includeEditorContext": {
+          "type": "boolean",
+          "default": true,
+          "description": "Master switch: auto-include editor context (active file + selection) with each message so 'fix this' needs no explanation. Toggle from the panel toolbar too."
+        },
+        "agentIde.contextOpenTabs": {
+          "type": "boolean",
+          "default": false,
+          "description": "Also include the list of open editor tabs in the auto-context."
+        },
+        "agentIde.contextProblems": {
+          "type": "boolean",
+          "default": false,
+          "description": "Also include current workspace problems (errors/warnings) in the auto-context."
+        },
+        "agentIde.autoFixDiagnostics": {
+          "type": "boolean",
+          "default": false,
+          "description": "After the agent edits files, read the editor's diagnostics for those files and automatically ask the agent to fix any errors (bounded to a few rounds)."
+        },
+        "agentIde.testCommand": {
+          "type": "string",
+          "default": "",
+          "description": "Optional test/build command run after a clean auto-fix pass (requires autoFixDiagnostics). On failure, its output is fed back to the agent. E.g. 'npm test'."
+        },
+        "agentIde.mcpServers": {
+          "type": "object",
+          "default": {},
+          "description": "MCP server configs forwarded to the agent (extra tools). Same shape as the Claude Agent SDK's mcpServers option, e.g. { \"playwright\": { \"command\": \"npx\", \"args\": [\"@playwright/mcp\"] } }."
+        },
+        "agentIde.relayUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Sync relay URL for remote access (the 'Agent IDE: Remote' command), e.g. ws://1.2.3.4:8790. Run relay/hub.mjs on a host you control."
+        },
+        "agentIde.relayToken": {
+          "type": "string",
+          "default": "",
+          "description": "Shared secret for the sync relay — this is your only auth, so make it long and private. Must match RELAY_TOKEN on the relay."
+        },
+        "agentIde.botToken": {
+          "type": "string",
+          "default": "",
+          "description": "Telegram bot token (from @BotFather). When set with telegramUserId, the 'Remote' command also runs a bot for folder/chat navigation + Mini App."
+        },
+        "agentIde.telegramUserId": {
+          "type": "string",
+          "default": "",
+          "description": "Your Telegram user id (numeric) — the bot only responds to this id (whitelist). Get it from @userinfobot."
+        },
+        "agentIde.cloudflaredPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to a cloudflared binary. Empty = auto (PATH, then download per-platform into ~/.agent-ide/bin)."
+        },
+        "agentIde.superTools": {
+          "type": "boolean",
+          "default": false,
+          "description": "EXPERIMENTAL master switch: give the agent built-in extra tools. Individual modules are toggled from the panel's ⚙ settings."
+        },
+        "agentIde.toolsEyes": {
+          "type": "boolean",
+          "default": true,
+          "description": "Super tools module — Eyes: headless-browser screenshot + rendered DOM."
+        },
+        "agentIde.toolsHands": {
+          "type": "boolean",
+          "default": true,
+          "description": "Super tools module — Hands: managed dev server (start/logs/status/stop)."
+        },
+        "agentIde.toolsMemory": {
+          "type": "boolean",
+          "default": true,
+          "description": "Super tools module — Memory: persistent .agent-ide/memory.md read/write."
+        },
+        "agentIde.toolsScale": {
+          "type": "boolean",
+          "default": true,
+          "description": "Super tools module — Scale: spawn read-only subagents for parallel research."
+        },
+        "agentIde.subagentModel": {
+          "type": "string",
+          "default": "",
+          "description": "Model for subagents/orchestrator workers. Empty = same as the main chat (recommended). They always run on your own subscription — never a separate account."
+        },
+        "agentIde.localModelUpstream": {
+          "type": "string",
+          "default": "http://127.0.0.1:1234/v1",
+          "description": "Hybrid engine: OpenAI-compatible base URL of your local runtime (LM Studio default is http://127.0.0.1:1234/v1; Ollama is http://127.0.0.1:11434/v1)."
+        },
+        "agentIde.localModelPort": {
+          "type": "number",
+          "default": 8787,
+          "description": "Hybrid engine: local port the bundled Anthropic↔OpenAI proxy listens on. agentIde.baseUrl is auto-set to http://127.0.0.1:<this> while the local model is running."
+        },
+        "agentIde.localModelId": {
+          "type": "string",
+          "default": "",
+          "description": "Hybrid engine: override the model id sent upstream. Empty = pass the chat's selected model id through to your local runtime."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.js && node relay/build-app.mjs",
+    "watch": "node esbuild.js --watch",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p browser && tsc --noEmit -p browser/standalone",
+    "test": "node tests/run.mjs",
+    "test:e2e": "npm run build && npm run build:browser && node --test tests/e2e/browserTools.e2e.mjs tests/e2e/remote.e2e.mjs",
+    "check": "npm run typecheck && npm run build && npm run test",
+    "build:browser": "node browser/build.mjs",
+    "package:browser": "node esbuild.js --production && node browser/build.mjs --production --zip",
+    "package": "vsce package --allow-missing-repository --skip-license",
+    "vscode:prepublish": "node esbuild.js --production && node relay/build-app.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.0",
+    "highlight.js": "^11.11.1",
+    "marked": "^12.0.2",
+    "ws": "^8.21.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "^0.129.0",
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.90.0",
+    "@types/ws": "^8.18.1",
+    "esbuild": "^0.21.0",
+    "typescript": "^5.4.0"
+  }
+}

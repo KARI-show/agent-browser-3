@@ -1,0 +1,63 @@
+<!doctype html>
+<html><head><meta charset="utf-8" />
+<link rel="stylesheet" href="/media/style.css" />
+<style>
+  :root{
+    --vscode-font-family: ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+    --vscode-font-size: 13px;
+    --vscode-foreground:#cccccc;
+    --vscode-sideBar-background:#1b1b1f;
+    --vscode-editor-background:#1e1e1e;
+    --vscode-editorWidget-background:#252526;
+    --vscode-panel-border: rgba(255,255,255,.12);
+    --vscode-textLink-foreground:#4aa3ff;
+    --vscode-terminal-background:#0d1117;
+    --vscode-terminal-foreground:#d4d4d4;
+    --vscode-button-background:#0e639c;
+    --vscode-button-foreground:#fff;
+    --vscode-button-hoverBackground:#1177bb;
+    --vscode-button-secondaryBackground:#3a3d41;
+    --vscode-button-secondaryForeground:#fff;
+    --vscode-editor-font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  }
+  body{ height:auto !important; }
+  .log{ display:flex; flex-direction:column; gap:12px; padding:18px; max-width:560px; }
+  h3{ opacity:.5; font-size:.78em; text-transform:uppercase; letter-spacing:.05em; margin:6px 0 0; }
+</style></head>
+<body>
+<div class="log">
+  <h3>terminal — awaiting approval (title = description)</h3>
+  <div class="tool-card enter running tool-term await-approval">
+    <div class="tool-head">
+      <span class="tool-status pending">?</span>
+      <span class="tool-name">🖥 Restart panel</span>
+    </div>
+    <div class="term">
+      <div class="term-cmd"><span class="term-prompt">$</span> echo y | plink -pw "***" root@159.100.6.83 "pm2 restart panel" 2&gt;&amp;1</div>
+      <div class="term-out await">awaiting approval…</div>
+    </div>
+    <div class="approval-actions">
+      <button>Allow</button>
+      <button class="secondary">Deny</button>
+    </div>
+  </div>
+
+  <h3>terminal — done ✓ (title = description)</h3>
+  <div class="tool-card enter tool-ok tool-term">
+    <div class="tool-head">
+      <span class="tool-status ok">✓</span>
+      <span class="tool-name">🖥 Restart panel</span>
+    </div>
+    <div class="term">
+      <div class="term-cmd"><span class="term-prompt">$</span> echo y | plink -pw "***" root@159.100.6.83 "pm2 restart panel" 2&gt;&amp;1</div>
+      <div class="term-out filled">[PM2] Applying action restartProcessId on app [panel]
+[PM2] [panel](2) ✓
+┌────┬──────────┬─────────┬─────────┐
+│ id │ name     │ status  │ cpu     │
+├────┼──────────┼─────────┼─────────┤
+│ 2  │ panel    │ online  │ 0%      │
+└────┴──────────┴─────────┴─────────┘</div>
+    </div>
+  </div>
+</div>
+</body></html>
