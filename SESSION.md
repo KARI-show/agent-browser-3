@@ -54,3 +54,23 @@ relay + tunnel + bot for the full Mini App. Also nothing run/committed yet.
   ToS/ban risk, left untouched.
 - `media/main.js.map` is committed and changes on every build → untrack it (vsix excludes maps).
 - `browser_network_log` (undeclared) is a stub; `cdpKey` sends wrong code/VK for digits/punctuation.
+
+## Debug pass (2026-10-02, branch claude/keen-ride-w4vlsb)
+Baseline on a fresh clone: `npm run check` 103/104; `build:browser` crashed; e2e couldn't build.
+Now: `npm run check` → 109/109; e2e → 48 pass, 1 fail (#47 coverage), 3 pre-existing todo.
+- browser/standalone/bridgeAgent.ts (free-trial /v1/agent path) had drifted from engine.ts:
+  HTTP errors thrown as plain Error → a rejected trial token was never forgotten (the failing test),
+  400/413 never rolled back; Ask mode blocked read-only tools too; undeclared tool names ran without
+  approval; AskUserQuestion was sent to the page (question never shown); a stream that just ended was
+  "✓ done"; Stop surfaced as an error; text after a tool landed in the tool-calling turn.
+  → engine.ts `callTool()` is now the single tool policy for both loops; tests/bridgeAgent.test.ts.
+- browserTools.js: browser_set_useragent regressed to `new Function` (CSP-blocked in the panel → the
+  tool always failed) + a no-op registerContentScripts; profile_launch and set_useragent stored
+  different shapes under `__agentUaListeners` and leaked onRemoved listeners → `watchTabLoads()`.
+- `.gitignore` `*.png` also ignored media/icon.png + avatar.png → fresh clones can't build the browser
+  extension or the vsix. Unignored `media/*.png`; avatar optional in browser/build.mjs.
+  **The icons themselves still have to be committed from the owner's machine.**
+
+### Open
+- e2e #47: the 5 `browser_profile_*` tools (43 declared, test expects 38) have no e2e coverage.
+- cli-proxy/queue-manager was not changed in this pass.
