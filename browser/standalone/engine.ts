@@ -231,12 +231,65 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+export interface ToolCallResult {
+  isError: boolean;
+  /** tool_result content for the history. */
+  content: Anthropic.ToolResultBlockParam["content"];
+  /** The same result as raw parts (what the trial bridge sends back to its server). */
+  parts: ToolPart[];
+}
+
+/**
+ * One tool call under the chat's rules: unknown tools and malformed input refused, the ask tool, Ask/Careful
+ * modes, Stop. Shared by the API loop and the free-trial bridge so both enforce exactly the same policy.
+ */
+export async function callTool(
+  o: Pick<TurnOptions, "tools" | "mode" | "signal" | "runTool" | "cb">,
+  id: string,
+  name: string,
+  rawInput: unknown,
+): Promise<ToolCallResult> {
+  const { cb, signal } = o;
+  cb.toolUse(id, name, rawInput);
+  const t0 = Date.now();
+  const say = (text: string, isError: boolean): ToolCallResult => {
+    cb.toolResult(id, text, isError, Date.now() - t0);
+    return { isError, content: text, parts: [{ type: "text", text }] };
+  };
+
+  const def = o.tools.find((t) => t.name === name);
+  const input = isPlainObject(rawInput) ? rawInput : null;
+  if (!def || !input) return say(!def ? `Unknown tool "${name}".` : "The tool input was not a valid object.", true);
+
+  if (name === ASK_TOOL.name) return say(`The user answered: ${await cb.ask(input)}`, false);
+
+  if (!def.readOnly) {
+    const mode = typeof o.mode === "function" ? o.mode() : o.mode;
+    if (mode === "ask") return say("Read-only (Ask) mode — you can read pages and take screenshots but not click, type or navigate.", true);
+    if (mode === "careful" && !(await cb.approve(name, input))) return say("The user denied this action.", true);
+  }
+
+  try {
+    // Stop must not wait for a slow page: race the tool against the abort (the tool itself
+    // may finish later in the background; its result is then simply not used).
+    const out = await Promise.race([
+      o.runTool(name, input),
+      new Promise<never>((_, reject) => {
+        if (signal.aborted) return reject(new Error("Interrupted by the user."));
+        signal.addEventListener("abort", () => reject(new Error("Interrupted by the user.")), { once: true });
+      }),
+    ]);
+    cb.toolResult(id, toolResultText(out), !!out.isError, Date.now() - t0);
+    return { isError: !!out.isError, content: toApiContent(out), parts: out.content };
+  } catch (e) {
+    return say(String((e as Error)?.message ?? e), true);
+  }
+}
+
 /** Run one user turn to completion: model call → tools → model call … until the model stops. */
 export async function runTurn(o: TurnOptions): Promise<TurnResult> {
   const { cb, signal } = o;
-  const byName = new Map(o.tools.map((t) => [t.name, t]));
   const maxSteps = o.maxSteps ?? DEFAULT_MAX_STEPS;
-  const currentMode = () => (typeof o.mode === "function" ? o.mode() : o.mode);
 
   for (let step = 0; step < maxSteps; step++) {
     if (signal.aborted) return { stopReason: null, aborted: true };
@@ -291,52 +344,8 @@ export async function runTurn(o: TurnOptions): Promise<TurnResult> {
         results.push({ type: "tool_result", tool_use_id: tu.id, is_error: true, content: "Interrupted by the user." });
         continue;
       }
-      const input = isPlainObject(tu.input) ? tu.input : null;
-      cb.toolUse(tu.id, tu.name, tu.input);
-      const t0 = Date.now();
-      const done = (text: string, isError: boolean, content?: Anthropic.ToolResultBlockParam["content"]) => {
-        cb.toolResult(tu.id, text, isError, Date.now() - t0);
-        results.push({ type: "tool_result", tool_use_id: tu.id, is_error: isError || undefined, content: content ?? text });
-      };
-
-      const def = byName.get(tu.name);
-      if (!def || !input) {
-        done(!def ? `Unknown tool "${tu.name}".` : "The tool input was not a valid object.", true);
-        continue;
-      }
-
-      if (tu.name === ASK_TOOL.name) {
-        const answer = await cb.ask(input);
-        done(`The user answered: ${answer}`, false);
-        continue;
-      }
-
-      if (!def.readOnly) {
-        const mode = currentMode();
-        if (mode === "ask") {
-          done("Read-only (Ask) mode — you can read pages and take screenshots but not click, type or navigate.", true);
-          continue;
-        }
-        if (mode === "careful" && !(await cb.approve(tu.name, input))) {
-          done("The user denied this action.", true);
-          continue;
-        }
-      }
-
-      try {
-        // Stop must not wait for a slow page: race the tool against the abort (the tool itself
-        // may finish later in the background; its result is then simply not used).
-        const out = await Promise.race([
-          o.runTool(tu.name, input),
-          new Promise<never>((_, reject) => {
-            if (signal.aborted) return reject(new Error("Interrupted by the user."));
-            signal.addEventListener("abort", () => reject(new Error("Interrupted by the user.")), { once: true });
-          }),
-        ]);
-        done(toolResultText(out), !!out.isError, toApiContent(out));
-      } catch (e) {
-        done(String((e as Error)?.message ?? e), true);
-      }
+      const r = await callTool(o, tu.id, tu.name, tu.input);
+      results.push({ type: "tool_result", tool_use_id: tu.id, is_error: r.isError || undefined, content: r.content });
     }
     o.messages.push({ role: "user", content: results });
     cb.checkpoint();
