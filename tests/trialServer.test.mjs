@@ -444,7 +444,7 @@ test("FileStore survives a restart, keeps only hashes and drops old daily counte
     store1.flush();
     const raw = fs.readFileSync(file, "utf8");
     assert.ok(!raw.includes(token), "the plaintext token is not on disk");
-    assert.equal((fs.statSync(file).mode & 0o777).toString(8), "600");
+    if (process.platform !== "win32") assert.equal((fs.statSync(file).mode & 0o777).toString(8), "600");
     const store2 = new FileStore(file);
     assert.equal(await store2.get(`glob:${day()}`), 2000);
     assert.equal(store2.tokens.size, 1);
