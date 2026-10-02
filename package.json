@@ -291,7 +291,7 @@
     "watch": "node esbuild.js --watch",
     "typecheck": "tsc --noEmit && tsc --noEmit -p browser && tsc --noEmit -p browser/standalone",
     "test": "node tests/run.mjs",
-    "test:e2e": "npm run build && npm run build:browser && node --test tests/e2e/browserTools.e2e.mjs tests/e2e/remote.e2e.mjs",
+    "test:e2e": "npm run build && npm run build:browser && node --test tests/e2e/browserTools.e2e.mjs tests/e2e/remote.e2e.mjs tests/e2e/trialSignin.e2e.mjs",
     "check": "npm run typecheck && npm run build && npm run test",
     "build:browser": "node browser/build.mjs",
     "package:browser": "node esbuild.js --production && node browser/build.mjs --production --zip",

@@ -31,6 +31,8 @@ export interface Settings {
   effort?: Effort;
   /** apiKey is a free-trial token for the operator's gateway, not the user's own key. */
   trial?: boolean;
+  /** How that gateway takes requests: the Messages API (trial-server), or its /v1/agent bridge. */
+  trialTransport?: "messages" | "agent";
 }
 
 export interface LocalHostDeps {
@@ -44,7 +46,7 @@ export interface LocalHostDeps {
   /** Human words for what a tool call would act on (the element behind a ref), shown on approval cards. */
   describeCall?(name: string, input: Record<string, unknown>): string | undefined;
   openSettings(): void;
-  /** Free trial: forget this install's token so the next request registers a fresh one. */
+  /** Free trial: forget a token the gateway rejected — the user signs in again from the settings. */
   forgetTrialToken?(): void | Promise<void>;
   /** Identifies the tool set + system prompt; a chat saved under another build has its old thinking blocks dropped. */
   promptId?: string;
@@ -650,20 +652,15 @@ export class LocalHost {
     };
 
     try {
-      /**
-       * 背景：trial mode 用 Claude Max OAuth，不能直接调 Messages API（429）。
-       * 只有 Agent SDK (CLI subprocess) 能路由 Sonnet/Opus。
-       * 设计意图：trial mode 走 /v1/agent bridge — 服务器跑 Agent SDK 对话循环，
-       * tool calls 通过 SSE 桥接到浏览器执行。api mode 走标准 Messages API。
-       * 约束：bridge 模式下 conversation history 被转为 text 传给 Agent SDK，
-       * 结构化的 tool_use/tool_result blocks 在服务器端被 flatten 成文本上下文。
-       */
+      // The free trial takes the path its gateway named at sign-in: trial-server speaks the Messages API (the local
+      // loop below, same as an own key); a gateway that runs the agent loop itself takes /v1/agent and bridges
+      // the tool calls back to this panel (bridgeAgent.ts).
       const allTools = [...this.d.tools, ASK_TOOL];
       const modeGetter = () => (MODE_OPTIONS.some((o) => o.value === conv.mode) ? (conv.mode as Mode) : mode);
 
       let result;
-      if (settings.trial && settings.baseUrl) {
-        // Trial mode: MCP bridge — Agent SDK on server, tools bridged via SSE
+      if (settings.trial && settings.baseUrl && settings.trialTransport === "agent") {
+        // A gateway that runs the agent loop itself: tools are bridged to this panel over SSE
         result = await runTurnBridge({
           baseUrl: settings.baseUrl,
           apiKey: settings.apiKey!,
@@ -678,7 +675,7 @@ export class LocalHost {
           maxTokens: 8192,
         });
       } else {
-        // API mode: standard Anthropic SDK Messages API with local tool loop
+        // Messages API with the local tool loop: the user's key, or a trial token with trial-server
         const client = this.d.createClient(settings);
         result = await runTurn({
           client,
@@ -715,7 +712,7 @@ export class LocalHost {
       const d = describeError(e);
       fail(d.message);
       if (d.authFailed) {
-        if (settings.trial) await this.d.forgetTrialToken?.(); // a fresh token is issued on the next message
+        if (settings.trial) await this.d.forgetTrialToken?.(); // the next message asks the user to sign in again
         else this.post({ type: "auth", ok: false, text: "⚠ The API key was rejected. Check it in the settings:", loginLabel: "Open settings", recheckLabel: "I've fixed it" });
       }
     } finally {

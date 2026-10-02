@@ -11,7 +11,7 @@ Pick in the extension's settings (the 🌐 button in the panel):
 
 | | How | Needs |
 | --- | --- | --- |
-| **Free trial** | requests go through your gateway ([`trial-server/`](../trial-server/README.md), which holds *your* API key and enforces the limits) | nothing on the user's side; build with `AGENT_TRIAL_URL=https://your-gateway node browser/build.mjs` |
+| **Free trial** | requests go through your gateway ([`trial-server/`](../trial-server/README.md), which holds *your* API key and enforces the limits) | an email address — they sign in with a one-time code from it, and become a row in your customer list; build with `AGENT_TRIAL_URL=https://your-gateway node browser/build.mjs` |
 | **My API key** | the extension calls the Claude API itself with the official SDK | an Anthropic API key (and a Workspace ID if the key isn't tied to a workspace) |
 | **My Claude subscription** | the local helper runs the user's own signed-in Claude Code | the installer; the sign-in happens in Anthropic's own flow — this project never sees or stores a Claude login |
 
