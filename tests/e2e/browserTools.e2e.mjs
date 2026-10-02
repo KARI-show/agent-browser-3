@@ -646,7 +646,7 @@ test("browser_get_useragent / browser_set_useragent: page and request headers", 
   assert.match(before, /^User-Agent: Mozilla\/5\.0 .*\nPlatform: .*\nLanguage: .*\nLanguages: /);
 
   const out = await ok("browser_set_useragent", { userAgent: FAKE_UA, platform: "iPhone", language: "de-DE" });
-  assert.match(out, /^User-Agent set to: Mozilla\/5\.0 \(iPhone.* \| platform=iPhone$/);
+  assert.match(out, /^User-Agent set to: Mozilla\/5\.0 \(iPhone.* \| platform=iPhone \| language=de-DE\n/);
   assert.match(await ok("browser_get_useragent", {}), /User-Agent: .*AgentE2E\/1\.0\nPlatform: iPhone/);
 
   // As the system prompt says: reload for full effect — the server must see it.

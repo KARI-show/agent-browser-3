@@ -824,6 +824,44 @@
     return { has: found };
   }
 
+  // Re-apply an override on every load of a tab. One watcher per tab, shared by the UA tools: a new one replaces
+  // the old (no stacked listeners); what each wanted done when the tab closes still runs.
+  function watchTabLoads(tabId, onLoading, onClose) {
+    var all = (window.__agentUaListeners = window.__agentUaListeners || {});
+    var prev = all[tabId];
+    if (prev) {
+      chrome.tabs.onUpdated.removeListener(prev.updated);
+      chrome.tabs.onRemoved.removeListener(prev.removed);
+    }
+    var closers = (prev ? prev.closers : []).concat(onClose ? [onClose] : []);
+    var updated = function (id, info) {
+      if (id === tabId && info.status === "loading") onLoading();
+    };
+    var removed = function (id) {
+      if (id !== tabId) return;
+      chrome.tabs.onUpdated.removeListener(updated);
+      chrome.tabs.onRemoved.removeListener(removed);
+      delete all[tabId];
+      closers.forEach(function (f) { f(); });
+    };
+    all[tabId] = { updated: updated, removed: removed, closers: closers };
+    chrome.tabs.onUpdated.addListener(updated);
+    chrome.tabs.onRemoved.addListener(removed);
+  }
+
+  function pageUaOverride(ua, platform, langs) {
+    // Runs in the page's MAIN world on every load of the overridden tab.
+    function pin(key, value) {
+      try { Object.defineProperty(navigator, key, { get: function () { return value; }, configurable: true }); } catch (_) {}
+    }
+    pin("userAgent", ua);
+    if (platform) pin("platform", platform);
+    if (langs.length) {
+      pin("language", langs[0]);
+      pin("languages", Object.freeze(langs.slice()));
+    }
+  }
+
   function pageRunJs(code) {
     // Runs in the page's MAIN world (page CSP applies).
     function show(v) {
@@ -1605,70 +1643,15 @@
           acceptLanguage: lang,
         });
 
-        // The page-script overrides (defineProperty on navigator) are lost on
-        // every navigation/reload because the page's JS context is destroyed.
-        // CDP setUserAgentOverride persists (protocol-level), but navigator.languages
-        // and .language are NOT covered by CDP — only the HTTP Accept-Language header is.
-        // Fix: register a persistent content script that re-injects on every page load.
-        var scriptId = "__agent_ua_" + tab.id;
-        // Clean up any previous registration for this tab
-        try { await chrome.scripting.unregisterContentScripts({ ids: [scriptId] }); } catch (_) {}
-
-        // Build the injection code as a string (content scripts can't capture closures)
-        var injectCode = "(function(){";
-        injectCode += 'Object.defineProperty(navigator,"userAgent",{get:function(){return ' + JSON.stringify(ua) + '},configurable:true});';
-        if (plat) {
-          injectCode += 'Object.defineProperty(navigator,"platform",{get:function(){return ' + JSON.stringify(plat) + '},configurable:true});';
-        }
-        if (lang) {
-          // Parse "fr-FR,fr;q=0.9,en;q=0.8" → ["fr-FR","fr","en"]
-          var parts = lang.split(",").map(function (s) { return s.replace(/;q=[\d.]+/, "").trim(); }).filter(Boolean);
-          var primary = parts[0] || lang.split(",")[0].trim();
-          injectCode += 'Object.defineProperty(navigator,"language",{get:function(){return ' + JSON.stringify(primary) + '},configurable:true});';
-          injectCode += 'Object.defineProperty(navigator,"languages",{get:function(){return Object.freeze(' + JSON.stringify(parts) + ')},configurable:true});';
-        }
-        injectCode += "})();";
-
-        // Register as a persistent content script that runs on every load of this tab's URL pattern
-        // Use a broad match so navigations within the site also get the override
-        await chrome.scripting.registerContentScripts([{
-          id: scriptId,
-          matches: ["<all_urls>"],
-          js: [],
-          world: "MAIN",
-          runAt: "document_start",
-          allFrames: true,
-        }]).catch(function () {});
-
-        // Since registerContentScripts can't inject inline code, inject now + use tabs.onUpdated for reloads
-        var injectFn = new Function(injectCode);
-        await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: "MAIN", func: injectFn });
-
-        // Re-inject on every navigation/reload of this tab
-        var onUpdated = function (updatedId, info) {
-          if (updatedId !== tab.id) return;
-          if (info.status === "loading") {
-            chrome.scripting.executeScript({ target: { tabId: updatedId }, world: "MAIN", func: injectFn }).catch(function () {});
-          }
+        // CDP covers the HTTP headers but not navigator.language(s), and a page-side defineProperty is lost
+        // with the page's JS context on every reload — so re-inject on each load of this tab. A real function
+        // with args, never code built as a string: the panel's CSP forbids eval/new Function.
+        var langs = lang ? lang.split(",").map(function (s) { return s.replace(/;q=[\d.]+/, "").trim(); }).filter(Boolean) : [];
+        var inject = function () {
+          return chrome.scripting.executeScript({ target: { tabId: tab.id }, world: "MAIN", func: pageUaOverride, args: [ua, plat, langs] });
         };
-        // Store listener so we can clean up (keyed by tab id)
-        if (window.__agentUaListeners) {
-          var old = window.__agentUaListeners[tab.id];
-          if (old) chrome.tabs.onUpdated.removeListener(old);
-        } else {
-          window.__agentUaListeners = {};
-        }
-        window.__agentUaListeners[tab.id] = onUpdated;
-        chrome.tabs.onUpdated.addListener(onUpdated);
-
-        // Clean up when tab is closed
-        chrome.tabs.onRemoved.addListener(function onRemoved(removedId) {
-          if (removedId !== tab.id) return;
-          chrome.tabs.onRemoved.removeListener(onRemoved);
-          chrome.tabs.onUpdated.removeListener(onUpdated);
-          delete window.__agentUaListeners[tab.id];
-          chrome.scripting.unregisterContentScripts({ ids: [scriptId] }).catch(function () {});
-        });
+        await inject();
+        watchTabLoads(tab.id, function () { inject().catch(function () {}); });
       } catch (e) {
         throw new Error("Could not override UA via DevTools: " + ((e && e.message) || e) + ". Try browser_run_js with navigator overrides.");
       }
@@ -1970,23 +1953,11 @@
 
       // 7. Set up persistent UA re-injection on navigation
       if (p.ua) {
-        var onNav = function(updatedId, info) {
-          if (updatedId !== tab.id || info.status !== "loading") return;
+        watchTabLoads(tab.id, function () {
           cdp(tab.id, "Network.setUserAgentOverride", {
             userAgent: p.ua, platform: p.platform || "", acceptLanguage: p.lang || "",
           }).catch(function(){});
-        };
-        if (!window.__agentUaListeners) window.__agentUaListeners = {};
-        if (window.__agentUaListeners[tab.id]) chrome.tabs.onUpdated.removeListener(window.__agentUaListeners[tab.id]);
-        window.__agentUaListeners[tab.id] = onNav;
-        chrome.tabs.onUpdated.addListener(onNav);
-        chrome.tabs.onRemoved.addListener(function rm(id) {
-          if (id !== tab.id) return;
-          chrome.tabs.onRemoved.removeListener(rm);
-          chrome.tabs.onUpdated.removeListener(onNav);
-          delete window.__agentUaListeners[tab.id];
-          chrome.storage.local.remove("agentActiveFingerprint");
-        });
+        }, function () { chrome.storage.local.remove("agentActiveFingerprint"); });
       }
 
       await chrome.storage.local.set({ agentActiveProfile: a.profileId });
