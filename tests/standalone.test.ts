@@ -58,6 +58,7 @@ function sse(r: Scripted): string {
 async function mockApi(script: Scripted[], opts: { models?: string[] } = {}) {
   const requests: any[] = [];
   const headers: http.IncomingHttpHeaders[] = [];
+  const paths: string[] = [];
   const sockets = new Set<net.Socket>();
   const server = http.createServer((req, res) => {
     let body = "";
@@ -68,6 +69,7 @@ async function mockApi(script: Scripted[], opts: { models?: string[] } = {}) {
         res.setHeader("content-type", "application/json");
         return void res.end(JSON.stringify({ data: (opts.models ?? ["claude-opus-5-5"]).map((id) => ({ id, display_name: id === "claude-opus-5-5" ? "Claude Opus 5.5" : id, type: "model", created_at: "2026-01-01T00:00:00Z", max_input_tokens: 1000000, max_tokens: 128000, capabilities: null })), has_more: false, first_id: "x", last_id: "x" }));
       }
+      paths.push(req.url ?? "");
       requests.push(JSON.parse(body));
       const r = script[requests.length - 1] ?? script[script.length - 1];
       if (r.status) {
@@ -89,6 +91,7 @@ async function mockApi(script: Scripted[], opts: { models?: string[] } = {}) {
     url: `http://127.0.0.1:${port}`,
     requests,
     headers,
+    paths,
     client: () => new Anthropic({ apiKey: "sk-test", baseURL: `http://127.0.0.1:${port}`, maxRetries: 0 }),
     close: () => {
       for (const s of sockets) s.destroy();
@@ -987,6 +990,22 @@ test("free trial: the model moves to one the gateway offers; a rejected trial to
     assert.equal(forgot, 1, "token forgotten so the next message registers a fresh one");
     assert.ok(t.posted.some((m) => m.type === "error" && /Unknown trial token/.test(m.message)));
     assert.ok(!t.posted.some((m) => m.type === "auth"), "no 'API key rejected' banner for a trial token");
+  } finally {
+    api.close();
+  }
+});
+
+test("free trial: the gateway named at sign-in decides the path — Messages API by default, the /v1/agent bridge only when asked", async () => {
+  const api = await mockApi([{ blocks: [{ type: "text", text: "hi" }], stop: "end_turn" }], { models: ["claude-haiku-4-5"] });
+  try {
+    for (const [trialTransport, path] of [[undefined, "/v1/messages"], ["agent", "/v1/agent"]] as const) {
+      const t = host(api, { loadSettings: async () => ({ apiKey: "trl_abc", baseUrl: api.url, trial: true, trialTransport }) });
+      await t.h.handle({ type: "ready" });
+      const before = api.paths.length;
+      void t.h.handle({ type: "prompt", text: "hi" });
+      await t.waitFor(() => t.types().includes("idle"));
+      assert.equal(api.paths.slice(before).find((p) => p.startsWith("/v1/m") || p.startsWith("/v1/a")), path, String(trialTransport));
+    }
   } finally {
     api.close();
   }
