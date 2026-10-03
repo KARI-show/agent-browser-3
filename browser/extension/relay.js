@@ -68,7 +68,9 @@
 
   var syncing = Promise.resolve();
   function sync() {
-    syncing = syncing.then(doSync, doSync);
+    syncing = syncing.then(doSync, doSync).catch(function (e) {
+      updateStatus("error", "Remote couldn't start: " + ((e && e.message) || e), true);
+    });
     return syncing;
   }
 
@@ -84,7 +86,8 @@
     var s = { key: key, mode: c.mode, cfg: c, stopped: false, abort: new AbortController(), release: null, port: null };
     session = s;
     if (!navigator.locks) return run(s);
-    updateStatus("off", "Waiting — remote is running in another browser window");
+    // Only this panel's button: the window that holds the lock owns the shared status.
+    updateStatus("off", "Waiting — remote is running in another browser window", false);
     navigator.locks
       .request(LOCK, { signal: s.abort.signal }, function () {
         if (s.stopped) return;
@@ -120,9 +123,10 @@
       s.port = null;
     }
     if (window.AgentTelegram) window.AgentTelegram.stop();
+    var owned = !!s.release || !navigator.locks;
     if (s.release) s.release();
     announce = false;
-    updateStatus("off", "");
+    updateStatus("off", "", owned);
   }
 
   /** A mode failed to come up: say why on 🛰 / the options page, and in the panel if the user is waiting. */
@@ -174,6 +178,7 @@
   var target = null; // { url, token, publicUrl, bot } the node dials
   var nodeId = null;
   var reconnectTimer = null;
+  var reconnectDelay = 3000; // grows while the relay stays down (src/hub.ts does the same)
   var connected = false;
 
   // Stable node id per extension install.
@@ -222,7 +227,8 @@
   function connectNode(t) {
     disconnectNode();
     target = t;
-    dial();
+    reconnectDelay = 3000;
+    dial().catch(function (e) { fail("Remote couldn't connect: " + ((e && e.message) || e)); });
   }
 
   async function dial() {
@@ -245,6 +251,7 @@
     sock.onopen = function () {
       if (ws !== sock) return;
       connected = true;
+      reconnectDelay = 3000;
       updateStatus("on", "relay " + hostOf(t.publicUrl || url));
       publishPresence();
       if (announce) {
@@ -275,8 +282,9 @@
       if (!reconnectTimer) {
         reconnectTimer = setTimeout(function () {
           reconnectTimer = null;
-          dial();
-        }, 3000);
+          dial().catch(function () {});
+        }, reconnectDelay);
+        reconnectDelay = Math.min(Math.round(reconnectDelay * 1.6), 30000);
       }
     };
 
@@ -353,6 +361,10 @@
   function replyError(clientId, message) {
     send({ t: "toClient", clientId: clientId, msg: { type: "error", message: message } });
   }
+  // A notice leaves the phone's run state alone (an "error" would hide its Stop button while the chat still runs).
+  function replyNotice(clientId, message) {
+    send({ t: "toClient", clientId: clientId, msg: { type: "notice", message: message } });
+  }
 
   function handleRelayMessage(m) {
     if (!m || m.t !== "fromClient" || !m.msg || typeof m.msg.type !== "string") return;
@@ -374,7 +386,7 @@
         return replyError(m.clientId, "This chat isn't open in the browser right now — reopen it from the chat list and resend.");
       }
       if (running[chatId]) {
-        return replyError(m.clientId, "This chat is still working — wait for the reply or press Stop.");
+        return replyNotice(m.clientId, "This chat is still working — wait for the reply or press Stop.");
       }
       // Straight to the host, not through the panel's input box: typing into
       // it would wipe the desktop user's draft and send their attachments
@@ -484,8 +496,11 @@
 
   var remoteBtn = document.getElementById("remoteBtn");
 
-  function updateStatus(state, message) {
-    chrome.storage.session.set({ [STATUS_KEY]: { state: state, message: message || "" } }).catch(function () {});
+  // `persist`: also publish to the options page (chrome.storage.session). Default: only the panel that
+  // runs remote (holds the lock) may — a second window loading or waiting must not overwrite it.
+  function updateStatus(state, message, persist) {
+    if (persist === undefined) persist = !!(session && session.release) || !navigator.locks;
+    if (persist) chrome.storage.session.set({ [STATUS_KEY]: { state: state, message: message || "" } }).catch(function () {});
     if (!remoteBtn) return;
     remoteBtn.classList.toggle("on", state === "on");
     remoteBtn.setAttribute("aria-pressed", state === "on" ? "true" : "false");
@@ -522,7 +537,7 @@
     if (area === "local" && ch[CONFIG_KEY]) sync();
   });
 
-  updateStatus("off", "");
+  updateStatus("off", "", false);
   sync();
 
   // For telegram.js (bot mode) — the same panel state and host channel.

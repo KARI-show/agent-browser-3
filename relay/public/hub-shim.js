@@ -34,6 +34,9 @@
   window.acquireVsCodeApi = function () {
     return {
       postMessage: function (m) {
+        // main.js announces itself with "ready" on load; the shim already sends one per connection
+        // (onopen), and a second makes the node reload the chat twice.
+        if (m && m.type === "ready") return;
         // Switching chats from the web (tab click / chat list): the web session
         // is pinned to ONE chat channel, so move our subscription to the new
         // chat and ask the host to (re)send its full state there. Without this,
