@@ -11,6 +11,9 @@ Restart=always
 RestartSec=5
 Environment=PORT=80
 Environment=MODELS=claude-haiku-4-5,claude-sonnet-5-5,claude-opus-5-5
+# Email sign-in (auth.mjs, deployed next to server.mjs) is invite-only here: list your address(es).
+# Codes are printed to the journal until RESEND_API_KEY + MAIL_FROM are set; ADMIN_TOKEN enables /admin/users.
+#Environment=AUTH_ALLOWED_EMAILS=you@example.com
 StandardOutput=journal
 StandardError=journal
 

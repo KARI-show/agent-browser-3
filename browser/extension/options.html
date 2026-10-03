@@ -17,9 +17,28 @@
     <form id="modeForm" autocomplete="off">
       <label class="mode" id="modeTrial">
         <input type="radio" name="mode" value="trial" />
-        <span><b>Free trial</b> <span class="hint">— no setup. A small daily allowance; your requests go through our service to Claude.</span>
+        <span><b>Free trial</b> <span class="hint">— sign in with your email, nothing to install. A small daily allowance; your requests go through our service to Claude.</span>
           <span class="hint block" id="trialStatus"></span></span>
       </label>
+      <div class="fields" id="trialFields">
+        <label id="trialEmailRow">Email
+          <input id="trialEmail" type="email" placeholder="you@example.com" autocomplete="email" spellcheck="false" />
+        </label>
+        <div class="actions" id="trialSendRow">
+          <button type="button" id="trialSend">Send code</button>
+        </div>
+        <label id="trialCodeRow" hidden>Code from the email
+          <input id="trialCode" inputmode="numeric" autocomplete="one-time-code" maxlength="7" placeholder="123456" spellcheck="false" />
+        </label>
+        <div class="actions" id="trialVerifyRow" hidden>
+          <button type="button" class="primary" id="trialVerify">Sign in</button>
+        </div>
+        <div class="actions" id="trialIn" hidden>
+          <span>Signed in as <b id="trialWho"></b></span>
+          <button type="button" id="trialSignOut">Sign out</button>
+        </div>
+        <span id="trialResult" class="result" role="status"></span>
+      </div>
 
       <label class="mode">
         <input type="radio" name="mode" value="api" />

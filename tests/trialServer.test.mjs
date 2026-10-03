@@ -59,13 +59,20 @@ async function upstream(respond) {
 }
 
 async function gateway(over = {}, up, opts = {}) {
-  const cfg = { ...loadConfig({ ANTHROPIC_API_KEY: REAL_KEY, ANTHROPIC_BASE_URL: up.url }), ...over };
+  const base = loadConfig({ ANTHROPIC_API_KEY: REAL_KEY, ANTHROPIC_BASE_URL: up.url });
+  const cfg = { ...base, ...over, auth: { ...base.auth, ...over.auth } };
   const store = opts.store || new MemoryStore();
-  const handler = createHandler(cfg, store, { now: opts.now || Date.now, log: { info() {}, warn() {}, error() {} } });
+  const mail = new Map(); // address -> last code sent
+  const handler = createHandler(cfg, store, { now: opts.now || Date.now, log: { info() {}, warn() {}, error() {} }, sendCode: async (to, code) => void mail.set(to, code) });
   const server = await serve(handler, { port: 0, host: "127.0.0.1" });
   const url = `http://127.0.0.1:${server.address().port}`;
-  const register = async (headers = {}) => {
-    const r = await fetch(url + "/register", { method: "POST", headers });
+  let n = 0;
+  /** A full email sign-in (code read from the captured mail); a fresh address each call unless one is given. */
+  const register = async (headers = {}, email = `user${++n}@example.com`) => {
+    const post = (p, b) => fetch(url + p, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(b) });
+    const started = await post("/auth/start", { email });
+    if (started.status !== 200) return { status: started.status, body: await started.json() };
+    const r = await post("/auth/verify", { email, code: mail.get(email) });
     return { status: r.status, body: await r.json() };
   };
   const client = (token, o = {}) => new Anthropic({ apiKey: token, baseURL: url, maxRetries: 3, ...o });
@@ -93,21 +100,25 @@ const untilEquals = async (store, key, want, ms = 3000) => {
   return store.get(key);
 };
 
-test("register hands out an opaque token, stores only its hash, and limits sign-ups per IP", async () => {
+test("email sign-in hands out an opaque token, stores only its hash, and limits codes per network", async () => {
   const up = await upstream(() => {});
-  const g = await gateway({ registerPerIpPerDay: 3 }, up);
+  const g = await gateway({ auth: { codesPerIpPerDay: 3 } }, up);
   try {
     const a = await g.register();
     assert.equal(a.status, 200);
     assert.match(a.body.token, /^trl_[A-Za-z0-9_-]{40,}$/);
     assert.deepEqual(a.body.models, ["claude-haiku-4-5", "claude-sonnet-5-5"]);
     assert.equal(a.body.limits.dailyUsd, 0.25);
+    assert.equal(a.body.transport, "messages", "the extension talks Messages API to this gateway");
+    assert.equal(a.body.email, "user1@example.com");
     assert.ok(![...g.store.tokens.keys()].includes(a.body.token) && !JSON.stringify([...g.store.tokens]).includes(a.body.token), "token is stored hashed");
     await g.register();
     await g.register();
     const fourth = await g.register();
     assert.equal(fourth.status, 429);
-    assert.match(fourth.body.error.message, /sign-ups/);
+    assert.match(fourth.body.error.message, /this network/);
+    const old = await fetch(g.url + "/register", { method: "POST" });
+    assert.equal(old.status, 410, "anonymous sign-up is gone; old builds are told to update");
   } finally {
     g.close();
     up.close();
@@ -148,8 +159,8 @@ test("streaming end to end through the real SDK: real key swapped in, request sa
     assert.deepEqual(forwarded.body.cache_control, { type: "ephemeral" });
 
     // 1000 in × $1 + 200 out × $5 = 2000 micro-dollars, on every counter
-    const hash = [...g.store.tokens.keys()][0];
-    assert.equal(await untilEquals(g.store, `tok:${hash}:${day()}`, costMicroUsd("claude-haiku-4-5", { input_tokens: 1000, output_tokens: 200 })), 2000);
+    const user = [...g.store.users.values()][0];
+    assert.equal(await untilEquals(g.store, `usr:${user.id}:${day()}`, costMicroUsd("claude-haiku-4-5", { input_tokens: 1000, output_tokens: 200 })), 2000, "spend is counted under the person");
     assert.equal(await g.store.get(`glob:${day()}`), 2000, "the reservation was replaced by the real cost");
     const st = await (await fetch(g.url + "/status", { headers: { "x-api-key": token } })).json();
     assert.ok(Math.abs(st.dailyLeftUsd - (0.25 - 0.002)) < 1e-9, String(st.dailyLeftUsd));
@@ -400,7 +411,7 @@ test("models are limited to the trial's list; CORS answers only for allowed orig
     assert.match(ok.headers.get("access-control-allow-headers"), /x-api-key/);
     const no = await fetch(g.url + "/v1/messages", { method: "OPTIONS", headers: { origin: "https://evil.example" } });
     assert.equal(no.headers.get("access-control-allow-origin"), null);
-    const res = await fetch(g.url + "/register", { method: "POST", headers: { origin: "chrome-extension://abc" } });
+    const res = await fetch(g.url + "/auth/start", { method: "POST", headers: { origin: "chrome-extension://abc" } });
     assert.equal(res.headers.get("access-control-allow-origin"), "chrome-extension://abc");
   } finally {
     g.close();
@@ -416,7 +427,7 @@ test("client IP: socket address by default; the last hop of the trusted header w
   assert.equal(normalizeIp(undefined), "unknown");
 
   const up = await upstream(() => {});
-  const g = await gateway({ registerPerIpPerDay: 1, ipHeader: "x-forwarded-for" }, up);
+  const g = await gateway({ ipHeader: "x-forwarded-for", auth: { codesPerIpPerDay: 1 } }, up);
   try {
     // A spoofed leading entry must not let one client mint unlimited tokens: the proxy-added last entry counts.
     assert.equal((await g.register({ "x-forwarded-for": "1.1.1.1, 9.9.9.9" })).status, 200);
@@ -448,6 +459,7 @@ test("FileStore survives a restart, keeps only hashes and drops old daily counte
     const store2 = new FileStore(file);
     assert.equal(await store2.get(`glob:${day()}`), 2000);
     assert.equal(store2.tokens.size, 1);
+    assert.equal(store2.users.size, 1, "the customer list survives a restart");
   } finally {
     g.close();
     up.close();
@@ -690,9 +702,10 @@ test("FileStore refuses to start from a corrupt file, and forgets tokens that ne
   assert.throws(() => new FileStore(bad), /refusing to start with reset budgets/);
   const file = path.join(dir, "ok.json");
   const old = Date.now() - 10 * 86_400_000;
-  fs.writeFileSync(file, JSON.stringify({ tokens: { idle: { createdAt: old }, used: { createdAt: old }, fresh: { createdAt: Date.now() } }, counters: { "tok:used:total": 5 } }));
+  fs.writeFileSync(file, JSON.stringify({ tokens: { idle: { createdAt: old }, used: { createdAt: old }, fresh: { createdAt: Date.now() }, member: { createdAt: old, userId: "u_1" } }, counters: { "tok:used:total": 5 } }));
   const store = new FileStore(file);
   assert.equal(store.tokens.has("idle"), false, "old, never used → dropped");
+  assert.equal(store.tokens.has("member"), true, "a signed-in customer's token is kept (their spend counts under the person)");
   assert.equal(store.tokens.has("used"), true);
   assert.equal(store.tokens.has("fresh"), true);
   // a failing disk does not throw out of flush()
@@ -701,14 +714,17 @@ test("FileStore refuses to start from a corrupt file, and forgets tokens that ne
   assert.doesNotThrow(() => blocked.flush());
 });
 
-test("sign-ups pause once the stored-token cap is reached", async () => {
+test("sign-ups pause once the customer cap is reached; existing customers still sign in", async () => {
   const up = await upstream(() => ({}));
-  const g = await gateway({ maxRegistered: 1, registerPerIpPerDay: 10 }, up);
+  const g = await gateway({ auth: { maxUsers: 1 } }, up);
   try {
-    assert.equal((await g.register()).status, 200);
+    assert.equal((await g.register({}, "first@example.com")).status, 200);
     const second = await g.register();
     assert.equal(second.status, 503);
-    assert.match(second.body.error.message, /sign-ups are paused/);
+    assert.match(second.body.error.message, /Sign-ups are paused/);
+    assert.equal((await g.register({}, "first@example.com")).status, 200, "an existing customer still gets in");
+    assert.equal(g.store.users.size, 1);
+    assert.equal([...g.store.users.values()][0].logins, 2);
   } finally {
     g.close();
     up.close();

@@ -74,3 +74,21 @@ Now: `npm run check` → 109/109; e2e → 48 pass, 1 fail (#47 coverage), 3 pre-
 ### Open
 - e2e #47: the 5 `browser_profile_*` tools (43 declared, test expects 38) have no e2e coverage.
 - cli-proxy/queue-manager was not changed in this pass.
+
+## Email sign-in + customer list for the free trial (2026-10-02)
+- `trial-server/auth.mjs` (shared, web-standard): POST /auth/start → 6-digit code mailed via Resend
+  (RESEND_API_KEY + MAIL_FROM; without a key the code goes to the server log), POST /auth/verify → token.
+  Code hash only, 10 min, 5 tries counted atomically (store.add), resend ≥ 60 s, 5/address + 20/network a day,
+  invite list AUTH_ALLOWED_EMAILS (addresses or @domains). Customers = `users` (D1 table / state file):
+  id, email, createdAt, lastLoginAt, logins, ip, lastIp, blocked. Admin (ADMIN_TOKEN, server-only):
+  GET /admin/users[?format=csv], POST /admin/users/block. Budgets/rpm/parallel slots count per person (`usr:<id>`).
+- trial-server: wired in, /register → 410, schema.sql has users + codes (re-run on existing D1).
+- queue-manager: identical copy `cli-proxy/queue-manager/auth.mjs` (deployed alone in /opt/queue-manager —
+  copy it there too); invite-only (empty AUTH_ALLOWED_EMAILS = nobody); verify answers transport "agent".
+  tests/trialAuth.test.mjs fails when the copies differ.
+- Extension: settings → Free trial → email → code → signed in (mode saved as trial); hardcoded register
+  secret removed from entry.ts; the panel uses the /v1/agent bridge only when the gateway said
+  transport "agent", else the Messages API. Rejected/blocked token → dropped → panel asks to sign in.
+- Tests: tests/trialAuth.test.mjs (flow, parallel guessing, caps, invite list, block, admin/CSV, mail,
+  D1 SQL on node:sqlite), tests/e2e/trialSignin.e2e.mjs (real Chromium: sign-in UI → chat → block → re-sign-in).
+- Open: queue-manager's REGISTER_SECRET still has a default in code (now only its own admin routes use it).

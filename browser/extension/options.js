@@ -228,6 +228,7 @@
 
   function showFields() {
     var m = chosenMode();
+    $("trialFields").classList.toggle("open", m === "trial");
     $("apiFields").classList.toggle("open", m === "api");
     $("subFields").classList.toggle("open", m === "subscription");
   }
@@ -255,7 +256,9 @@
     } catch (_) { return false; }
   }
 
+  var savedMode = "";
   function paintAgent(mode) {
+    savedMode = mode;
     var el = $("agentStatus");
     el.className = "status " + (mode ? "active" : "off");
     $("agentStatusText").textContent = {
@@ -272,9 +275,86 @@
       $("trialStatus").textContent = "Not available in this build.";
       return;
     }
-    $("trialStatus").textContent = "Checking allowance…";
-    window.AgentLocal.trialStatus().then(function (r) { $("trialStatus").textContent = r.message; });
+    window.AgentLocal.trialAccount().then(function (acc) {
+      paintTrialAccount(acc);
+      if (!acc) {
+        $("trialStatus").textContent = "Sign in with your email to start.";
+        if (savedMode === "trial") $("agentStatusText").textContent = "Free trial chosen — sign in with your email below.";
+        return;
+      }
+      $("trialStatus").textContent = "Checking allowance…";
+      window.AgentLocal.trialStatus().then(function (r) {
+        $("trialStatus").textContent = r.message;
+        if (r.signedOut) refreshTrial(); // the gateway dropped the token: show the sign-in again
+      });
+    });
   }
+
+  // ---- free trial: sign in with a code from the email ----
+  function paintTrialAccount(acc) {
+    $("trialEmailRow").hidden = !!acc;
+    $("trialSendRow").hidden = !!acc;
+    $("trialCodeRow").hidden = true;
+    $("trialVerifyRow").hidden = true;
+    $("trialIn").hidden = !acc;
+    $("trialWho").textContent = acc ? acc.email : "";
+    $("trialSend").textContent = "Send code";
+  }
+
+  $("trialSend").addEventListener("click", function () {
+    var email = $("trialEmail").value.trim();
+    if (!email) return sayTo("trialResult", "Enter your email.", "bad");
+    $("trialSend").disabled = true;
+    sayTo("trialResult", "Sending…", "");
+    window.AgentLocal.trialStart(email).then(function (r) {
+      $("trialSend").disabled = false;
+      sayTo("trialResult", r.message, r.ok ? "ok" : "bad");
+      if (!r.ok) return;
+      $("trialCodeRow").hidden = false;
+      $("trialVerifyRow").hidden = false;
+      $("trialSend").textContent = "Send again";
+      $("trialCode").focus();
+    });
+  });
+
+  $("trialVerify").addEventListener("click", function () {
+    var code = $("trialCode").value.replace(/\s+/g, "");
+    if (!/^\d{6}$/.test(code)) return sayTo("trialResult", "Enter the 6-digit code from the email.", "bad");
+    $("trialVerify").disabled = true;
+    sayTo("trialResult", "Checking…", "");
+    window.AgentLocal.trialVerify($("trialEmail").value.trim(), code).then(function (r) {
+      $("trialVerify").disabled = false;
+      sayTo("trialResult", r.message, r.ok ? "ok" : "bad");
+      if (!r.ok) return;
+      $("trialCode").value = "";
+      // Signing in is choosing the trial: save that, keeping the rest of what's on file (an API key stays).
+      chrome.storage.local.get(API_KEY).then(function (o) {
+        var s = o[API_KEY] || {};
+        s.mode = "trial";
+        return chrome.storage.local.set({ [API_KEY]: s });
+      }).then(function () {
+        var radio = document.querySelector('input[name="mode"][value="trial"]');
+        if (radio) radio.checked = true;
+        showFields();
+        paintAgent("trial");
+        refreshTrial();
+      });
+    });
+  });
+
+  $("trialSignOut").addEventListener("click", function () {
+    window.AgentLocal.trialSignOut().then(function () {
+      sayTo("trialResult", "Signed out.", "");
+      refreshTrial();
+    });
+  });
+
+  // Enter in these fields means their button, not "save the whole form".
+  [["trialEmail", "trialSend"], ["trialCode", "trialVerify"]].forEach(function (pair) {
+    $(pair[0]).addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { e.preventDefault(); $(pair[1]).click(); }
+    });
+  });
 
   // The local helper, reached through native messaging: alive? signed in?
   function hostSession(onMessage, onGone) {
@@ -361,6 +441,7 @@
     chrome.storage.local.set({ [API_KEY]: k }).then(function () {
       paintAgent(k.mode);
       sayTo("modeResult", "Saved — reopen the side panel if it was open.", "ok");
+      if (k.mode === "trial") refreshTrial(); // says so when the trial still needs a sign-in
     });
   });
 
