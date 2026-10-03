@@ -158,3 +158,46 @@ test("telegram bot: /chats lists chats; approvals and question options are butto
     win.AgentTelegram.stop();
   }
 });
+
+// The host streams only the chat the panel shows. A task started from Telegram belongs to its own
+// chat: when the desktop switches chats, the other chat's stream must not land in the Telegram
+// message, the task must not be reported done on the other chat's result, and /stop must hit the
+// task's chat. The end comes from runState (sent for every chat), and a stopped task says so.
+test("telegram bot: a task follows its own chat across a desktop chat switch; /stop ends it as Stopped", { timeout: 15000 }, async () => {
+  const tg = fakeTelegram();
+  const { rec, api } = fakeRemote();
+  const win = loadBot(tg.fetch, api);
+  win.AgentTelegram.start(BOT);
+  try {
+    await waitFor(() => tg.calls.some((c) => c.method === "getUpdates" && c.body.offset === 6));
+    rec.st.chats = [{ id: "c1", title: "Flights" }, { id: "c2", title: "Hotels" }];
+    rec.st.activeChatId = "c1";
+    tg.push(fromOwner(6, "find flights"));
+    await waitFor(() => rec.toHost.some((m) => m.type === "prompt"));
+    panel(win, { type: "runState", convId: "c1", running: true });
+    rec.st.running = { c1: true };
+    panel(win, { type: "text", text: "Looking…" });
+    await waitFor(() => tg.calls.find((c) => c.method === "sendMessage" && c.body.text.startsWith("Looking…")));
+
+    // The desktop user opens another chat and works there.
+    rec.st.activeChatId = "c2";
+    panel(win, { type: "text", text: "HOTEL TEXT" });
+    panel(win, { type: "result" });
+    panel(win, { type: "idle" });
+    await delay(200);
+    assert.ok(!tg.calls.some((c) => /HOTEL TEXT/.test(c.body.text || "")), "the other chat's text leaked into the Telegram task");
+    assert.ok(!tg.calls.some((c) => c.method === "editMessageText" && c.body.text === "Looking…"), "finished on the other chat's result");
+
+    // /stop aims at the task's chat, not the one the desktop shows.
+    tg.push(fromOwner(7, "/stop"));
+    await waitFor(() => rec.toHost.some((m) => m.type === "interrupt"));
+    const at = rec.toHost.findIndex((m) => m.type === "interrupt");
+    assert.deepEqual(rec.toHost[at - 1], { type: "openConversation", id: "c1" });
+    panel(win, { type: "runState", convId: "c1", running: false });
+    const final = await waitFor(() => tg.calls.find((c) => c.method === "editMessageText" && /Stopped/.test(c.body.text)));
+    assert.equal(final.body.text, "Looking…\n\n■ Stopped.");
+    assert.equal(final.body.message_id, 100);
+  } finally {
+    win.AgentTelegram.stop();
+  }
+});

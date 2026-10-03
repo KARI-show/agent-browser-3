@@ -104,24 +104,31 @@
 
   async function loop(b) {
     var signal = b.ctrl.signal;
-    try {
-      var me = await api("getMe", {}, signal);
-      b.username = me.username;
-      // Long polling needs the webhook off.
-      await api("deleteWebhook", { drop_pending_updates: false }, signal);
-      // Skip what piled up while the panel was closed: acting on stale orders
-      // the moment a panel opens would surprise the user.
-      var backlog = await api("getUpdates", { offset: -1, timeout: 0 }, signal);
-      if (backlog.length) b.offset = backlog[backlog.length - 1].update_id + 1;
-      if (signal.aborted || bot !== b) return; // turned off while starting
-      R().up("Telegram bot @" + b.username,
-        "🤖 Remote ON — message @" + b.username + " in Telegram to work in this browser (keep this panel open). /chats switches chats, /stop stops a task.");
-    } catch (e) {
-      if (signal.aborted || bot !== b) return;
-      return R().fail(e.code === 401 || e.code === 404 ? "Telegram rejected the bot token — check it in the settings." : "Can't reach Telegram (" + e.message + ").");
+    // Start: a bad token is final; anything else (the panel opened before the network was up)
+    // is retried, so remote doesn't stay dead until the user toggles 🛰 by hand.
+    while (true) {
+      try {
+        var me = await api("getMe", {}, signal);
+        b.username = me.username;
+        // Long polling needs the webhook off.
+        await api("deleteWebhook", { drop_pending_updates: false }, signal);
+        // Skip what piled up while the panel was closed: acting on stale orders
+        // the moment a panel opens would surprise the user.
+        var backlog = await api("getUpdates", { offset: -1, timeout: 0 }, signal);
+        if (backlog.length) b.offset = backlog[backlog.length - 1].update_id + 1;
+        if (signal.aborted || bot !== b) return; // turned off while starting
+        R().up("Telegram bot @" + b.username,
+          "🤖 Remote ON — message @" + b.username + " in Telegram to work in this browser (keep this panel open). /chats switches chats, /stop stops a task.");
+        break;
+      } catch (e) {
+        if (signal.aborted || bot !== b) return;
+        if (e.code === 401 || e.code === 404) return R().fail("Telegram rejected the bot token — check it in the settings.");
+        R().status("error", "Can't reach Telegram (" + e.message + ") — retrying…");
+        await sleep(5000);
+      }
     }
 
-    var conflictShown = false;
+    var degraded = false; // 🛰 shows an error until polling works again
     while (!signal.aborted && bot === b) {
       var updates;
       try {
@@ -129,16 +136,18 @@
       } catch (e) {
         if (signal.aborted || bot !== b) return;
         if (e.code === 401 || e.code === 404) return R().fail("Telegram rejected the bot token — check it in the settings.");
-        if (e.code === 409) {
-          // Someone else polls this bot (VS Code's bot, a server) — Telegram allows one.
-          if (!conflictShown) R().status("error", "Another program is using this bot (VS Code's Telegram bot?) — use a separate bot");
-          conflictShown = true;
+        if (!degraded) {
+          R().status("error", e.code === 409
+            // Someone else polls this bot (VS Code's bot, a server) — Telegram allows one.
+            ? "Another program is using this bot (VS Code's Telegram bot?) — use a separate bot"
+            : "Can't reach Telegram (" + e.message + ") — retrying…");
         }
+        degraded = true;
         await sleep(5000);
         continue;
       }
-      if (conflictShown) {
-        conflictShown = false;
+      if (degraded) {
+        degraded = false;
         R().status("on", "Telegram bot @" + b.username);
       }
       for (var i = 0; i < updates.length; i++) {
@@ -201,7 +210,12 @@
       return say("🆕 New chat — send your first task.").catch(noop);
     }
     if (cmd === "/stop") {
-      if (!st.activeChatId || !st.running[st.activeChatId]) return say("Nothing is running.").catch(noop);
+      // Stop the Telegram task's own chat, even if the desktop switched to another one meanwhile
+      // (the host interrupts the chat it shows, so bring that one back first).
+      var target = turn && turn.convId ? turn.convId : st.activeChatId;
+      if (!target || !st.running[target]) return say("Nothing is running.").catch(noop);
+      if (turn) turn.stopped = true;
+      if (target !== st.activeChatId) R().toHost({ type: "openConversation", id: target });
       R().toHost({ type: "interrupt" });
       return say("■ Stopping…").catch(noop);
     }
@@ -242,7 +256,8 @@
     if (st.activeChatId && st.running[st.activeChatId]) {
       return say("⏳ Still working on the last task — wait for the reply or send /stop.").catch(noop);
     }
-    turn = { text: "", status: "", msgId: null, timer: null, lastEdit: 0, chain: Promise.resolve() };
+    // The task belongs to the chat open now; a brand-new chat gets its id from the first runState.
+    turn = { convId: st.activeChatId || null, stopped: false, text: "", status: "", msgId: null, timer: null, lastEdit: 0, chain: Promise.resolve() };
     // The panel shows the message like any mirrored one, then the host runs it.
     R().local({ type: "user", text: text });
     R().toHost({ type: "prompt", text: text, attachments: [] });
@@ -344,45 +359,61 @@
   }
 
   // ── What the host shows in the panel → Telegram (for tasks sent from there) ─
+  // The host streams only the chat the panel shows and names the chat in runState. So the stream
+  // is the Telegram task's only while that chat is the open one; the end of the task is taken from
+  // runState (always sent), not from result/idle (sent only while the chat is open).
+
+  function mine() {
+    return !!turn && (!turn.convId || R().state().activeChatId === turn.convId);
+  }
+
+  function done() {
+    finish(turn && turn.stopped ? "■ Stopped." : undefined);
+  }
 
   window.addEventListener("message", function (ev) {
     var d = ev.data;
     if (!bot || !d || typeof d.type !== "string" || d.__local) return;
     switch (d.type) {
+      case "runState":
+        if (!turn || typeof d.convId !== "string") break;
+        if (d.running && !turn.convId) turn.convId = d.convId;
+        else if (!d.running && turn.convId === d.convId) done();
+        break;
       case "text":
-        if (turn && typeof d.text === "string") {
+        if (mine() && typeof d.text === "string") {
           turn.text += d.text;
           scheduleRefresh();
         }
         break;
       case "tool":
-        if (turn) {
+        if (mine()) {
           var what = describe(d.name, d.input);
           turn.status = "🔧 " + shortTool(d.name) + (what ? " — " + what.slice(0, 80) : "") + "…";
           scheduleRefresh();
         }
         break;
       case "approval":
-        if (turn) askApproval(d);
+        if (mine()) askApproval(d);
         break;
       case "approvalResolved":
         approvalResolved(d);
         break;
       case "question":
-        if (turn) askQuestion(d);
+        if (mine()) askQuestion(d);
         break;
       case "questionResolved":
         questionResolved(d);
         break;
       case "notice":
-        if (turn) say("⚠ " + d.message).catch(noop);
+        if (mine()) say("⚠ " + d.message).catch(noop);
         break;
       case "error":
-        if (turn) finish("⚠ " + d.message);
+        if (mine()) finish("⚠ " + d.message);
         break;
       case "result":
       case "idle":
-        finish();
+        if (mine()) done();
         break;
     }
   });
