@@ -16,3 +16,6 @@ dist/
 # browser extension build output
 dist-browser/
 trial-server/data/
+
+# build output that is regenerated on every build (main.js itself ships with the relay web app)
+media/main.js.map
