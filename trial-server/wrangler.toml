@@ -4,6 +4,7 @@
 #   3. wrangler d1 execute agent-trial --remote --file=schema.sql
 #   4. wrangler secret put ANTHROPIC_API_KEY     (and ANTHROPIC_WORKSPACE_ID if your key needs it)
 #   5. wrangler deploy                           → the URL it prints is AGENT_TRIAL_URL for the extension build
+#   6. email sign-in: wrangler secret put RESEND_API_KEY and ADMIN_TOKEN, set MAIL_FROM below (README.md)
 # Run these from the trial-server/ directory. Needs a Workers Paid plan for real traffic (CPU time).
 name = "agent-trial-gateway"
 main = "worker.mjs"
@@ -22,3 +23,5 @@ database_id = "REPLACE_WITH_YOUR_D1_ID"
 # TRIAL_IP_DAILY_USD = "0.75"
 # TRIAL_GLOBAL_DAILY_USD = "20"
 # ALLOWED_ORIGINS = "chrome-extension://ppakaagcjnojicbdebhgkpjgikclbnlf"
+# MAIL_FROM = "Agent Browser <login@your-domain.com>"
+# AUTH_ALLOWED_EMAILS = ""   # invite list: "me@x.com,@team.org"; empty = anyone

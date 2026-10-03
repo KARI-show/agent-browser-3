@@ -2,19 +2,44 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 /**
- * Trial state: registered tokens (stored only as hashes) and spend counters.
+ * Trial state: tokens (stored only as hashes), spend counters, the customer list and pending sign-in codes.
  * The interface is tiny on purpose — swap MemoryStore/FileStore for KV or Redis
  * (or D1 on Cloudflare) when running on a platform without a disk.
  *
  *   getToken(hash) / putToken(hash, rec)
- *   tokenCount() -> number        how many tokens exist (sign-ups pause at a cap)
+ *   tokenCount() -> number        how many tokens exist
  *   get(key) -> number            counters, micro-USD or counts
  *   add(key, n) -> number         ATOMIC increment (n may be negative), returns the new value
+ *   getUser(email) / putUser(email, rec) / userCount() / listUsers()     customers (auth.mjs)
+ *   getCode(email) / putCode(email, rec) / deleteCode(email)             one pending sign-in code per address
  */
 export class MemoryStore {
   constructor() {
     this.tokens = new Map();
     this.counters = new Map();
+    this.users = new Map();
+    this.codes = new Map();
+  }
+  async getUser(email) {
+    return this.users.get(email);
+  }
+  async putUser(email, rec) {
+    this.users.set(email, rec);
+  }
+  async userCount() {
+    return this.users.size;
+  }
+  async listUsers() {
+    return [...this.users.values()];
+  }
+  async getCode(email) {
+    return this.codes.get(email);
+  }
+  async putCode(email, rec) {
+    this.codes.set(email, rec);
+  }
+  async deleteCode(email) {
+    this.codes.delete(email);
   }
   async getToken(hash) {
     return this.tokens.get(hash);
@@ -61,19 +86,34 @@ export class FileStore extends MemoryStore {
       }
       this.tokens = new Map(Object.entries(data.tokens || {}));
       this.counters = new Map(Object.entries(data.counters || {}));
+      this.users = new Map(Object.entries(data.users || {}));
+      this.codes = new Map(Object.entries(data.codes || {}).filter(([, c]) => c.expiresAt > now()));
     }
-    // Drop per-day counters older than a few days, and tokens that were issued but never spent anything.
+    // Drop per-day counters older than a few days, and anonymous tokens that were issued but never spent anything
+    // (a signed-in customer's spend is counted under the person, and their token stays until they sign in again).
     const oldest = new Date(now() - keepDays * DAY_MS).toISOString().slice(0, 10);
     for (const k of [...this.counters.keys()]) {
       const m = /:(\d{4}-\d{2}-\d{2})$/.exec(k);
       if (m && m[1] < oldest) this.counters.delete(k);
     }
     for (const [hash, rec] of [...this.tokens]) {
-      if (!this.counters.get(`tok:${hash}:total`) && now() - (rec.createdAt || 0) > staleTokenDays * DAY_MS) this.tokens.delete(hash);
+      if (!rec.userId && !this.counters.get(`tok:${hash}:total`) && now() - (rec.createdAt || 0) > staleTokenDays * DAY_MS) this.tokens.delete(hash);
     }
   }
   async putToken(hash, rec) {
     await super.putToken(hash, rec);
+    this.#schedule();
+  }
+  async putUser(email, rec) {
+    await super.putUser(email, rec);
+    this.#schedule();
+  }
+  async putCode(email, rec) {
+    await super.putCode(email, rec);
+    this.#schedule();
+  }
+  async deleteCode(email) {
+    await super.deleteCode(email);
     this.#schedule();
   }
   async add(key, n) {
@@ -96,7 +136,7 @@ export class FileStore extends MemoryStore {
       this.timer = null;
     }
     try {
-      const data = { tokens: Object.fromEntries(this.tokens), counters: Object.fromEntries(this.counters) };
+      const data = { tokens: Object.fromEntries(this.tokens), counters: Object.fromEntries(this.counters), users: Object.fromEntries(this.users), codes: Object.fromEntries(this.codes) };
       fs.mkdirSync(path.dirname(this.file), { recursive: true });
       const tmp = this.file + ".tmp";
       fs.writeFileSync(tmp, JSON.stringify(data), { mode: 0o600 });

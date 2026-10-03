@@ -11,7 +11,7 @@ import { KV } from "./store";
  * status).
  *
  * Three ways to run the agent, chosen in the settings:
- *  - "trial"        free trial through the operator's gateway (trial-server/): no key, limited
+ *  - "trial"        free trial through the operator's gateway (trial-server/): sign in by email, limited
  *  - "api"          the user's own Anthropic API key, straight from the extension
  *  - "subscription" the local host with the user's own Claude Code sign-in (no built-in agent)
  */
@@ -58,30 +58,42 @@ function resolveMode(s: Record<string, unknown>): Mode {
   return TRIAL_URL ? "trial" : "subscription";
 }
 
-async function registerTrial(): Promise<string> {
-  let res: Response;
-  try {
-    res = await fetch(`${TRIAL_URL}/register`, { method: "POST", headers: { "x-register-secret": "" } });
-  } catch {
-    throw new Error("Couldn't reach the free-trial service. Check your connection, or add your own API key in the settings.");
-  }
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok || typeof body.token !== "string") {
-    throw new Error(body?.error?.message || `The free trial isn't available right now (${res.status}). Add your own API key in the settings.`);
-  }
-  await chrome.storage.local.set({ [TRIAL_KEY]: { token: body.token, url: TRIAL_URL } });
-  return body.token;
+/** The free-trial sign-in: a token from the gateway's email sign-in, and how to talk to that gateway. */
+interface TrialAccount {
+  token: string;
+  url: string;
+  email: string;
+  transport: "messages" | "agent";
 }
 
-/** What the built-in agent talks to: the trial gateway with this install's token, or the API with the user's key. */
+async function trialAccount(): Promise<TrialAccount | null> {
+  const t = ((await chrome.storage.local.get(TRIAL_KEY))[TRIAL_KEY] || {}) as Partial<TrialAccount>;
+  // A token from another gateway (a different build), or an anonymous one from before sign-in existed, is no account.
+  if (!t.token || !t.email || t.url !== TRIAL_URL) return null;
+  return { token: t.token, url: t.url, email: t.email, transport: t.transport === "agent" ? "agent" : "messages" };
+}
+
+/** POST to the trial gateway's sign-in; the body on success, else an Error with the gateway's own words. */
+async function trialPost(path: string, body: unknown): Promise<Record<string, unknown>> {
+  let res: Response;
+  try {
+    res = await fetch(`${TRIAL_URL}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  } catch {
+    throw new Error("Couldn't reach the free-trial service. Check your connection.");
+  }
+  const out = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(out?.error?.message || `The free-trial service answered ${res.status}.`);
+  return out;
+}
+
+/** What the built-in agent talks to: the trial gateway with the signed-in token, or the API with the user's key. */
 async function loadSettings(): Promise<Settings> {
   const s = await stored();
   const effort = EFFORTS.includes(s.effort as Effort) ? (s.effort as Effort) : undefined;
   if (resolveMode(s) === "trial") {
-    let t = ((await chrome.storage.local.get(TRIAL_KEY))[TRIAL_KEY] || {}) as { token?: string; url?: string };
-    // A token from another gateway (a different build) is useless here.
-    if (!t.token || t.url !== TRIAL_URL) t = { token: await registerTrial(), url: TRIAL_URL };
-    return { apiKey: t.token, baseUrl: TRIAL_URL, effort, trial: true };
+    const t = await trialAccount();
+    if (!t) throw new Error("Sign in to the free trial with your email — open the settings (🌐) → Free trial.");
+    return { apiKey: t.token, baseUrl: TRIAL_URL, effort, trial: true, trialTransport: t.transport };
   }
   const baseUrl = str(s.baseUrl);
   return {
@@ -184,17 +196,57 @@ const PROMPT_ID = fnv(defs.system + JSON.stringify(defs.tools));
     }
   },
 
-  /** Settings page: how much of the free trial is left (registers this install on first use). */
-  async trialStatus(): Promise<{ ok: boolean; message: string }> {
+  /** Settings page: how much of the free trial is left for the signed-in account. */
+  async trialStatus(): Promise<{ ok: boolean; message: string; signedOut?: boolean }> {
     if (!TRIAL_URL) return { ok: false, message: "This build has no free-trial service configured." };
+    const t = await trialAccount();
+    if (!t) return { ok: false, message: "Not signed in.", signedOut: true };
     try {
-      const s = await loadSettings();
-      const r = await fetch(`${TRIAL_URL}/status`, { headers: { "x-api-key": s.apiKey || "" } });
+      const r = await fetch(`${TRIAL_URL}/status`, { headers: { "x-api-key": t.token } });
       const body = await r.json().catch(() => ({}));
+      if (r.status === 401) {
+        await chrome.storage.local.remove(TRIAL_KEY); // the gateway doesn't know this token any more
+        return { ok: false, message: body?.error?.message || "Signed out — sign in again.", signedOut: true };
+      }
       if (!r.ok) return { ok: false, message: body?.error?.message || `The free trial answered ${r.status}.` };
-      return { ok: true, message: `Free trial: about $${body.dailyLeftUsd.toFixed(2)} left today, $${body.totalLeftUsd.toFixed(2)} in total. Models: ${body.models.join(", ")}.` };
+      return { ok: true, message: `About $${body.dailyLeftUsd.toFixed(2)} left today, $${body.totalLeftUsd.toFixed(2)} in total. Models: ${body.models.join(", ")}.` };
     } catch (e) {
       return { ok: false, message: String((e as Error)?.message ?? e) };
     }
+  },
+
+  /** Settings page: the signed-in address, or null. */
+  async trialAccount(): Promise<{ email: string } | null> {
+    const t = await trialAccount();
+    return t && { email: t.email };
+  },
+
+  /** Settings page, step 1: mail a sign-in code to this address. */
+  async trialStart(email: string): Promise<{ ok: boolean; message: string }> {
+    if (!TRIAL_URL) return { ok: false, message: "This build has no free-trial service configured." };
+    try {
+      const r = await trialPost("/auth/start", { email });
+      return { ok: true, message: `We sent a 6-digit code to ${r.email}. It works for ${Math.round(Number(r.expiresInSec) / 60) || 10} minutes.` };
+    } catch (e) {
+      return { ok: false, message: (e as Error).message };
+    }
+  },
+
+  /** Settings page, step 2: trade the code for this install's token. */
+  async trialVerify(email: string, code: string): Promise<{ ok: boolean; message: string }> {
+    if (!TRIAL_URL) return { ok: false, message: "This build has no free-trial service configured." };
+    try {
+      const r = await trialPost("/auth/verify", { email, code });
+      if (typeof r.token !== "string" || typeof r.email !== "string") return { ok: false, message: "The free-trial service sent an unexpected answer." };
+      const account: TrialAccount = { token: r.token, url: TRIAL_URL, email: r.email, transport: r.transport === "agent" ? "agent" : "messages" };
+      await chrome.storage.local.set({ [TRIAL_KEY]: account });
+      return { ok: true, message: `Signed in as ${r.email}.` };
+    } catch (e) {
+      return { ok: false, message: (e as Error).message };
+    }
+  },
+
+  async trialSignOut(): Promise<void> {
+    await chrome.storage.local.remove(TRIAL_KEY);
   },
 };

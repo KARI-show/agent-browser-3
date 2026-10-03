@@ -9,7 +9,7 @@ extension (official SDK)  ──  trial token  ──▶  this gateway  ── y
 ```
 
 The extension talks to it exactly like to the real API (`POST /v1/messages`
-streaming, `GET /v1/models`), with a per-install **trial token** in place of a
+streaming, `GET /v1/models`), with a **trial token** in place of a
 key. Everything else in the extension is unchanged.
 
 ## Run
@@ -54,7 +54,7 @@ that. Tested in the real Workers runtime (`wrangler dev`, workerd + D1): sign-up
 streaming, key swap, atomic counters under parallel load, charge for a cancelled
 stream, exhaustion, per-address limits. Not tested here: your account's limits,
 custom domains and Cloudflare's own rate-limit/WAF rules (worth adding in front —
-a rate-limiting rule on `/register` is the cheapest extra protection).
+a rate-limiting rule on `/auth/start` is the cheapest extra protection).
 
 ## Settings (environment)
 
@@ -63,12 +63,10 @@ a rate-limiting rule on `/register` is the cheapest extra protection).
 | `ANTHROPIC_API_KEY` | — | **required**, stays on the server |
 | `ANTHROPIC_WORKSPACE_ID` | — | needed when the key isn't scoped to a workspace |
 | `TRIAL_MODELS` | `claude-haiku-4-5,claude-sonnet-5-5` | allow-list; the first is the extension's default |
-| `TRIAL_TOKEN_DAILY_USD` | `0.25` | per install, per UTC day |
-| `TRIAL_TOKEN_TOTAL_USD` | `1.00` | per install, lifetime |
+| `TRIAL_TOKEN_DAILY_USD` | `0.25` | per customer (all their devices), per UTC day |
+| `TRIAL_TOKEN_TOTAL_USD` | `1.00` | per customer, lifetime |
 | `TRIAL_IP_DAILY_USD` | `0.75` | per network (IPv6 grouped by /64) per day |
 | `TRIAL_GLOBAL_DAILY_USD` | `20` | **hard ceiling for the whole trial per day** |
-| `TRIAL_REGISTER_PER_IP_DAY` | `3` | new trial tokens per network per day |
-| `TRIAL_MAX_REGISTERED` | `100000` | stored tokens; sign-ups pause beyond this |
 | `TRIAL_TOKEN_RPM` / `TRIAL_IP_RPM` | `90` / `240` | requests per minute per token / per network |
 | `TRIAL_MAX_CONCURRENT` | `24` | requests in flight across the whole gateway (bounds buffered request bodies) |
 | `TRIAL_MAX_TOKENS` | `8192` | output cap per request (clamped, not refused) |
@@ -77,6 +75,56 @@ a rate-limiting rule on `/register` is the cheapest extra protection).
 | `ALLOWED_ORIGINS` | the extension's id | CORS allow-list (comma separated) |
 | `TRUST_IP_HEADER` | — | e.g. `x-forwarded-for` / `cf-connecting-ip` — **only** behind infrastructure that sets it |
 | `PORT` | `8787` | |
+
+## Sign-in by email and the customer list
+
+People sign in from the extension's settings with a one-time code sent to their
+email; the code buys a trial token, and the person is one row in `users` (D1) or
+`users` in the state file — however many devices or sign-ins. Budgets, the
+request rate and the three-at-a-time limit count against the **person**, so a new
+sign-in doesn't reset anything.
+
+```
+POST /auth/start  { email }        → code mailed (6 digits, valid 10 min, hash stored only)
+POST /auth/verify { email, code }  → { token, email, models, limits, transport: "messages" }
+```
+
+- **Sending mail**: [Resend](https://resend.com) over HTTPS (works on Workers too):
+  set `RESEND_API_KEY` and `MAIL_FROM` (`Agent Browser <login@your-domain.com>`,
+  the domain verified in Resend). **Without `RESEND_API_KEY` the code is printed to
+  the server log** — handy for trying it out; nobody but the operator can sign in.
+- **Limits**: a new code at most once a minute per address; 5 codes per address
+  and 20 per network per day; 5 tries per code (counted atomically, so parallel
+  guessing can't get more), then it's void.
+- **Invite list**: `AUTH_ALLOWED_EMAILS=me@x.com,@my-team.org` (addresses or whole
+  domains) — empty means anyone may sign in.
+- **The customer list** (with `ADMIN_TOKEN` set — 24+ random characters, server
+  side only, never in the extension):
+  ```bash
+  curl -H "authorization: Bearer $ADMIN_TOKEN" https://gateway/admin/users              # JSON
+  curl -H "authorization: Bearer $ADMIN_TOKEN" "https://gateway/admin/users?format=csv" > customers.csv
+  curl -H "authorization: Bearer $ADMIN_TOKEN" -H "content-type: application/json" \
+       -d '{"email":"someone@x.com","blocked":true}' https://gateway/admin/users/block   # stops their tokens at once
+  ```
+  Without `ADMIN_TOKEN` these paths answer 404. On Cloudflare the table is also
+  right there: `wrangler d1 execute agent-trial --remote --command "SELECT rec FROM users"`.
+- Existing D1 databases: run `schema.sql` again — it only adds the new tables.
+
+| Variable | Default | |
+| --- | --- | --- |
+| `RESEND_API_KEY` / `MAIL_FROM` | — | mail delivery (secret / sender) |
+| `ADMIN_TOKEN` | — | enables `/admin/users` (secret) |
+| `AUTH_ALLOWED_EMAILS` | — | invite list; empty = open |
+| `AUTH_APP_NAME` | `Agent Browser` | name in the email |
+| `AUTH_CODE_TTL_MIN` / `AUTH_MAX_ATTEMPTS` / `AUTH_RESEND_SECONDS` | `10` / `5` / `60` | |
+| `AUTH_CODES_PER_EMAIL_DAY` / `AUTH_CODES_PER_IP_DAY` | `5` / `20` | |
+| `AUTH_MAX_USERS` | `100000` | new sign-ups pause beyond this (existing customers still get in) |
+
+**Personal data.** The customer list holds email addresses and IP addresses:
+say so in a privacy policy the sign-in links to, and keep the data where the law
+your users live under wants it (e.g. Russia's 152-FZ requires Russian citizens'
+personal data to be stored on servers in Russia; the EU's GDPR gives people the
+right to have their row deleted).
 
 ## What it enforces
 
@@ -113,10 +161,10 @@ a rate-limiting rule on `/register` is the cheapest extra protection).
 
 ## Things to decide / know
 
-- **Anonymous by design.** A determined person can still farm free usage with many
-  IPs; the per-network and global caps bound the damage to a number you choose.
-  Add a CAPTCHA to `/register` (Cloudflare Turnstile is the usual choice) or
-  require sign-in if abuse shows up.
+- **One allowance per email address.** A determined person can still farm free
+  usage with many addresses and IPs; the per-network and global caps bound the
+  damage to a number you choose. Add a CAPTCHA to `/auth/start` (Cloudflare
+  Turnstile is the usual choice) or an invite list if abuse shows up.
 - **Privacy.** Trial traffic (prompts, page text, screenshots) passes through
   your server to Anthropic. Say so in the extension and your privacy policy; this
   gateway does not store it.
@@ -127,6 +175,7 @@ a rate-limiting rule on `/register` is the cheapest extra protection).
 
 ## Endpoints
 
-`POST /register` → `{ token, models, limits }` · `GET /status` (token) →
-remaining allowance · `GET /v1/models` (token) · `POST /v1/messages` (token) ·
-`GET /health`.
+`POST /auth/start` · `POST /auth/verify` → `{ token, email, models, limits, transport }` ·
+`GET /status` (token) → remaining allowance and email · `GET /v1/models` (token) ·
+`POST /v1/messages` (token) · `GET /health` · `GET /admin/users`, `POST /admin/users/block`
+(`ADMIN_TOKEN`). `POST /register` (anonymous sign-up, removed) answers 410.

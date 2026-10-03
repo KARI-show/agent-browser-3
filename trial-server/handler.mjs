@@ -1,10 +1,11 @@
 import { costMicroUsd, priceFor, reserveMicroUsd } from "./pricing.mjs";
+import { budgetOwner, createEmailAuth, createMailer } from "./auth.mjs";
 
 /**
  * Free-trial gateway: an Anthropic-compatible proxy that holds the operator's
  * API key and enforces limits, so the extension's SDK can talk to it exactly
- * like it talks to api.anthropic.com — with a per-install trial token in place
- * of a key. Web-standard (Request -> Response, WebCrypto, no Node built-ins),
+ * like it talks to api.anthropic.com — with a trial token in place of a key.
+ * Tokens come from an email sign-in (auth.mjs): budgets follow the person. Web-standard (Request -> Response, WebCrypto, no Node built-ins),
  * so the same handler runs under the Node adapter in server.mjs or a
  * Cloudflare Worker / Vercel function.
  *
@@ -26,11 +27,6 @@ const dec = new TextDecoder();
 async function sha(s) {
   const d = await crypto.subtle.digest("SHA-256", enc.encode(s));
   return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-function newToken() {
-  const b = new Uint8Array(32);
-  crypto.getRandomValues(b);
-  return "trl_" + btoa(String.fromCharCode(...b)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 const today = (now) => new Date(now()).toISOString().slice(0, 10);
 
@@ -200,8 +196,8 @@ function meter(body, now, onDone) {
   });
 }
 
-export function createHandler(cfg, store, { fetchImpl = fetch, now = Date.now, log = console } = {}) {
-  const inflight = new Map(); // token hash -> Map(requestId -> startedAt)
+export function createHandler(cfg, store, { fetchImpl = fetch, now = Date.now, log = console, sendCode } = {}) {
+  const inflight = new Map(); // budget owner (person or token) -> Map(requestId -> startedAt)
   let inflightTotal = 0;
   let seq = 0;
   const windows = new Map(); // rate limit key -> request timestamps
@@ -239,23 +235,37 @@ export function createHandler(cfg, store, { fetchImpl = fetch, now = Date.now, l
     return normalizeIp(ip);
   };
 
+  const auth = createEmailAuth({
+    cfg: cfg.auth,
+    store,
+    sendCode: sendCode || createMailer(cfg.auth, { log }),
+    clientIp,
+    enabled: () => cfg.enabled,
+    describe: () => ({ models: cfg.models, limits: { dailyUsd: cfg.tokenDailyMicro / 1e6, totalUsd: cfg.tokenTotalMicro / 1e6 }, transport: "messages" }),
+    now,
+    log,
+  });
+
+  /** { hash, rec, owner } — owner is who budgets and rate limits count against: the signed-in person. */
   async function authenticate(req) {
-    const auth = req.headers.get("authorization") || "";
-    const key = req.headers.get("x-api-key") || (/^Bearer\s+(.+)$/i.exec(auth) || [])[1] || "";
+    const header = req.headers.get("authorization") || "";
+    const key = req.headers.get("x-api-key") || (/^Bearer\s+(.+)$/i.exec(header) || [])[1] || "";
     const stop = { "x-should-retry": "false" };
-    if (!key.startsWith("trl_")) return { error: errorResponse(401, "authentication_error", "Missing or invalid trial token. Reopen the extension settings and choose the free trial again.", stop) };
+    if (!key.startsWith("trl_")) return { error: errorResponse(401, "authentication_error", "Missing or invalid trial token. Sign in to the free trial again in the extension settings.", stop) };
     const hash = await sha(key);
     const rec = await store.getToken(hash);
-    if (!rec) return { error: errorResponse(401, "authentication_error", "Unknown trial token. Reopen the extension settings and choose the free trial again.", stop) };
+    if (!rec) return { error: errorResponse(401, "authentication_error", "Unknown trial token. Sign in to the free trial again in the extension settings.", stop) };
     if (rec.revoked) return { error: errorResponse(403, "permission_error", "This trial token has been disabled.", stop) };
-    return { hash, rec };
+    const blocked = await auth.refuseBlocked(rec);
+    if (blocked) return { error: blocked };
+    return { hash, rec, owner: budgetOwner(rec, hash) };
   }
 
   // ---- budgets: reserve the worst case, settle to the truth ------------------
 
-  const budgetKeys = (hash, ip) => {
+  const budgetKeys = (owner, ip) => {
     const d = today(now);
-    return [`tok:${hash}:${d}`, `tok:${hash}:total`, `ip:${ip}:${d}`, `glob:${d}`];
+    return [`${owner}:${d}`, `${owner}:total`, `ip:${ip}:${d}`, `glob:${d}`];
   };
   const limits = () => [cfg.tokenDailyMicro, cfg.tokenTotalMicro, cfg.ipDailyMicro, cfg.globalDailyMicro];
 
@@ -281,8 +291,8 @@ export function createHandler(cfg, store, { fetchImpl = fetch, now = Date.now, l
   }
 
   /** Atomically add `cost` to every budget; if any goes over its limit, undo and refuse. */
-  async function reserve(hash, ip, cost) {
-    const keys = budgetKeys(hash, ip);
+  async function reserve(owner, ip, cost) {
+    const keys = budgetKeys(owner, ip);
     const lim = limits();
     const totals = await Promise.all(keys.map((k) => store.add(k, cost)));
     const over = totals.findIndex((t, i) => t > lim[i]);
@@ -293,25 +303,13 @@ export function createHandler(cfg, store, { fetchImpl = fetch, now = Date.now, l
 
   // ---- routes ---------------------------------------------------------------
 
-  async function register(req, ctx) {
-    if (!cfg.enabled) return errorResponse(503, "overloaded_error", "The free trial is paused right now. Add your own API key in the extension settings.", { "x-should-retry": "false" });
-    if ((await store.tokenCount()) >= cfg.maxRegistered) return errorResponse(503, "overloaded_error", "Free-trial sign-ups are paused right now. Add your own API key in the extension settings.", { "x-should-retry": "false" });
-    const ip = clientIp(req, ctx);
-    const n = await store.add(`reg:${ip}:${today(now)}`, 1);
-    if (n > cfg.registerPerIpPerDay) {
-      return errorResponse(429, "rate_limit_error", "Too many free-trial sign-ups from this network today. Try again tomorrow, or add your own API key in the extension settings.", { "x-should-retry": "false", "retry-after": String(secondsUntilUtcMidnight(now)) });
-    }
-    const token = newToken();
-    await store.putToken(await sha(token), { createdAt: now(), ip });
-    return json(200, { token, models: cfg.models, limits: { dailyUsd: cfg.tokenDailyMicro / 1e6, totalUsd: cfg.tokenTotalMicro / 1e6 } });
-  }
-
   async function status(req, ctx) {
     const a = await authenticate(req);
     if (a.error) return a.error;
-    const [tokDay, tokTotal] = await Promise.all(budgetKeys(a.hash, clientIp(req, ctx)).slice(0, 2).map((k) => store.get(k)));
+    const [tokDay, tokTotal] = await Promise.all(budgetKeys(a.owner, clientIp(req, ctx)).slice(0, 2).map((k) => store.get(k)));
     return json(200, {
       enabled: cfg.enabled,
+      email: a.rec.email || null,
       models: cfg.models,
       dailyLeftUsd: Math.max(0, cfg.tokenDailyMicro - tokDay) / 1e6,
       totalLeftUsd: Math.max(0, cfg.tokenTotalMicro - tokTotal) / 1e6,
@@ -424,23 +422,23 @@ export function createHandler(cfg, store, { fetchImpl = fetch, now = Date.now, l
     const ip = clientIp(req, ctx);
 
     // Cheap gates first — before a body is read or parsed.
-    if (!allow(`rpm:tok:${a.hash}`, cfg.tokenRpm) || !allow(`rpm:ip:${ip}`, cfg.ipRpm)) {
+    if (!allow(`rpm:${a.owner}`, cfg.tokenRpm) || !allow(`rpm:ip:${ip}`, cfg.ipRpm)) {
       return errorResponse(429, "rate_limit_error", "Too many requests in a minute. Slow down a little.", { "retry-after": "10" });
     }
     if (inflightTotal >= cfg.maxConcurrent) return errorResponse(503, "overloaded_error", "The free trial is busy right now. Try again in a moment.", { "retry-after": "3" });
-    const mine = inflight.get(a.hash) || new Map();
+    const mine = inflight.get(a.owner) || new Map();
     for (const [id, t] of mine) if (now() - t > cfg.upstreamTimeoutMs + 60_000) (mine.delete(id), inflightTotal--); // a leaked slot can't lock a token forever
     if (mine.size >= MAX_PARALLEL_PER_TOKEN) return errorResponse(429, "rate_limit_error", "Too many requests at once. Wait for the current one to finish.", { "retry-after": "2" });
     const id = ++seq;
     mine.set(id, now());
-    inflight.set(a.hash, mine);
+    inflight.set(a.owner, mine);
     inflightTotal++;
     let released = false;
     const release = () => {
       if (released) return;
       released = true;
       if (mine.delete(id)) inflightTotal--;
-      if (!mine.size) inflight.delete(a.hash);
+      if (!mine.size) inflight.delete(a.owner);
     };
 
     let reservation = null;
@@ -474,7 +472,7 @@ export function createHandler(cfg, store, { fetchImpl = fetch, now = Date.now, l
       const body = s.body;
       const inputTok = estimateInputTokens(body);
       reserved = reserveMicroUsd(body.model, inputTok, body.max_tokens);
-      const r = await reserve(a.hash, ip, reserved);
+      const r = await reserve(a.owner, ip, reserved);
       if (r.error) {
         release();
         return r.error;
@@ -564,11 +562,11 @@ export function createHandler(cfg, store, { fetchImpl = fetch, now = Date.now, l
     try {
       const { pathname } = new URL(req.url);
       if (pathname === "/health" && req.method === "GET") res = json(200, { ok: true, enabled: cfg.enabled });
-      else if (pathname === "/register" && req.method === "POST") res = await register(req, ctx);
+      else if (pathname === "/register" && req.method === "POST") res = errorResponse(410, "invalid_request_error", "Free-trial sign-up is by email now. Update the extension and sign in from its settings.", { "x-should-retry": "false" });
       else if (pathname === "/status" && req.method === "GET") res = await status(req, ctx);
       else if (pathname === "/v1/models" && req.method === "GET") res = await models(req);
       else if (pathname === "/v1/messages" && req.method === "POST") res = await messages(req, ctx);
-      else res = errorResponse(pathname.startsWith("/v1/") || pathname === "/register" || pathname === "/status" ? 405 : 404, "invalid_request_error", "Not found.");
+      else res = (await auth.route(req, ctx)) || errorResponse(pathname.startsWith("/v1/") || pathname === "/status" ? 405 : 404, "invalid_request_error", "Not found.");
     } catch (e) {
       log.error?.("unhandled: " + clean(e && e.stack ? e.stack : e));
       res = errorResponse(500, "api_error", "Internal error.");

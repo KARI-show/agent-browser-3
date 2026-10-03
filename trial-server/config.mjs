@@ -1,3 +1,5 @@
+import { loadAuthConfig } from "./auth.mjs";
+
 /**
  * All limits come from the environment so the operator tunes them without code
  * changes. Money values are USD in the env, micro-USD internally.
@@ -33,12 +35,11 @@ export function loadConfig(env = process.env) {
     tokenTotalMicro: usd(env, "TRIAL_TOKEN_TOTAL_USD", 1.0),
     ipDailyMicro: usd(env, "TRIAL_IP_DAILY_USD", 0.75),
     globalDailyMicro: usd(env, "TRIAL_GLOBAL_DAILY_USD", 20),
-    registerPerIpPerDay: num(env, "TRIAL_REGISTER_PER_IP_DAY", 3),
-    maxRegistered: num(env, "TRIAL_MAX_REGISTERED", 100_000), // stored tokens; sign-ups pause beyond this
     // Requests per minute: per trial token, and per network (a household/office shares one).
     tokenRpm: num(env, "TRIAL_TOKEN_RPM", 90),
     ipRpm: num(env, "TRIAL_IP_RPM", 240),
     maxConcurrent: num(env, "TRIAL_MAX_CONCURRENT", 24), // whole gateway: bounds buffered request bodies
     upstreamTimeoutMs: num(env, "TRIAL_UPSTREAM_TIMEOUT_MS", 10 * 60_000),
+    auth: loadAuthConfig(env), // email sign-in: AUTH_*, RESEND_API_KEY, MAIL_FROM, ADMIN_TOKEN
   };
 }
