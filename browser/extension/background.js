@@ -202,11 +202,12 @@ chrome.webRequest.onAuthRequired.addListener(
   ["asyncBlocking"]
 );
 
-// ── Message handler for side panel requests ─────────────────────────────
-// Background: side panel не может вызывать chrome.windows.create напрямую
-// в некоторых браузерах (Edge). Design: side panel шлёт message, background
-// создаёт окно и возвращает результат.
+// ── Requests from the side panel ────────────────────────────────────────
+// Some browsers (Edge) refuse chrome.windows.create from a side panel, so the
+// panel asks the service worker to open the window. Only the extension's own
+// pages may ask: a content script's sender.url is the web page it runs in.
 chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  if (!sender || !sender.url || sender.url.indexOf(chrome.runtime.getURL("")) !== 0) return;
   if (msg && msg.type === "createWindow") {
     chrome.windows.create(msg.options || {}).then(function (win) {
       sendResponse({ ok: true, win: win });

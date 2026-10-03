@@ -17,8 +17,7 @@
     "privacy",
     "unlimitedStorage",
     "cookies",
-    "downloads",
-    "downloads.open"
+    "downloads"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -42,20 +41,5 @@
   "options_ui": {
     "page": "options.html",
     "open_in_tab": true
-  },
-  "content_scripts": [
-    {
-      "matches": ["<all_urls>"],
-      "js": ["fp-bridge.js"],
-      "run_at": "document_start",
-      "all_frames": true
-    },
-    {
-      "matches": ["<all_urls>"],
-      "js": ["inject-fingerprint.js"],
-      "run_at": "document_start",
-      "all_frames": true,
-      "world": "MAIN"
-    }
-  ]
+  }
 }
