@@ -424,7 +424,7 @@ test("browser_fill_form: array and object forms; unknown refs reported", { skip 
   const s = await read();
   const q = refOf(s, /"Search query"/);
   const email = refOf(s, /input:email/);
-  const color = refOf(s, /select "color"/);
+  const color = refOf(s, /select "Color"/);
   const agree = refOf(s, /input:checkbox "Agree"/);
   const out = await ok("browser_fill_form", {
     fields: [{ ref: q, value: "alpha" }, { ref: email, value: "a@b.co" }, { ref: color, value: "Green" }, { ref: agree, value: true }, { ref: 999, value: "x" }],
