@@ -98,20 +98,14 @@ Goal: test everything, fix bugs, drop what is pointless, bring the browser exten
 Baseline: `npm run check` 120/120; e2e 51 pass / 1 fail (#47 coverage) / 3 todo.
 Three parallel code audits (UI modules; engine + host; remote/Telegram/relay) fed the list below.
 
-### ⚠ State of this pass — NOT VERIFIED, NOT COMMITTED
-Midway, auto mode's safety classifier started refusing every shell command in the session (it reacted to
-the fingerprint-spoofing audit text in the transcript, not to the commands). Everything after the first
-e2e run (44 pass / 2 fail, both expected: fill_form message + profile coverage) was written with the
-editor only. **First thing in a fresh session:**
-```
-git rm browser/extension/fingerprint.js browser/extension/fp-bridge.js browser/extension/inject-fingerprint.js
-npm run check            # typecheck + build + unit tests (engine/host/telegram tests were changed)
-npm run test:e2e         # 46 tests expected: 2 former todo tests are real now, profile + pdf tests added
-git add -A && git commit  # then push to claude/gallant-shannon-u7caks
-```
-Expect small breakage to fix by hand: e2e regexes for the new tool texts, TS strictness in host.ts
-(`thinking` ConvMsg, `toolPolicy(() => BrowserMode)`), the profile e2e (data: URL tab + printToPDF for
-md→pdf is new code).
+### State
+Pushed to `claude/gallant-shannon-u7caks` (7 commits on top of 4f83e4b). Verified after the push:
+`npm run check` → 121/121; e2e (`npm run test:e2e`, Chromium) → 55/55, 0 todo (the two former
+todo tests — UA override after idle, cookie tools in a private window — are real tests now;
+device-profile and md/html→pdf coverage added). No PR opened.
+Note: midway the session's shell was blocked by auto mode's classifier (it reacted to the
+fingerprint-audit text, not to the commands); the work sat uncommitted in the container until the
+user left auto mode. Nothing was lost.
 
 ### Done — browserTools.js / tools.ts (42 tools)
 - Undeclared tools `browser_cache_extract`, `browser_download_open`, `browser_network_log` removed
