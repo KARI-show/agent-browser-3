@@ -76,6 +76,8 @@ class BrowserHost {
   private conversations = new ConversationStore(this.state as any);
   private current?: Conversation;
   private runs = new Map<string, RunHandle>();
+  /** Chats deleted while their run was still going (the run must not save them back). */
+  private deleted = new Set<string>();
   private pendingApprovals = new Map<string, { resolve: (ok: boolean) => void; convId: string }>();
   private pendingQuestions = new Map<string, { resolve: (answer: string) => void; convId: string }>();
   private pendingTools = new Map<number, (r: ToolContent) => void>();
@@ -191,6 +193,8 @@ class BrowserHost {
         break;
       case "deleteConversation": {
         const id = String(msg.id);
+        // A running chat finishes after the removal and would save itself back — remember the deletion.
+        if (this.runs.has(id)) this.deleted.add(id);
         this.runs.get(id)?.interrupt();
         if (this.current?.id === id) {
           this.current = undefined;
@@ -358,10 +362,11 @@ class BrowserHost {
     });
   }
 
-  private toolPolicy(mode: BrowserMode) {
+  private toolPolicy(currentMode: () => BrowserMode) {
     return (toolName: string, input: Record<string, unknown>) => {
       const short = browserToolName(toolName);
       if (short) {
+        const mode = currentMode();
         if (READ_ONLY_TOOLS.has(short) || mode === "agent") return { behavior: "allow" as const };
         if (mode === "ask") {
           return {
@@ -422,6 +427,7 @@ class BrowserHost {
     this.post({ type: "runState", convId: conv.id, running: true });
 
     let assistant: ConvMsg | undefined;
+    let thinking: ConvMsg | undefined;
     const live = (m: unknown) => {
       if (this.current === conv) this.post(m);
     };
@@ -447,11 +453,13 @@ class BrowserHost {
         thinking: { type: "adaptive", display: "summarized" },
         tools: BUILTIN_TOOLS,
         appendSystemPrompt: BROWSER_SYSTEM_PROMPT,
-        toolPolicy: this.toolPolicy(mode),
+        // Read the mode on every tool call, so switching it mid-run takes effect (as the built-in engine does).
+        toolPolicy: this.toolPolicy(() => (MODE_OPTIONS.some((o) => o.value === conv.mode) ? (conv.mode as BrowserMode) : mode)),
         mcpServers: { browser: createBrowserToolsServer(sdk, (n, a) => this.callBrowser(n, a)) },
       },
       {
         onText: (t) => {
+          thinking = undefined;
           if (!assistant) {
             assistant = { kind: "assistant", text: "" };
             conv.messages.push(assistant);
@@ -460,12 +468,20 @@ class BrowserHost {
           live({ type: "text", text: t });
         },
         onThinking: (t) => {
+          // Streamed per delta: keep one transcript entry open and grow it (one entry per delta meant
+          // hundreds of thinking bubbles and a state.json rewrite for each).
           assistant = undefined;
-          if (t.trim()) conv.messages.push({ kind: "thinking", text: t });
+          if (!t.trim() && !thinking) return;
+          if (!thinking) {
+            thinking = { kind: "thinking", text: "" };
+            conv.messages.push(thinking);
+          }
+          thinking.text += t;
           live({ type: "thinking", text: t });
         },
         onToolUse: (name, input, id) => {
           assistant = undefined;
+          thinking = undefined;
           const msg: ConvMsg = { kind: "tool", text: `🔧 ${name}`, tool: { name, input } };
           conv.messages.push(msg);
           this.toolMsgs.set(id, msg);
@@ -566,6 +582,7 @@ class BrowserHost {
     }
     this.post({ type: "runState", convId: conv.id, running: false });
     if (this.current === conv) this.post({ type: "idle" });
+    if (this.deleted.delete(conv.id)) return; // deleted while it ran: don't resurrect it
     try {
       await this.conversations.save(conv);
     } catch (e) {

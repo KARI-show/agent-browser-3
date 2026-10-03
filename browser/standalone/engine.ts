@@ -34,16 +34,19 @@ export interface ModelTraits {
   thinking: boolean;
   /** Send `output_config.effort` (refused by Haiku 4.5 and pre-4.5 models). */
   effort: boolean;
-  /** Effort levels the model accepts, when the Models API said (else low/medium/high). */
+  /** Effort levels the model accepts, when known (Models API, or the id of an older model); unknown = pass the request through. */
   efforts?: Effort[];
   maxInput?: number;
+  /** Output cap from the Models API; requests must not ask for more or they are refused outright. */
+  maxOutput?: number;
 }
 
 const EFFORT_ORDER: Effort[] = ["low", "medium", "high", "xhigh", "max"];
 
-/** The requested effort, or the nearest level below it that the model supports. */
+/** The requested effort, or the nearest level below it that the model is known to support. */
 export function effortFor(traits: ModelTraits, want: Effort): Effort {
-  const ok = traits.efforts?.length ? traits.efforts : (["low", "medium", "high"] as Effort[]);
+  const ok = traits.efforts;
+  if (!ok?.length) return want; // nothing says the model refuses it — clamping here silently downgraded xhigh/max
   for (let i = EFFORT_ORDER.indexOf(want); i >= 0; i--) if (ok.includes(EFFORT_ORDER[i])) return EFFORT_ORDER[i];
   return ok[0];
 }
@@ -58,6 +61,7 @@ export function wellFormed(s: string): string {
 export function modelTraits(id: string, info?: Anthropic.ModelInfo | null): ModelTraits {
   const caps = info?.capabilities;
   const maxInput = info?.max_input_tokens ?? undefined;
+  const maxOutput = info?.max_tokens ?? undefined;
   if (caps) {
     const e = caps.effort;
     const efforts = e?.supported ? EFFORT_ORDER.filter((l) => (e as unknown as Record<string, { supported?: boolean } | null>)[l]?.supported) : undefined;
@@ -66,10 +70,15 @@ export function modelTraits(id: string, info?: Anthropic.ModelInfo | null): Mode
       effort: !!(e?.supported && e.medium?.supported),
       efforts,
       maxInput,
+      maxOutput,
     };
   }
-  const old = /^claude-(haiku|3-|sonnet-4-5|opus-4-5|opus-4-1|opus-4-2|sonnet-4-2|opus-4-0|sonnet-4-0)/.test(id);
-  return { thinking: !old, effort: !old, maxInput };
+  // No capability data: go by the id. Pre-4.6 models take a thinking budget, not adaptive thinking;
+  // effort arrived with Opus 4.5 (low/medium/high), xhigh with Opus 4.7.
+  if (/^claude-(haiku-4-5|3-|sonnet-4-5|opus-4-1|opus-4-0|sonnet-4-0)/.test(id)) return { thinking: false, effort: false, maxInput, maxOutput };
+  if (/^claude-opus-4-5/.test(id)) return { thinking: false, effort: true, efforts: ["low", "medium", "high"], maxInput, maxOutput };
+  if (/^claude-(opus|sonnet)-4-6/.test(id)) return { thinking: true, effort: true, efforts: ["low", "medium", "high", "max"], maxInput, maxOutput };
+  return { thinking: true, effort: true, maxInput, maxOutput };
 }
 
 export interface TurnCallbacks {
@@ -155,54 +164,18 @@ export const ASK_TOOL: ToolDef = {
 const MAX_TOKENS = 64000; // streaming request: thinking counts toward it, so leave room
 const DEFAULT_MAX_STEPS = 80;
 
-/**
- * Background: каждый скриншот (base64 JPEG) = 15-100K токенов. После 5 скриншотов
- * контекст раздувается до 500K+. Модель не может смотреть старые скриншоты —
- * страница уже изменилась, они бесполезны.
- * Design: перед отправкой в API заменяем image блоки в СТАРЫХ сообщениях
- * на текстовый placeholder. Оставляем картинки только в последнем user message
- * (текущий turn). Оригинальный массив messages НЕ мутируется — UI сохраняет всё.
- * Constraint: preserved thinking запрещает редактировать assistant сообщения,
- * но мы меняем только user tool_result content — thinking там нет.
- */
-function stripOldImages(messages: Anthropic.MessageParam[]): Anthropic.MessageParam[] {
-  if (messages.length < 2) return messages;
-  // Find the last user message index (current turn's tool results — keep images)
-  let lastUserIdx = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === "user") { lastUserIdx = i; break; }
-  }
-  return messages.map((m, idx) => {
-    if (idx >= lastUserIdx) return m; // keep latest user message intact
-    if (m.role !== "user" || typeof m.content === "string") return m;
-    if (!Array.isArray(m.content)) return m;
-    const hasImage = m.content.some((b: any) =>
-      b.type === "image" ||
-      (b.type === "tool_result" && Array.isArray(b.content) && b.content.some((x: any) => x.type === "image"))
-    );
-    if (!hasImage) return m;
-    const stripped = m.content.map((b: any) => {
-      if (b.type === "image") return { type: "text" as const, text: "[screenshot — no longer in context, use browser_screenshot for a fresh one]" };
-      if (b.type === "tool_result" && Array.isArray(b.content)) {
-        const inner = b.content.map((x: any) =>
-          x.type === "image" ? { type: "text" as const, text: "[screenshot — evicted from context]" } : x
-        );
-        return { ...b, content: inner };
-      }
-      return b;
-    });
-    return { ...m, content: stripped };
-  });
-}
-
+// The history goes to the API exactly as it was built. Replacing old screenshots with placeholders
+// (an earlier attempt to save context) edits earlier turns, and a thinking block's signature covers
+// every message before it — under preserved thinking the next request was refused. Screenshots are
+// kept small when taken; /compact is the way to reclaim context.
 function requestParams(o: Pick<TurnOptions, "model" | "traits" | "effort" | "system" | "tools" | "messages">): Anthropic.MessageStreamParams {
   return {
     model: o.model,
-    max_tokens: MAX_TOKENS,
+    max_tokens: Math.min(MAX_TOKENS, o.traits.maxOutput || MAX_TOKENS),
     system: [{ type: "text", text: o.system }],
     cache_control: { type: "ephemeral" },
     tools: o.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.input_schema as Anthropic.Tool.InputSchema })),
-    messages: stripOldImages(o.messages),
+    messages: o.messages,
     ...(o.traits.thinking ? { thinking: { type: "adaptive" as const, display: "summarized" as const } } : {}),
     ...(o.traits.effort ? { output_config: { effort: effortFor(o.traits, o.effort) } } : {}),
   };

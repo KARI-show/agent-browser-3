@@ -363,11 +363,13 @@ test("older models get no thinking or effort parameters", async () => {
   } finally {
     api.close();
   }
-  assert.deepEqual(modelTraits("claude-opus-5-5"), { thinking: true, effort: true, maxInput: undefined });
-  assert.equal(effortFor({ thinking: true, effort: true }, "max"), "high", "no level list known → default low/medium/high, clamped down");
+  assert.deepEqual(modelTraits("claude-opus-5-5"), { thinking: true, effort: true, maxInput: undefined, maxOutput: undefined });
+  assert.deepEqual(modelTraits("claude-opus-4-6"), { thinking: true, effort: true, efforts: ["low", "medium", "high", "max"], maxInput: undefined, maxOutput: undefined });
+  assert.deepEqual(modelTraits("claude-opus-4-5"), { thinking: false, effort: true, efforts: ["low", "medium", "high"], maxInput: undefined, maxOutput: undefined });
+  assert.equal(effortFor({ thinking: true, effort: true }, "max"), "max", "no level list known → the user's choice goes through (clamping silently downgraded xhigh/max)");
   assert.equal(effortFor({ thinking: true, effort: true, efforts: ["low", "medium"] }, "xhigh"), "medium", "nearest supported level below the request");
   const info = { capabilities: { thinking: { types: { adaptive: { supported: true } } }, effort: { supported: true, medium: { supported: true } } }, max_input_tokens: 1000000 } as unknown as Anthropic.ModelInfo;
-  assert.deepEqual(modelTraits("claude-x", info), { thinking: true, effort: true, efforts: ["medium"], maxInput: 1000000 });
+  assert.deepEqual(modelTraits("claude-x", info), { thinking: true, effort: true, efforts: ["medium"], maxInput: 1000000, maxOutput: undefined });
 });
 
 test("compactHistory asks for a summary without tools being callable", async () => {
