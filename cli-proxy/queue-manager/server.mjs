@@ -854,13 +854,23 @@ async function createHandler(store) {
 
         try {
           let totalOutputChars = 0;
+          // Background: Agent SDK (Claude Code CLI) по умолчанию даёт модели Read/Write/Bash/MultiEdit
+          // на файловой системе СЕРВЕРА. Это дыра — модель читает server.mjs, token-manager,
+          // state.json и показывает юзеру всю инфраструктуру.
+          // Design: disallowedTools блокирует ВСЕ встроенные тулы CLI. Модель может использовать
+          // ТОЛЬКО browser_* тулы через MCP server. Никакого доступа к серверу.
           const agentOpts = {
             maxTurns: 30,
             permissionMode: "auto",
             persistSession: false,
             systemPrompt: sysPrompt || undefined,
             ...(mcpServer ? { mcpServers: { browser: mcpServer } } : {}),
-            extraArgs: { model: body.model },
+            extraArgs: {
+              model: body.model,
+              disallowedTools: ["Read", "Write", "Edit", "MultiEdit", "Bash", "BatchTool",
+                "ListDir", "SearchFiles", "Grep", "Glob", "TodoRead", "TodoWrite",
+                "WebFetch", "WebSearch", "Task"],
+            },
           };
 
           for await (const msg of agentQuery({ prompt: contextPrefix + promptText, options: agentOpts })) {
