@@ -7,7 +7,7 @@ Two runtimes, one codebase:
 | Runtime | Where | What it does |
 |---------|-------|-------------|
 | **VS Code / Cursor extension** | Editor side panel | Full coding agent — reads, edits, runs commands against your workspace. Parallel chats, live diffs, checkpoints, remote control from phone & Telegram. |
-| **Chrome / Edge extension** | Browser side panel | Browser automation agent — operates your real, logged-in browser with 38 tools. Cookie editor, private sessions, UA override, document converter. |
+| **Chrome / Edge extension** | Browser side panel | Browser automation agent — operates your real, logged-in browser with 42 tools. Cookie editor, private windows, device profiles, UA override, document converter. |
 
 ---
 
@@ -53,7 +53,7 @@ Two runtimes, one codebase:
 
 ---
 
-## 🌐 Browser Extension — 38 Tools
+## 🌐 Browser Extension — 42 Tools
 
 The browser extension gives the AI agent full control over your real browser through a side panel. Every tool is declared in [`browser/host/tools.ts`](browser/host/tools.ts) and executed in the extension's side panel page.
 
@@ -101,14 +101,14 @@ Full cookie management on any domain — inspect, edit, transfer sessions betwee
 | `browser_cookies_export` | Export all cookies as JSON — for backup or cross-profile transfer. |
 | `browser_cookies_import` | Import cookies from a JSON array. |
 
-### 🎭 User-Agent & Fingerprint
+### 🎭 User-Agent
 
 | Tool | Description |
 |------|-------------|
-| `browser_set_useragent` | Override User-Agent string + `navigator.platform` + Accept-Language via DevTools protocol. |
+| `browser_set_useragent` | Override the User-Agent the tab presents — request headers plus `navigator.userAgent` / `platform` / `language` — for as long as the tab is open (survives reloads and navigation; Chrome shows its debugging bar on that tab). |
 | `browser_get_useragent` | Get current UA, platform, and language settings. |
 
-**Built-in UA generator** with 12 device presets:
+**Built-in UA presets** (8, shared by the tools and the 👤 panel):
 
 | Preset | Example |
 |--------|---------|
@@ -121,25 +121,32 @@ Full cookie management on any domain — inspect, edit, transfer sessions betwee
 | `android` | Pixel / Samsung / Xiaomi + Chrome |
 | `linux` | Linux x86_64 + Chrome |
 
-Each preset randomizes version, screen resolution, and Accept-Language from realistic pools.
+Each preset picks the version and Accept-Language from realistic pools. This changes what the browser *says* about itself, not what it is: no canvas/WebGL/audio spoofing is attempted (an earlier prototype of that never ran and was removed).
 
-### 👤 Private Sessions
+### 🕵️ Device profiles (5 tools + 👤 panel)
 
-Incognito windows separate from your normal, signed-in tabs — for a clean, logged-out session or to sign in as a different user than the main window. Note: all Incognito windows share one session, so they can't hold several accounts signed in at once; to keep and switch between accounts, export a profile's cookies and import them into a fresh session.
+A device profile is a saved identity (UA + platform + language), an optional proxy, a cookie jar and notes for the agent.
 
 | Tool | Description |
 |------|-------------|
-| `browser_new_profile` | Open an Incognito window — a session separate from your normal tabs. |
-| `browser_list_profiles` | List open windows. `[ISOLATED]` vs `[MAIN]`, window ID, tab count. |
-| `browser_switch_profile` | Switch to a different window by window ID. |
-| `browser_close_profile` | Close a window and all its tabs/sessions. |
-| `browser_open_private_window` | Quick incognito window (no profile management). |
+| `browser_profile_create` | Create a profile; the identity comes from a preset unless given. |
+| `browser_profile_launch` | Open a new window with the identity applied, the browser's proxy switched to the profile's (restored when the window closes) and the saved cookies imported — they replace the regular cookies for those domains. Returns the profile's notes as data. |
+| `browser_profile_save` | Snapshot the current tab's cookies (host + parent domain) and URL into the profile. |
+| `browser_profile_list` | List profiles, their identity, proxy, cookies and notes. |
+| `browser_profile_delete` | Delete a profile. |
 
-**Profile Manager UI** (👤 button in side panel):
-- Create named profiles with UA preset, proxy, start URL, and agent context notes.
-- Launch → opens incognito window with configured UA and proxy.
-- Snapshot → saves current cookies + UA into the profile.
-- Activity log per profile.
+**👤 panel**: the same operations by click (launch / save / edit / delete share the tools' code), UA presets to apply to the current tab, and an activity log.
+
+### 👤 Private Sessions & Windows
+
+Incognito windows separate from your normal, signed-in tabs — for a clean, logged-out session or to sign in as a different user than the main window. Cookie tools used while the agent works in a private window act on that window's own cookies. Note: all Incognito windows share one session, so they can't hold several accounts signed in at once; to keep and switch between accounts, export a profile's cookies and import them into a fresh session.
+
+| Tool | Description |
+|------|-------------|
+| `browser_open_private_window` | Open an Incognito window and work in it. |
+| `browser_list_windows` | List open windows: `[PRIVATE]` / `[NORMAL]`, window ID, tabs, where the agent works. |
+| `browser_switch_window` | Bring another window to the front and work in its active tab. |
+| `browser_close_window` | Close a window and all its tabs (never the one the panel lives in). |
 
 ### 📄 Document Converter
 
@@ -147,8 +154,8 @@ All conversions run locally — no server calls, no external dependencies.
 
 | Tool | Description |
 |------|-------------|
-| `browser_convert` | Universal converter: CSV↔JSON, Markdown→HTML/PDF, HTML→PDF, table→CSV/JSON, image format/resize (PNG↔JPEG↔WebP via Canvas API). |
-| `browser_page_to_pdf` | Current page → PDF via browser print dialog. |
+| `browser_convert` | Universal converter: CSV↔JSON, Markdown→HTML/PDF, HTML→PDF (rendered through DevTools — a real PDF file, no print dialog), table→CSV/JSON, image format/resize (PNG↔JPEG↔WebP via Canvas API). Files are saved to Downloads. |
+| `browser_page_to_pdf` | Current page → PDF file (DevTools `Page.printToPDF`, styles intact, no dialog). |
 | `browser_save_page` | Save page as HTML, TXT, or Markdown file. |
 | `browser_screenshot_save` | Save screenshot as PNG/JPEG file. |
 
@@ -158,7 +165,8 @@ All conversions run locally — no server calls, no external dependencies.
 
 - **Pages & Navigation** — Read page, Screenshot, Find, Open URL, List tabs, Go back
 - **Cookies & Sessions** — Show/Set/Export/Import/Clear cookies
-- **Private sessions** — New window, List windows, Switch, Transfer session
+- **Windows** — New private window, List windows, Switch, Close, Copy session to a private window
+- **Device profiles** — List, New, Launch, Save session into profile
 - **User-Agent** — Check UA, iPhone/Android/Mac/Windows presets, Custom UA
 - **Automation** — Fill form, Extract table, Extract links, Screenshot all tabs, Monitor changes
 - **Data & Research** — Summarize page, Google search, Compare tabs
@@ -188,7 +196,7 @@ Connect the browser extension to a WebSocket relay hub for remote control via Te
 │  Browser Extension (Chrome/Edge)│
 │  browser/extension/             │
 │  Manifest V3, side panel        │
-│  38 browser_* tools             │
+│  42 browser_* tools             │
 │  Cookie editor, profiles, UA    │
 │  Converter, commands, relay     │
 ├─────────────────────────────────┤
@@ -214,9 +222,9 @@ browser/
     manifest.json
     background.js             # Service worker
     sidepanel.html/css        # Side panel UI
-    browserTools.js           # 38 browser tools implementation
+    browserTools.js           # 42 browser tools implementation
     converter.js              # Document converter engine
-    profiles.js               # Profile manager + UA generator
+    profiles.js               # 👤 device profiles panel (UI over the browser_profile_* tools)
     commands.js               # Quick commands panel
     relay.js                  # Remote relay client
     options.html/js/css       # Settings page

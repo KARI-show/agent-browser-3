@@ -29,32 +29,42 @@
     { group: "Cookies & Sessions", icon: "✏️", name: "Set a cookie",
       prompt: "Set a cookie with name='', value='', domain='' (fill in the details): ", partial: true },
 
-    // ── Multi-Account / Profiles ───────────────────────
-    { group: "Multi-Account", icon: "👤", name: "New isolated profile",
-      prompt: "Open a new isolated browser profile (separate session)." },
-    { group: "Multi-Account", icon: "👤", name: "New profile + open URL",
-      prompt: "Open a new isolated profile and navigate to: ", partial: true },
-    { group: "Multi-Account", icon: "📋", name: "List profiles",
-      prompt: "Show all open browser profiles and their tabs." },
-    { group: "Multi-Account", icon: "🔄", name: "Switch profile",
-      prompt: "Switch to profile window #", partial: true },
-    { group: "Multi-Account", icon: "❌", name: "Close profile",
-      prompt: "Close profile window #", partial: true },
-    { group: "Multi-Account", icon: "🔁", name: "Transfer session",
-      prompt: "Export cookies from the current site, open a new isolated profile, navigate to the same site, and import the cookies there." },
+    // ── Windows & private sessions ─────────────────────
+    { group: "Windows", icon: "🕶️", name: "New private window",
+      prompt: "Open a new private (Incognito) window — a clean, logged-out session — and work there." },
+    { group: "Windows", icon: "🕶️", name: "Private window + open URL",
+      prompt: "Open a new private (Incognito) window and go to: ", partial: true },
+    { group: "Windows", icon: "📋", name: "List windows",
+      prompt: "List my open browser windows and their tabs, and say which one you are working in." },
+    { group: "Windows", icon: "🔄", name: "Switch window",
+      prompt: "Switch to window #", partial: true },
+    { group: "Windows", icon: "❌", name: "Close window",
+      prompt: "Close window #", partial: true },
+    { group: "Windows", icon: "🔁", name: "Copy session to a private window",
+      prompt: "Export the cookies of the current site, open a new private window on the same site, import the cookies there and check that I'm signed in." },
 
-    // ── User-Agent & Fingerprint ───────────────────────
-    { group: "User-Agent & Fingerprint", icon: "🎭", name: "Check UA",
+    // ── Device profiles ────────────────────────────────
+    { group: "Device profiles", icon: "🕵️", name: "List device profiles",
+      prompt: "List my saved device profiles." },
+    { group: "Device profiles", icon: "➕", name: "New device profile",
+      prompt: "Create a device profile named: ", partial: true },
+    { group: "Device profiles", icon: "▶", name: "Launch device profile",
+      prompt: "Launch the device profile named: ", partial: true },
+    { group: "Device profiles", icon: "💾", name: "Save session into profile",
+      prompt: "Save the current tab's cookies and URL into the active device profile." },
+
+    // ── User-Agent ─────────────────────────────────────
+    { group: "User-Agent", icon: "🎭", name: "Check UA",
       prompt: "Show my current User-Agent, platform, and language." },
-    { group: "User-Agent & Fingerprint", icon: "📱", name: "Mobile UA (iPhone)",
+    { group: "User-Agent", icon: "📱", name: "Mobile UA (iPhone)",
       prompt: "Set User-Agent to iPhone Safari: Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1 — and set platform to 'iPhone'. Then reload the page." },
-    { group: "User-Agent & Fingerprint", icon: "🤖", name: "Android UA",
-      prompt: "Set User-Agent to Android Chrome: Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36 — platform 'Linux armv81'. Reload." },
-    { group: "User-Agent & Fingerprint", icon: "🍎", name: "Mac Safari UA",
+    { group: "User-Agent", icon: "🤖", name: "Android UA",
+      prompt: "Set User-Agent to Android Chrome: Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36 — platform 'Linux armv8l'. Reload." },
+    { group: "User-Agent", icon: "🍎", name: "Mac Safari UA",
       prompt: "Set User-Agent to Mac Safari: Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15 — platform 'MacIntel'. Reload." },
-    { group: "User-Agent & Fingerprint", icon: "🪟", name: "Windows Chrome UA",
+    { group: "User-Agent", icon: "🪟", name: "Windows Chrome UA",
       prompt: "Set User-Agent to Windows Chrome: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 — platform 'Win32'. Reload." },
-    { group: "User-Agent & Fingerprint", icon: "🎭", name: "Custom UA",
+    { group: "User-Agent", icon: "🎭", name: "Custom UA",
       prompt: "Set User-Agent to: ", partial: true },
 
     // ── Automation ─────────────────────────────────────
@@ -83,7 +93,7 @@
 
     // ── Document Converter ──────────────────────────────
     { group: "Converter", icon: "📄", name: "Page → PDF",
-      prompt: "Convert this page to PDF (will open print dialog — choose Save as PDF)." },
+      prompt: "Save this page as a PDF file (browser_page_to_pdf)." },
     { group: "Converter", icon: "📸", name: "Screenshot → file",
       prompt: "Take a screenshot of this page and save it as a PNG file." },
     { group: "Converter", icon: "💾", name: "Save page as HTML",
@@ -103,9 +113,7 @@
     { group: "Converter", icon: "🖼️", name: "Image → JPEG (compress)",
       prompt: "Take a screenshot and save as compressed JPEG (quality 70%)." },
 
-    // ── Incognito & Privacy ────────────────────────────
-    { group: "Privacy", icon: "🕶️", name: "Open private window",
-      prompt: "Open a new private (incognito) window." },
+    // ── Privacy ────────────────────────────────────────
     { group: "Privacy", icon: "🧹", name: "Clean session",
       prompt: "Clear all cookies for the current site, then reload the page." },
     { group: "Privacy", icon: "🔒", name: "Check privacy",
@@ -140,10 +148,12 @@
       groups[g].forEach(function (c) {
         var item = document.createElement("div");
         item.className = "cmd-item";
-        item.innerHTML =
-          '<span class="cmd-icon">' + c.icon + '</span>' +
-          '<div class="cmd-body"><div class="cmd-name">' + c.name + '</div>' +
-          '<div class="cmd-desc">' + c.prompt.slice(0, 80) + (c.prompt.length > 80 ? '...' : '') + '</div></div>';
+        var icon = document.createElement("span"); icon.className = "cmd-icon"; icon.textContent = c.icon;
+        var body = document.createElement("div"); body.className = "cmd-body";
+        var name = document.createElement("div"); name.className = "cmd-name"; name.textContent = c.name;
+        var desc = document.createElement("div"); desc.className = "cmd-desc"; desc.textContent = c.prompt.slice(0, 80) + (c.prompt.length > 80 ? "…" : "");
+        body.appendChild(name); body.appendChild(desc);
+        item.appendChild(icon); item.appendChild(body);
         item.onclick = function () {
           if (c.partial) {
             // Put prompt in input and focus — user finishes it
@@ -165,7 +175,10 @@
       list.appendChild(div);
     });
     if (!list.children.length) {
-      list.innerHTML = '<div style="padding:20px;text-align:center;color:#888">No commands match your search</div>';
+      var none = document.createElement("div");
+      none.className = "cmd-empty";
+      none.textContent = "No commands match your search";
+      list.appendChild(none);
     }
   }
 

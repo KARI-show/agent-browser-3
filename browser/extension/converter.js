@@ -1,22 +1,16 @@
-// ═══════════════════════════════════════════════════════════════════════════
-// Document Converter — browser-native file conversion engine
+// Document Converter — browser-native file conversion. Everything runs in the
+// side panel with web APIs; no server, no runtime dependencies.
 //
-// All conversions run locally in the extension using browser APIs + pure JS.
-// No server calls. No external dependencies at runtime.
+//   CSV ↔ JSON · Markdown → HTML · HTML table → CSV / JSON · text → file
+//   image format / resize (Canvas) · screenshot → PNG / JPEG
+//   Markdown / HTML → PDF: the document is prepared here and rendered by
+//   browserTools.js through the DevTools protocol (no print dialog).
 //
-// Supported:
-//   HTML/page → PDF          (print-based)
-//   HTML table → CSV/JSON    (DOM parsing)
-//   CSV ↔ JSON               (pure JS)
-//   Markdown → HTML          (regex-based lightweight parser)
-//   Image format conversion  (Canvas API: PNG ↔ JPEG ↔ WebP)
-//   Image resize/compress    (Canvas API)
-//   Page → screenshot PNG    (tabs.captureVisibleTab)
-//   Text/HTML → downloadable file
-//
-// Entry: window.AgentConverter.convert(opts) → {blob, filename, mimeType}
-//        window.AgentConverter.downloadAndOpen(blob, filename)
-// ═══════════════════════════════════════════════════════════════════════════
+// Entry: window.AgentConverter.convert(opts)
+//          → { blob, filename, mimeType, rows?, size?, text? }   a file to save
+//          → { html, filename, mimeType }                        a document to render to PDF
+//          → { error }
+//        window.AgentConverter.download(blob, filename) → { ok, filename, size } | { ok: false, error }
 (function () {
 
   // ── CSV parser/generator ───────────────────────────────────────────────
@@ -64,9 +58,18 @@
 
   // ── Markdown → HTML (lightweight) ──────────────────────────────────────
 
+  function escapeHtml(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  // Fenced code is lifted out first, so nothing inside it is formatted or wrapped in <p>.
   function mdToHtml(md) {
-    var html = md
-      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    var blocks = [];
+    var src = String(md || "").replace(/\r\n?/g, "\n").replace(/```[\w-]*\n([\s\S]*?)```/g, function (_, code) {
+      blocks.push("<pre><code>" + escapeHtml(code.replace(/\n$/, "")) + "</code></pre>");
+      return "\u0000" + (blocks.length - 1) + "\u0000";
+    });
+    var html = escapeHtml(src)
       // Headers
       .replace(/^######\s+(.+)$/gm, "<h6>$1</h6>")
       .replace(/^#####\s+(.+)$/gm, "<h5>$1</h5>")
@@ -76,35 +79,45 @@
       .replace(/^#\s+(.+)$/gm, "<h1>$1</h1>")
       // Bold, italic, code
       .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-      .replace(/\*(.+?)\*/g, "<em>$1</em>")
-      .replace(/`([^`]+)`/g, "<code>$1</code>")
+      .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+      .replace(/`([^`\n]+)`/g, "<code>$1</code>")
       // Links, images
-      .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" style="max-width:100%"/>')
-      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>')
+      .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, '<img src="$2" alt="$1" style="max-width:100%"/>')
+      .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2">$1</a>')
       // Lists
       .replace(/^\s*[-*]\s+(.+)$/gm, "<li>$1</li>")
       .replace(/(<li>.*<\/li>\n?)+/g, "<ul>$&</ul>")
       // Horizontal rule
       .replace(/^---+$/gm, "<hr/>")
-      // Code blocks
-      .replace(/```[\w]*\n([\s\S]*?)```/g, "<pre><code>$1</code></pre>")
-      // Paragraphs (lines not already wrapped)
-      .replace(/^(?!<[huplo]|<li|<hr|<pre)(.+)$/gm, "<p>$1</p>");
-    return html;
+      // Paragraphs (lines not already wrapped, and not a code-block placeholder)
+      .replace(/^(?!<[huplo]|<li|<hr|<pre|\u0000)(.+)$/gm, "<p>$1</p>");
+    return html.replace(/\u0000(\d+)\u0000/g, function (_, i) { return blocks[Number(i)]; });
+  }
+
+  var DOC_STYLE =
+    "body{font-family:system-ui,sans-serif;max-width:800px;margin:40px auto;line-height:1.6;color:#222}" +
+    "pre{background:#f5f5f5;padding:12px;overflow-x:auto}code{background:#f0f0f0;padding:2px 4px}pre code{background:none;padding:0}" +
+    "table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccc;padding:8px;text-align:left}th{background:#f5f5f5}" +
+    "img{max-width:100%}h1,h2,h3{margin-top:1.5em}";
+
+  /** A complete HTML document around a body fragment (titles and user text are escaped). */
+  function wrapDocument(title, bodyHtml) {
+    return "<!DOCTYPE html><html><head><meta charset='utf-8'><title>" + escapeHtml(title || "Document") +
+      "</title><style>" + DOC_STYLE + "</style></head><body>" + bodyHtml + "</body></html>";
   }
 
   // ── HTML table → structured data ───────────────────────────────────────
 
+  // Parsed in a detached document: the HTML comes from a page or the model and must not run here.
   function htmlTableToRows(html) {
-    var div = document.createElement("div");
-    div.innerHTML = html;
-    var table = div.querySelector("table");
+    var doc = new DOMParser().parseFromString(String(html || ""), "text/html");
+    var table = doc.querySelector("table");
     if (!table) return null;
     var rows = [];
     table.querySelectorAll("tr").forEach(function (tr) {
       var cells = [];
       tr.querySelectorAll("th, td").forEach(function (cell) {
-        cells.push(cell.innerText.replace(/\s+/g, " ").trim());
+        cells.push(cell.textContent.replace(/\s+/g, " ").trim());
       });
       if (cells.length) rows.push(cells);
     });
@@ -113,9 +126,16 @@
 
   // ── Image conversion via Canvas ────────────────────────────────────────
 
+  // Quality may come as 0–1 or 0–100 (the tools document both); Canvas wants 0–1.
+  function canvasQuality(q, fallback) {
+    var n = Number(q);
+    if (!(n > 0)) return fallback;
+    return n > 1 ? Math.min(1, n / 100) : n;
+  }
+
   async function convertImage(dataUrl, opts) {
     var format = opts.format || "image/png";
-    var quality = opts.quality || 0.85;
+    var quality = canvasQuality(opts.quality, 0.85);
     var maxWidth = opts.maxWidth || 0;
     var maxHeight = opts.maxHeight || 0;
 
@@ -130,30 +150,7 @@
     canvas.getContext("2d").drawImage(bmp, 0, 0, w, h);
     bmp.close();
 
-    var outBlob = await canvas.convertToBlob({ type: format, quality: quality });
-    return outBlob;
-  }
-
-  // ── HTML → printable PDF (via print) ───────────────────────────────────
-
-  function htmlToPrintPdf(html, title) {
-    // Open a hidden window, write HTML, trigger print (saves as PDF)
-    return new Promise(function (resolve) {
-      var w = window.open("", "_blank", "width=800,height=600");
-      if (!w) { resolve(null); return; }
-      w.document.write("<!DOCTYPE html><html><head><title>" + (title || "Document") + "</title>" +
-        "<style>body{font-family:system-ui,sans-serif;margin:40px;line-height:1.6;color:#222}" +
-        "table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccc;padding:8px;text-align:left}" +
-        "th{background:#f5f5f5}pre{background:#f5f5f5;padding:12px;overflow-x:auto}" +
-        "img{max-width:100%}h1,h2,h3{margin-top:1.5em}</style></head><body>" +
-        html + "</body></html>");
-      w.document.close();
-      // Give it a moment to render, then print
-      setTimeout(function () {
-        w.print();
-        setTimeout(function () { w.close(); resolve(true); }, 1000);
-      }, 500);
-    });
+    return canvas.convertToBlob({ type: format, quality: quality });
   }
 
   // ── Generate downloadable file from data ───────────────────────────────
@@ -166,11 +163,11 @@
     return new Blob([content], { type: mimeType || "text/plain;charset=utf-8" });
   }
 
-  // ── Download + Open ────────────────────────────────────────────────────
+  // ── Download ───────────────────────────────────────────────────────────
+  // Saves to the downloads folder and waits for the file to be complete. It is
+  // never opened: chrome.downloads.open needs a user gesture a tool call lacks.
 
-  var SAFE_OPEN = /\.(pdf|docx?|xlsx?|csv|txt|html?|png|jpe?g|gif|webp|svg|json|xml|md|rtf)$/i;
-
-  function downloadAndOpen(blob, filename, forceOpen) {
+  function download(blob, filename) {
     var url = URL.createObjectURL(blob);
     return new Promise(function (resolve) {
       chrome.downloads.download({ url: url, filename: filename, conflictAction: "uniquify" }, function (id) {
@@ -182,30 +179,20 @@
         var checks = 0;
         var timer = setInterval(function () {
           chrome.downloads.search({ id: id }, function (items) {
-            if (!items || !items.length) { clearInterval(timer); resolve({ ok: false, error: "not found" }); return; }
+            if (!items || !items.length) { clearInterval(timer); URL.revokeObjectURL(url); resolve({ ok: false, error: "the download disappeared" }); return; }
             var item = items[0];
             if (item.state === "complete") {
               clearInterval(timer);
               URL.revokeObjectURL(url);
-              if (!(forceOpen || SAFE_OPEN.test(filename))) {
-                resolve({ ok: true, filename: item.filename, opened: false, size: item.fileSize });
-                return;
-              }
-              // chrome.downloads.open needs a user gesture; a tool call never has
-              // one, so it rejects (a Promise in MV3). Report what actually
-              // happened instead of claiming "opened" and leaking the rejection.
-              Promise.resolve()
-                .then(function () { return chrome.downloads.open(id); })
-                .then(
-                  function () { resolve({ ok: true, filename: item.filename, opened: true, size: item.fileSize }); },
-                  function () { resolve({ ok: true, filename: item.filename, opened: false, size: item.fileSize }); }
-                );
+              resolve({ ok: true, filename: item.filename, size: item.fileSize });
             } else if (item.state === "interrupted") {
               clearInterval(timer);
+              URL.revokeObjectURL(url);
               resolve({ ok: false, error: item.error || "interrupted" });
             } else if (++checks > 60) {
               clearInterval(timer);
-              resolve({ ok: false, error: "timeout" });
+              URL.revokeObjectURL(url);
+              resolve({ ok: false, error: "the download did not finish within 30 s" });
             }
           });
         }, 500);
@@ -232,45 +219,35 @@
         return obj;
       });
       var json = JSON.stringify(objects, null, 2);
-      var blob = makeBlob(json, "application/json");
-      return { blob: blob, text: json, filename: filename || "data.json", mimeType: "application/json", rows: objects.length };
+      return { blob: makeBlob(json, "application/json"), text: json, filename: filename || "data.json", mimeType: "application/json", rows: objects.length };
     }
 
     // JSON → CSV
     if (from === "json" && to === "csv") {
-      var arr = typeof data === "string" ? JSON.parse(data) : data;
+      var arr;
+      try { arr = typeof data === "string" ? JSON.parse(data) : data; } catch (e) { return { error: "Invalid JSON: " + e.message }; }
       if (!Array.isArray(arr) || !arr.length) return { error: "Expected JSON array of objects" };
       var keys = Object.keys(arr[0]);
       var csvRows = [keys];
       arr.forEach(function (obj) { csvRows.push(keys.map(function (k) { return obj[k]; })); });
       var csv = toCSV(csvRows, opts.delimiter);
-      var blob2 = makeBlob(csv, "text/csv");
-      return { blob: blob2, text: csv, filename: filename || "data.csv", mimeType: "text/csv", rows: arr.length };
+      return { blob: makeBlob(csv, "text/csv"), text: csv, filename: filename || "data.csv", mimeType: "text/csv", rows: arr.length };
     }
 
-    // Markdown → HTML
+    // Markdown → HTML / PDF
     if (from === "md" && (to === "html" || to === "pdf")) {
-      var html = mdToHtml(data);
-      if (to === "pdf") {
-        await htmlToPrintPdf(html, opts.title);
-        return { text: "PDF print dialog opened. Save as PDF from the print dialog.", filename: "document.pdf" };
-      }
-      var fullHtml = "<!DOCTYPE html><html><head><meta charset='utf-8'><title>" + (opts.title || "Document") +
-        "</title><style>body{font-family:system-ui,sans-serif;max-width:800px;margin:40px auto;line-height:1.6;color:#222}" +
-        "pre{background:#f5f5f5;padding:12px;overflow-x:auto}code{background:#f0f0f0;padding:2px 4px}" +
-        "table{border-collapse:collapse}th,td{border:1px solid #ccc;padding:8px}</style></head><body>" +
-        html + "</body></html>";
-      var blob3 = makeBlob(fullHtml, "text/html");
-      return { blob: blob3, text: fullHtml, filename: filename || "document.html", mimeType: "text/html" };
+      var fullHtml = wrapDocument(opts.title, mdToHtml(data));
+      if (to === "pdf") return { html: fullHtml, filename: filename || "document.pdf", mimeType: "application/pdf" };
+      return { blob: makeBlob(fullHtml, "text/html"), text: fullHtml, filename: filename || "document.html", mimeType: "text/html" };
     }
 
-    // HTML → PDF (print-based)
+    // HTML → PDF (a fragment gets the document styles; a full document is rendered as is)
     if (from === "html" && to === "pdf") {
-      await htmlToPrintPdf(data, opts.title);
-      return { text: "PDF print dialog opened. Choose 'Save as PDF' as the printer.", filename: "document.pdf" };
+      var doc = /<html[\s>]/i.test(data) ? data : wrapDocument(opts.title, data);
+      return { html: doc, filename: filename || "document.pdf", mimeType: "application/pdf" };
     }
 
-    // HTML table → CSV
+    // HTML table → CSV / JSON
     if (from === "table" && (to === "csv" || to === "json")) {
       var tableRows = htmlTableToRows(data);
       if (!tableRows) return { error: "No table found in the HTML" };
@@ -284,7 +261,7 @@
         var j = JSON.stringify(objs, null, 2);
         return { blob: makeBlob(j, "application/json"), text: j, filename: filename || "table.json", mimeType: "application/json", rows: objs.length };
       }
-      var c = toCSV(tableRows);
+      var c = toCSV(tableRows, opts.delimiter);
       return { blob: makeBlob(c, "text/csv"), text: c, filename: filename || "table.csv", mimeType: "text/csv", rows: tableRows.length };
     }
 
@@ -294,8 +271,7 @@
       var mime = { txt: "text/plain", html: "text/html", css: "text/css", js: "text/javascript",
         json: "application/json", xml: "application/xml", csv: "text/csv", md: "text/markdown",
         svg: "image/svg+xml", py: "text/x-python", sh: "text/x-shellscript" }[ext] || "text/plain";
-      var b = makeBlob(data, mime);
-      return { blob: b, filename: filename || ("file." + ext), mimeType: mime };
+      return { blob: makeBlob(data, mime), filename: filename || ("file." + ext), mimeType: mime };
     }
 
     // Image conversion (PNG ↔ JPEG ↔ WebP, resize)
@@ -303,36 +279,42 @@
       var formats = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp" };
       var fmt = formats[to];
       if (!fmt) return { error: "Supported image formats: png, jpg, webp" };
+      if (!/^data:image\//.test(data)) return { error: "Image input must be a data: URL (data:image/png;base64,…)" };
       var imgBlob = await convertImage(data, { format: fmt, quality: opts.quality, maxWidth: opts.maxWidth, maxHeight: opts.maxHeight });
       var imgExt = to === "jpeg" ? "jpg" : to;
       return { blob: imgBlob, filename: filename || ("image." + imgExt), mimeType: fmt, size: imgBlob.size };
     }
 
-    // Page screenshot → PNG file
+    // Page screenshot → PNG / JPEG file. The caller names the window of the tab the agent works in;
+    // without it, the panel's own window is used.
     if (from === "screenshot") {
-      var tab = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (!tab[0]) return { error: "No active tab" };
-      var dataUrl = await chrome.tabs.captureVisibleTab(tab[0].windowId, { format: to === "jpg" ? "jpeg" : "png", quality: opts.quality || 80 });
-      var imgData = dataUrl.split(",")[1];
-      var binary = atob(imgData);
+      var windowId = opts.windowId;
+      if (windowId === undefined) {
+        var tab = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab[0]) return { error: "No active tab" };
+        windowId = tab[0].windowId;
+      }
+      var jpeg = to === "jpg" || to === "jpeg";
+      var capture = { format: jpeg ? "jpeg" : "png" };
+      if (jpeg) capture.quality = Math.round(canvasQuality(opts.quality, 0.8) * 100);
+      var dataUrl = await chrome.tabs.captureVisibleTab(windowId, capture);
+      var binary = atob(dataUrl.split(",")[1]);
       var bytes = new Uint8Array(binary.length);
       for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      var ext2 = to === "jpg" ? "jpg" : "png";
-      var screenshotBlob = new Blob([bytes], { type: "image/" + (ext2 === "jpg" ? "jpeg" : "png") });
-      return { blob: screenshotBlob, filename: filename || ("screenshot." + ext2), mimeType: screenshotBlob.type, size: screenshotBlob.size };
+      var screenshotBlob = new Blob([bytes], { type: jpeg ? "image/jpeg" : "image/png" });
+      return { blob: screenshotBlob, filename: filename || ("screenshot." + (jpeg ? "jpg" : "png")), mimeType: screenshotBlob.type, size: screenshotBlob.size };
     }
 
-    return { error: "Unknown conversion: " + from + " → " + to + ". Supported: csv↔json, md→html, md→pdf, html→pdf, table→csv, table→json, text→(any), image→(png/jpg/webp), screenshot→png" };
+    return { error: "Unknown conversion: " + from + " → " + to + ". Supported: csv↔json, md→html, md→pdf, html→pdf, table→csv, table→json, text→(any), image→(png/jpg/webp), screenshot→png/jpg" };
   }
 
   // ── Expose ─────────────────────────────────────────────────────────────
 
   window.AgentConverter = {
     convert: convert,
-    downloadAndOpen: downloadAndOpen,
+    download: download,
     parseCSV: parseCSV,
     toCSV: toCSV,
     mdToHtml: mdToHtml,
-    SAFE_OPEN: SAFE_OPEN,
   };
 })();
