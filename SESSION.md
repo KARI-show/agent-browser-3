@@ -92,3 +92,97 @@ Now: `npm run check` → 109/109; e2e → 48 pass, 1 fail (#47 coverage), 3 pre-
 - Tests: tests/trialAuth.test.mjs (flow, parallel guessing, caps, invite list, block, admin/CSV, mail,
   D1 SQL on node:sqlite), tests/e2e/trialSignin.e2e.mjs (real Chromium: sign-in UI → chat → block → re-sign-in).
 - Open: queue-manager's REGISTER_SECRET still has a default in code (now only its own admin routes use it).
+
+## Product pass — browser extension (2026-10-03, branch claude/gallant-shannon-u7caks)
+Goal: test everything, fix bugs, drop what is pointless, bring the browser extension to a near-release state.
+Baseline: `npm run check` 120/120; e2e 51 pass / 1 fail (#47 coverage) / 3 todo.
+Three parallel code audits (UI modules; engine + host; remote/Telegram/relay) fed the list below.
+
+### ⚠ State of this pass — NOT VERIFIED, NOT COMMITTED
+Midway, auto mode's safety classifier started refusing every shell command in the session (it reacted to
+the fingerprint-spoofing audit text in the transcript, not to the commands). Everything after the first
+e2e run (44 pass / 2 fail, both expected: fill_form message + profile coverage) was written with the
+editor only. **First thing in a fresh session:**
+```
+git rm browser/extension/fingerprint.js browser/extension/fp-bridge.js browser/extension/inject-fingerprint.js
+npm run check            # typecheck + build + unit tests (engine/host/telegram tests were changed)
+npm run test:e2e         # 46 tests expected: 2 former todo tests are real now, profile + pdf tests added
+git add -A && git commit  # then push to claude/gallant-shannon-u7caks
+```
+Expect small breakage to fix by hand: e2e regexes for the new tool texts, TS strictness in host.ts
+(`thinking` ConvMsg, `toolPolicy(() => BrowserMode)`), the profile e2e (data: URL tab + printToPDF for
+md→pdf is new code).
+
+### Done — browserTools.js / tools.ts (42 tools)
+- Undeclared tools `browser_cache_extract`, `browser_download_open`, `browser_network_log` removed
+  (unreachable for the model; cache_extract fetched any URL with the page's cookies and opened the file).
+- "profile" meant two things → window tools are `browser_list_windows/switch_window/close_window`;
+  `browser_new_profile` (duplicate of `browser_open_private_window`, false "separate login state") removed.
+  `close_window` refuses the panel's own window.
+- UA override: DevTools session pinned while an override is active (was reverted after 8 s idle);
+  `applyUaOverride()` shared by set_useragent, profile_launch and the 👤 panel; re-applied on each load.
+- Cookie tools act on the cookie store of the tab the agent works in (private window ≠ main profile).
+  clear/import: leading-dot domains, validation, honest counts.
+- Device profiles: one UA-preset generator (`uaPreset`, 8 presets, NT 10.0 only) instead of three;
+  profile_launch opens the start URL even without saved cookies, applies the profile's proxy browser-wide
+  and **restores the previous proxy when the window closes** (`agentProxyBeforeProfile`), reports the
+  replaced cookies and returns the profile's notes as tool output; profile_list shows notes + active.
+- **Fingerprint stack removed** (fingerprint.js / fp-bridge.js / inject-fingerprint.js + manifest
+  content_scripts on <all_urls>): it had never run end-to-end (not loaded, wrong global, reversed args,
+  async race, ReferenceError mid-file) while injecting into every frame of every page. Profiles are
+  honest now: UA + platform + language + proxy + cookies + notes. The three files still need `git rm`.
+- Converter: md→pdf / html→pdf render through `Page.printToPDF` in a background data: tab (real PDF, no
+  print dialog, no document.write into the extension origin); `downloads.open` path + permission dropped
+  (never worked without a gesture); quality accepts 0–1 or 0–100; table parsing via DOMParser; fenced
+  code survives mdToHtml; screenshot_save captures the agent's window, not the panel's.
+- fill_form handles <select> and checkbox/radio; cdpKey no longer sends VK_DELETE for ".".
+- background.js: `createWindow` only from the extension's own pages (sender.url check).
+
+### Done — profiles.js (👤 panel) rewritten
+Was a second, buggier implementation (own CDP client fighting browserTools' auto-detach, `new Function`
+under CSP, listener leak, `return win` ReferenceError, real identity shown to the site before the fake
+one, notes pasted into the chat as a *user* message = stored prompt injection). Now a thin UI over
+`browser_profile_*` / `browser_set_useragent` via `AgentBrowserTools.run`; DOM built without innerHTML;
+theme variables instead of hard-coded dark colours; editing keeps cookies/lastDomain.
+
+### Done — engine.ts / host.ts
+- **engine.ts `stripOldImages` removed**: it rewrote earlier tool_results on every request; a thinking
+  block's signature covers every message before it → preserved-thinking 400 (new accounts, Opus 5.5
+  default model) and a cache miss per turn. History is append-only again, as the header always said.
+- engine.ts: `max_tokens` capped by the Models API `max_tokens`; effort no longer silently clamped to
+  high when the level list is unknown; id fallback knows haiku-4-5 / opus-4-5 (effort, no adaptive) /
+  4.6 (no xhigh). Tests updated.
+- host.ts: one transcript entry per thinking block (was one per delta → hundreds of bubbles + a
+  state.json rewrite each); a chat deleted while running is not saved back; mode re-read per tool call.
+
+### Done — remote
+- telegram.js: a task is bound to its chat (runState), so a desktop chat switch no longer streams the
+  other chat into Telegram / ends the task / makes /stop miss; /stop reports "■ Stopped."; start and
+  polling retry on network errors with 🛰 in error state instead of dying or lying "on". Test added.
+- relay.js: "chat is still working" is a notice (an error hid the phone's Stop); reconnect backoff
+  3 s→30 s; unhandled rejections caught; only the lock-holding panel writes the shared status.
+- hub-shim.js: main.js's own "ready" dropped (each connect reloaded the chat twice).
+- commands.js: groups follow the tools (Windows / Device profiles), "Page → PDF" no longer promises a
+  print dialog, items built without innerHTML; 'Linux armv81' typo.
+- Repo: proto-*/smoke*.mjs → demo/, media/main.js.map untracked; README/TESTING updated.
+
+### Backlog (verified findings, not done — in priority order)
+1. Default Agent mode auto-allows cookies_get/export/import and run_js → a prompt-injected page can
+   exfiltrate httpOnly sessions. Add an `alwaysAsk` flag per tool honoured in Agent mode.
+2. host.ts lags localHost: pending approval card not re-shown on chat switch (only a notice);
+   pin/rename lost on a running chat; no synchronous double-send gate; Linux login terminal spawn
+   error invisible; saveAttachment has no size cap / parameterised data URL / cleanup.
+3. localHost: 4 s stall per prompt when /v1/models is unavailable (remember the attempt); 400 rollback
+   drops the user's message for any 400; pre-`promptId` chats replayed with old thinking → 400.
+4. bridgeAgent: no retry on 429/5xx; accepts empty tool_use.id.
+5. Remote: web app controls the browser node ignores (newChat, setModel/setMode, delete/rename/pin,
+   uploadAttachment, interrupt for a non-active chat, ready for a deleted chat, nodeGone); link shown
+   only once and token copied to the clipboard silently; one `enabled` flag = autostart + "on now";
+   bot.mjs: getMe failure leaves a zombie; approval in Telegram has no element text on the native host.
+6. UI: Retry (regenerate) / rewind / drag-drop file buttons post messages no browser backend handles.
+7. Dead code to delete: browser/host/profile-launcher.ts + host.ts nativeProfile* (unreachable; has
+   a path-traversal `rmSync` and an unauthenticated forwarder), `AgentLocal.hasKey/SETTINGS_KEY`,
+   duplicated mode tables, relay.js `openChat`/`listChats` branches, `config` var, `question.msgId`.
+8. src/tunnel.ts downloads cloudflared unpinned/unverified; relay token has no rotation and rides in
+   URLs/clipboard/Telegram.
+9. Options page validation duplicated with background.js; `options.css` no-op rule.
