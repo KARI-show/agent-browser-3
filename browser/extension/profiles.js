@@ -1,307 +1,110 @@
-// ═══════════════════════════════════════════════════════════════════════════
-// PROFILE MANAGER v2 — Isolated browser profiles with saved sessions
+// 👤 Profiles panel — the UI over the device profiles the browser_profile_*
+// tools manage (chrome.storage.local "agentProfiles"): identity (User-Agent,
+// platform, language), proxy, saved cookies, start URL and notes.
 //
-// Each profile = own UA + proxy + cookies + window + agent chat + context notes
-// Profiles stored in chrome.storage.local
-// Agent context = local notes that AI reads to orient itself
-// ═══════════════════════════════════════════════════════════════════════════
+// Launch, save and delete go through the very same tool implementations the
+// agent uses (window.AgentBrowserTools.run), so there is one code path and one
+// behaviour whether a profile is started by a click or by the model. The panel
+// never synthesises chat messages: a profile's notes reach the agent as the
+// launch tool's output, not as words put in the user's mouth.
 (function () {
-  console.log("[Profiles] v3 loaded — " + new Date().toISOString());
   var STORAGE_KEY = "agentProfiles";
-  var ACTIVE_KEY = "agentActiveProfile";
   var LOG_KEY = "agentProfileLogs";
+  var ACTIVE_KEY = "agentActiveProfile";
+  var ICONS = ["👤", "👨", "👩", "🧑", "👨‍💻", "👩‍💻", "🕵️", "🤖", "👽", "🦊", "🐱", "🐶", "🦸", "🧙", "💼", "🎭"];
 
-  // Track which windows belong to which profiles
-  var profileWindows = {}; // profileId -> windowId
-
-  // ── CDP helper (chrome.debugger) ──────────────────────────────────────
-  // Background: browserTools.js имеет свой cdp(), но он локальный.
-  // Design: дублируем минимальный CDP-хелпер для profiles — attach + sendCommand.
-  var _attached = {};
-  chrome.debugger.onDetach.addListener(function(source) { delete _attached[source.tabId]; });
-  async function cdp(tabId, method, params) {
-    if (!_attached[tabId]) {
-      try {
-        await chrome.debugger.attach({ tabId: tabId }, "1.3");
-        _attached[tabId] = true;
-      } catch (e) {
-        if (!/already attached/i.test(String(e))) throw e;
-        _attached[tabId] = true;
-      }
-    }
-    return chrome.debugger.sendCommand({ tabId: tabId }, method, params || {});
-  }
-
-  // Apply UA + language + platform override via CDP
-  // Background: CDP Network.setUserAgentOverride меняет HTTP-заголовки и navigator.userAgent,
-  // но navigator.languages/platform не перезаписываются CDP — нужен content script injection.
-  async function applyFingerprint(tabId, ua, platform, lang) {
-    if (!tabId || !ua) return;
-    console.log("[Profiles] Applying fingerprint to tab", tabId, "ua:", ua.slice(0, 50));
-    try {
-      await cdp(tabId, "Network.enable");
-      await cdp(tabId, "Network.setUserAgentOverride", {
-        userAgent: ua,
-        platform: platform || "",
-        acceptLanguage: lang || "",
-      });
-    } catch (e) {
-      console.warn("[Profiles] CDP UA override failed:", e);
-    }
-
-    // navigator.languages + platform via page script injection
-    if (lang || platform) {
-      var langs = lang ? lang.split(",").map(function(l) { return l.replace(/;q=.*/, "").trim(); }) : [];
-      var code = "(function(){";
-      if (platform) code += "try{Object.defineProperty(navigator,'platform',{get:function(){return " + JSON.stringify(platform) + "}})}catch(e){}";
-      if (langs.length) code += "try{Object.defineProperty(navigator,'languages',{get:function(){return " + JSON.stringify(langs) + "}})}catch(e){}";
-      if (langs[0]) code += "try{Object.defineProperty(navigator,'language',{get:function(){return " + JSON.stringify(langs[0]) + "}})}catch(e){}";
-      code += "})()";
-      try {
-        await chrome.scripting.executeScript({
-          target: { tabId: tabId },
-          func: new Function(code),
-          world: "MAIN",
-          injectImmediately: true,
-        });
-      } catch (e) {
-        console.warn("[Profiles] navigator override inject failed:", e);
-      }
-    }
-
-    // Persist on navigation: re-apply CDP UA after every page load in this tab
-    var onNav = function(updatedId, info) {
-      if (updatedId !== tabId || info.status !== "loading") return;
-      cdp(tabId, "Network.setUserAgentOverride", {
-        userAgent: ua, platform: platform || "", acceptLanguage: lang || "",
-      }).catch(function() {});
-    };
-    chrome.tabs.onUpdated.addListener(onNav);
-    chrome.tabs.onRemoved.addListener(function(removedId) {
-      if (removedId === tabId) chrome.tabs.onUpdated.removeListener(onNav);
-    });
-  }
-
-  // ── UA GENERATOR ────────────────────────────────────────────────────────
-
-  var CV = ["120.0.6099.130","122.0.6261.94","124.0.6367.91","126.0.6478.126","128.0.6613.84","130.0.6723.58","132.0.6834.110","134.0.6998.89","136.0.7103.92","140.0.7280.67","145.0.7521.62","148.0.7663.56","150.0.7800.44","152.0.7920.62"];
-  var FV = ["122.0","125.0","128.0","130.0","132.0","134.0","135.0"];
-  var SV = ["17.0","17.2","17.4","17.5","18.0","18.1"];
-  var EV = ["120.0.2210.77","130.0.2849.46","140.0.3498.28","145.0.3812.59","150.0.4115.43","152.0.4234.46"];
-  var WV = ["10.0","11.0"];
-  var MV = ["13_0","13_3","14_0","14_2","14_5","15_0","15_1"];
-  var IV = ["16_2","17_0","17_2","17_4","17_5","18_0"];
-  var AV = ["12","13","14","15"];
-  var AD = ["Pixel 7","Pixel 8","Pixel 8 Pro","Pixel 9","SM-S911B","SM-S918B","SM-S928B","SM-A546B","M2101K6G","23078PND5G"];
-  var LANGS = ["en-US,en;q=0.9","en-GB,en;q=0.9","de-DE,de;q=0.9,en;q=0.8","fr-FR,fr;q=0.9,en;q=0.8","es-ES,es;q=0.9,en;q=0.8","ru-RU,ru;q=0.9,en;q=0.8","ja-JP,ja;q=0.9,en;q=0.8","zh-CN,zh;q=0.9,en;q=0.8","pt-BR,pt;q=0.9,en;q=0.8","ko-KR,ko;q=0.9,en;q=0.8","tr-TR,tr;q=0.9,en;q=0.8"];
-  var SCREENS_D = ["1920x1080","2560x1440","1366x768","1536x864","3840x2160"];
-  var SCREENS_M = ["390x844","393x852","414x896","430x932","375x812"];
-
-  function pick(a) { return a[Math.floor(Math.random() * a.length)]; }
-  function rInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
-
-  var GEN = {
-    "win-chrome": function() { var v=pick(CV); return { ua:"Mozilla/5.0 (Windows NT "+pick(WV)+"; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/"+v+" Safari/537.36", platform:"Win32", screen:pick(SCREENS_D), label:"Win Chrome "+v.split(".")[0] }; },
-    "win-edge": function() { var v=pick(EV); return { ua:"Mozilla/5.0 (Windows NT "+pick(WV)+"; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/"+v+" Safari/537.36 Edg/"+v, platform:"Win32", screen:pick(SCREENS_D), label:"Win Edge "+v.split(".")[0] }; },
-    "win-firefox": function() { var v=pick(FV); return { ua:"Mozilla/5.0 (Windows NT "+pick(WV)+"; Win64; x64; rv:"+v+") Gecko/20100101 Firefox/"+v, platform:"Win32", screen:pick(SCREENS_D), label:"Win FF "+v }; },
-    "mac-chrome": function() { var v=pick(CV); return { ua:"Mozilla/5.0 (Macintosh; Intel Mac OS X "+pick(MV)+") AppleWebKit/537.36 (KHTML, like Gecko) Chrome/"+v+" Safari/537.36", platform:"MacIntel", screen:pick(["1440x900","2560x1600","1680x1050","2880x1800"]), label:"Mac Chrome "+v.split(".")[0] }; },
-    "mac-safari": function() { var v=pick(SV); return { ua:"Mozilla/5.0 (Macintosh; Intel Mac OS X "+pick(MV)+") AppleWebKit/605.1.15 (KHTML, like Gecko) Version/"+v+" Safari/605.1.15", platform:"MacIntel", screen:pick(["1440x900","2560x1600","2880x1800"]), label:"Mac Safari "+v }; },
-    "iphone": function() { var v=pick(SV); return { ua:"Mozilla/5.0 (iPhone; CPU iPhone OS "+pick(IV)+" like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/"+v+" Mobile/15E148 Safari/604.1", platform:"iPhone", screen:pick(SCREENS_M), label:"iPhone "+v }; },
-    "android": function() { var d=pick(AD),v=pick(CV); return { ua:"Mozilla/5.0 (Linux; Android "+pick(AV)+"; "+d+") AppleWebKit/537.36 (KHTML, like Gecko) Chrome/"+v+" Mobile Safari/537.36", platform:"Linux armv8l", screen:pick(["412x915","393x873","360x800"]), label:"Android "+d.split(" ")[0] }; },
-    "linux": function() { var v=pick(CV); return { ua:"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/"+v+" Safari/537.36", platform:"Linux x86_64", screen:pick(SCREENS_D), label:"Linux Chrome "+v.split(".")[0] }; },
-  };
-
-  function genUA(type) { return (GEN[type] || GEN[pick(Object.keys(GEN))])(); }
-
-  // ── STORAGE ─────────────────────────────────────────────────────────────
-
+  function tools() { return window.AgentBrowserTools; }
   async function load() { return ((await chrome.storage.local.get(STORAGE_KEY))[STORAGE_KEY]) || {}; }
-  async function save(p) { await chrome.storage.local.set({[STORAGE_KEY]: p}); }
+  async function save(p) { await chrome.storage.local.set({ [STORAGE_KEY]: p }); }
   async function getLogs() { return ((await chrome.storage.local.get(LOG_KEY))[LOG_KEY]) || {}; }
   async function log(pid, action) {
     var logs = await getLogs();
-    if (!logs[pid]) logs[pid] = [];
-    logs[pid].push({ t: Date.now(), a: action });
+    (logs[pid] = logs[pid] || []).push({ t: Date.now(), a: action });
     if (logs[pid].length > 300) logs[pid] = logs[pid].slice(-300);
-    await chrome.storage.local.set({[LOG_KEY]: logs});
+    await chrome.storage.local.set({ [LOG_KEY]: logs });
   }
 
-  // ── PROFILE ACTIVATION ──────────────────────────────────────────────────
-
-  async function activateProfile(pid) {
-    var profiles = await load();
-    var p = profiles[pid];
-    if (!p) return;
-
-    // 1. Open a new window for the profile via background script
-    // Background: chrome.windows.create не работает из side panel в Edge —
-    // возвращает null. Design: делегируем в background.js через sendMessage,
-    // background имеет полный доступ к chrome.windows API.
-    var url = p.startUrl || "chrome://newtab";
-    console.log("[Profiles] Launching profile", pid, "url:", url);
-    var winData = null;
-    try {
-      winData = await chrome.runtime.sendMessage({
-        type: "createWindow",
-        options: { url: url, focused: true }
-      });
-    } catch (e) {
-      console.error("[Profiles] createWindow message failed:", e);
-    }
-    console.log("[Profiles] createWindow response:", JSON.stringify(winData));
-    var winId = (winData && winData.ok && winData.win) ? winData.win.id : null;
-    var firstTabId = (winData && winData.ok && winData.win && winData.win.tabs && winData.win.tabs[0]) ? winData.win.tabs[0].id : null;
-    if (!winId) {
-      console.error("[Profiles] No window created");
-      await log(pid, "Launch failed — no window");
-      return null;
-    }
-    console.log("[Profiles] Window created, id:", winId, "tab:", firstTabId);
-    profileWindows[pid] = winId;
-
-    // 2. Set proxy if configured
-    if (p.proxy && p.proxy.enabled) {
-      // Send proxy config to background
-      var proxyConfig = {
-        enabled: true,
-        type: p.proxy.type || "http",
-        host: p.proxy.host,
-        port: Number(p.proxy.port),
-        username: p.proxy.username || "",
-        password: p.proxy.password || "",
-      };
-      await chrome.storage.local.set({ agentProxy: proxyConfig });
-    }
-
-    // 3. Import cookies after window loads
-    if (p.cookies && p.cookies.length && firstTabId) {
-      await new Promise(function(r) { setTimeout(r, 1500); });
-      for (var i = 0; i < p.cookies.length; i++) {
-        var c = p.cookies[i];
-        try {
-          var proto = c.secure ? "https://" : "http://";
-          var cookieUrl = c.url || (proto + c.domain.replace(/^\./, "") + (c.path || "/"));
-          await chrome.cookies.set({
-            url: cookieUrl, name: c.name, value: c.value,
-            domain: c.domain, path: c.path || "/",
-            secure: c.secure || false, httpOnly: c.httpOnly || false,
-            sameSite: c.sameSite || "lax",
-            expirationDate: c.expirationDate || (Math.floor(Date.now()/1000) + 86400*365),
-          });
-        } catch (e) { /* some cookies may fail */ }
-      }
-      if (url !== "chrome://newtab") {
-        chrome.tabs.update(firstTabId, { url: url });
-      }
-    }
-
-    // 4. Apply UA/fingerprint directly via CDP (no chat messages needed)
-    if (firstTabId && p.ua) {
-      await applyFingerprint(firstTabId, p.ua, p.platform, p.lang);
-      // Reload tab to apply the UA to the actual page
-      try { await chrome.tabs.reload(firstTabId); } catch (e) {}
-    }
-
-    await log(pid, "Profile activated" + (p.ua ? " — UA: " + p.ua.slice(0, 40) : ""));
-
-    // 5. Send context to agent chat (if configured)
-    if (p.agentContext) {
-      setTimeout(function() {
-        var input = document.getElementById("input");
-        if (input) {
-          input.value = "[PROFILE CONTEXT — read and remember]\n\n" + p.agentContext + "\n\nI just loaded profile '" + p.name + "'. Acknowledge the context briefly.";
-          input.dispatchEvent(new Event("input", { bubbles: true }));
-          var sendBtn = document.getElementById("send");
-          if (sendBtn) sendBtn.click();
-        }
-      }, 500);
-    }
-
-    await chrome.storage.local.set({[ACTIVE_KEY]: pid});
-    return win;
+  /** Run a browser tool and return its text output. */
+  function runTool(name, args) {
+    if (!tools()) return Promise.reject(new Error("The browser tools didn't load."));
+    return tools().run(name, args).then(function (content) {
+      return (content || []).filter(function (p) { return p.type === "text"; }).map(function (p) { return p.text; }).join("\n");
+    });
   }
 
-  async function snapshotProfile(pid) {
-    var profiles = await load();
-    var p = profiles[pid];
-    if (!p) return;
+  // ── DOM helpers (no innerHTML: names, notes and icons come from storage the agent writes) ──
 
-    // Get current UA
-    try {
-      var tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (tabs[0]) {
-        var r = await chrome.scripting.executeScript({
-          target: { tabId: tabs[0].id },
-          func: function() { return { ua: navigator.userAgent, platform: navigator.platform, lang: navigator.language, url: location.href }; },
-          world: "MAIN"
-        });
-        if (r && r[0] && r[0].result) {
-          p.ua = r[0].result.ua;
-          p.platform = r[0].result.platform;
-          p.lang = r[0].result.lang;
-          p.startUrl = r[0].result.url;
-        }
-      }
-      // Snapshot cookies
-      if (tabs[0] && tabs[0].url) {
-        var domain = new URL(tabs[0].url).hostname;
-        var cookies = await chrome.cookies.getAll({ domain: domain });
-        p.cookies = cookies.map(function(c) {
-          return { name:c.name, value:c.value, domain:c.domain, path:c.path, secure:c.secure, httpOnly:c.httpOnly, sameSite:c.sameSite, expirationDate:c.expirationDate };
-        });
-        p.cookieCount = p.cookies.length;
-        p.lastDomain = domain;
-      }
-    } catch(e) {}
-
-    p.updated = Date.now();
-    await save(profiles);
-    await log(pid, "Snapshot saved (" + (p.cookieCount||0) + " cookies, URL: " + (p.startUrl||"?").slice(0,50) + ")");
-    return p;
+  function el(tag, props, children) {
+    var n = document.createElement(tag);
+    if (props) Object.keys(props).forEach(function (k) {
+      if (k === "className") n.className = props[k];
+      else if (k === "dataset") Object.assign(n.dataset, props[k]);
+      else if (k.indexOf("on") === 0) n.addEventListener(k.slice(2), props[k]);
+      else if (k in n) n[k] = props[k];
+      else n.setAttribute(k, props[k]);
+    });
+    (children || []).forEach(function (c) {
+      if (c == null) return;
+      n.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+    });
+    return n;
+  }
+  function field(label, input) { return el("label", { className: "ed-label" }, [label, input]); }
+  function ago(ts) {
+    if (!ts) return "never";
+    var d = Date.now() - ts;
+    if (d < 60000) return "just now";
+    if (d < 3600000) return Math.floor(d / 60000) + "m ago";
+    if (d < 86400000) return Math.floor(d / 3600000) + "h ago";
+    return Math.floor(d / 86400000) + "d ago";
+  }
+  function proxyLabel(p) {
+    return p.proxy && p.proxy.enabled && p.proxy.host ? p.proxy.type + "://" + p.proxy.host + ":" + p.proxy.port : "direct";
   }
 
-  // ── UI PANEL ────────────────────────────────────────────────────────────
+  // ── Panel ─────────────────────────────────────────────────────────────
 
-  var panel = document.getElementById("commands-panel");
-  if (!panel) return;
-
-  var pp = document.createElement("div");
-  pp.id = "profiles-panel";
-  pp.className = "hidden";
-  pp.innerHTML = [
-    '<div class="cmd-header"><span>👤 Profiles</span><button id="profClose" class="icon-btn">✕</button></div>',
-    '<div class="prof-tabs">',
-    '  <button class="prof-tab active" data-tab="profiles">📋 Profiles</button>',
-    '  <button class="prof-tab" data-tab="ua">🎭 UA Gen</button>',
-    '  <button class="prof-tab" data-tab="log">📜 Log</button>',
-    '</div>',
-    '<div id="profContent" class="cmd-list"></div>',
-  ].join("");
-  panel.parentNode.insertBefore(pp, panel.nextSibling);
-
-  // Toolbar button
+  var cmdPanel = document.getElementById("commands-panel");
   var cmdBtn = document.getElementById("cmdBtn");
-  if (cmdBtn) {
-    var profBtn = document.createElement("button");
-    profBtn.id = "profBtn";
-    profBtn.className = "icon-btn";
-    profBtn.title = "Profiles & UA";
-    profBtn.textContent = "👤";
-    cmdBtn.parentNode.insertBefore(profBtn, cmdBtn);
-    profBtn.onclick = function() { pp.classList.toggle("hidden"); if(!pp.classList.contains("hidden")) renderCurrent(); };
-  }
-  pp.querySelector("#profClose").onclick = function() { pp.classList.add("hidden"); };
+  if (!cmdPanel || !cmdBtn) return;
 
-  var content = pp.querySelector("#profContent");
-  var curTab = "profiles";
-  pp.querySelectorAll(".prof-tab").forEach(function(t) {
-    t.onclick = function() {
-      pp.querySelectorAll(".prof-tab").forEach(function(x){x.classList.remove("active");});
-      t.classList.add("active");
-      curTab = t.dataset.tab;
-      renderCurrent();
-    };
+  var content = el("div", { id: "profContent", className: "cmd-list" });
+  var statusLine = el("div", { id: "profStatus", className: "prof-status hidden" });
+  var closeBtn = el("button", { id: "profClose", className: "icon-btn", title: "Close", onclick: hide }, ["✕"]);
+  var tabsBar = el("div", { className: "prof-tabs" });
+  var pp = el("div", { id: "profiles-panel", className: "hidden" }, [
+    el("div", { className: "cmd-header" }, [el("span", null, ["👤 Device profiles"]), closeBtn]),
+    tabsBar,
+    statusLine,
+    content,
+  ]);
+  cmdPanel.parentNode.insertBefore(pp, cmdPanel.nextSibling);
+
+  var profBtn = el("button", { id: "profBtn", className: "icon-btn", title: "Device profiles & User-Agent presets", "aria-label": "Device profiles" }, ["👤"]);
+  cmdBtn.parentNode.insertBefore(profBtn, cmdBtn);
+  profBtn.addEventListener("click", function () {
+    if (pp.classList.contains("hidden")) { pp.classList.remove("hidden"); renderCurrent(); }
+    else hide();
   });
+  function hide() { pp.classList.add("hidden"); }
+
+  var curTab = "profiles";
+  [["profiles", "📋 Profiles"], ["ua", "🎭 UA presets"], ["log", "📜 Log"]].forEach(function (t) {
+    var b = el("button", { className: "prof-tab" + (t[0] === curTab ? " active" : ""), dataset: { tab: t[0] } }, [t[1]]);
+    b.addEventListener("click", function () {
+      tabsBar.querySelectorAll(".prof-tab").forEach(function (x) { x.classList.remove("active"); });
+      b.classList.add("active");
+      curTab = t[0];
+      status("");
+      renderCurrent();
+    });
+    tabsBar.appendChild(b);
+  });
+
+  function status(text) {
+    statusLine.textContent = text || "";
+    statusLine.classList.toggle("hidden", !text);
+  }
 
   function renderCurrent() {
     if (curTab === "profiles") renderProfiles();
@@ -309,251 +112,234 @@
     else renderLog();
   }
 
-  function esc(s) { return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
-  function ago(ts) {
-    if (!ts) return "never";
-    var d = Date.now() - ts;
-    if (d < 60000) return "just now";
-    if (d < 3600000) return Math.floor(d/60000)+"m ago";
-    if (d < 86400000) return Math.floor(d/3600000)+"h ago";
-    return Math.floor(d/86400000)+"d ago";
-  }
-
-  // ── PROFILES TAB ──────────────────────────────────────────────────────
+  // ── Profiles tab ──────────────────────────────────────────────────────
 
   async function renderProfiles() {
     var profiles = await load();
-    var ids = Object.keys(profiles).sort(function(a,b){ return (profiles[b].updated||0)-(profiles[a].updated||0); });
-    content.innerHTML = "";
+    var active = (await chrome.storage.local.get(ACTIVE_KEY))[ACTIVE_KEY];
+    var ids = Object.keys(profiles).sort(function (a, b) { return (profiles[b].updated || 0) - (profiles[a].updated || 0); });
+    content.textContent = "";
 
-    // New profile button
-    var nb = document.createElement("div"); nb.className = "cmd-item";
-    nb.innerHTML = '<span class="cmd-icon">➕</span><div class="cmd-body"><div class="cmd-name">New Profile</div><div class="cmd-desc">Create a full isolated profile (UA + proxy + cookies + context)</div></div>';
-    nb.onclick = function() { showEditor(null); };
-    content.appendChild(nb);
+    content.appendChild(el("div", { className: "cmd-item", onclick: function () { showEditor(null); } }, [
+      el("span", { className: "cmd-icon" }, ["➕"]),
+      el("div", { className: "cmd-body" }, [
+        el("div", { className: "cmd-name" }, ["New profile"]),
+        el("div", { className: "cmd-desc" }, ["Identity (User-Agent, platform, language) + proxy + saved cookies + notes for the agent"]),
+      ]),
+    ]));
 
     if (!ids.length) {
-      var empty = document.createElement("div");
-      empty.style.cssText = "padding:20px;text-align:center;color:#888";
-      empty.innerHTML = "No profiles yet.<br>Create one to get started.";
-      content.appendChild(empty);
+      content.appendChild(el("div", { className: "cmd-empty" }, ["No profiles yet. Create one to get started."]));
       return;
     }
 
-    ids.forEach(function(id) {
+    ids.forEach(function (id) {
       var p = profiles[id];
-      var item = document.createElement("div"); item.className = "cmd-item";
-      var proxyLabel = p.proxy && p.proxy.enabled ? "🟢 " + p.proxy.type + "://" + p.proxy.host + ":" + p.proxy.port : "🔴 direct";
-      item.innerHTML =
-        '<span class="cmd-icon">' + (p.icon||"👤") + '</span>' +
-        '<div class="cmd-body">' +
-        '<div class="cmd-name">' + esc(p.name) + '</div>' +
-        '<div class="cmd-desc">' + esc(p.label || (p.ua||"").slice(0,50)) + '</div>' +
-        '<div class="cmd-desc">Proxy: ' + proxyLabel + ' · Cookies: ' + (p.cookieCount||0) + ' · ' + ago(p.updated) + '</div>' +
-        (p.agentContext ? '<div class="cmd-desc">📝 Context: ' + esc(p.agentContext.slice(0,60)) + '...</div>' : '') +
-        '</div>' +
-        '<div class="prof-actions" style="flex-direction:column;gap:2px">' +
-        '<button class="prof-btn" data-a="launch" title="Launch profile">▶</button>' +
-        '<button class="prof-btn" data-a="snap" title="Save current state">💾</button>' +
-        '<button class="prof-btn" data-a="edit" title="Edit">✏️</button>' +
-        '<button class="prof-btn" data-a="del" title="Delete">🗑</button>' +
-        '</div>';
-      item.querySelector('[data-a="launch"]').onclick = function(e) { e.stopPropagation(); activateProfile(id).then(function(){ pp.classList.add("hidden"); }); };
-      item.querySelector('[data-a="snap"]').onclick = function(e) { e.stopPropagation(); snapshotProfile(id).then(renderProfiles); };
-      item.querySelector('[data-a="edit"]').onclick = function(e) { e.stopPropagation(); showEditor(id); };
-      item.querySelector('[data-a="del"]').onclick = function(e) { e.stopPropagation(); if(confirm("Delete '"+p.name+"'?")){ deleteProfile(id); } };
-      content.appendChild(item);
+      var actions = el("div", { className: "prof-actions column" }, [
+        el("button", { className: "prof-btn", title: "Launch: open a window with this identity, proxy and session", onclick: function (e) { e.stopPropagation(); launch(id); } }, ["▶"]),
+        el("button", { className: "prof-btn", title: "Save the current tab's cookies and URL into this profile", onclick: function (e) { e.stopPropagation(); snapshot(id); } }, ["💾"]),
+        el("button", { className: "prof-btn", title: "Edit", onclick: function (e) { e.stopPropagation(); showEditor(id); } }, ["✏️"]),
+        el("button", { className: "prof-btn", title: "Delete", onclick: function (e) { e.stopPropagation(); if (confirm("Delete '" + p.name + "'?")) remove(id); } }, ["🗑"]),
+      ]);
+      var meta = "Proxy: " + proxyLabel(p) + " · Cookies: " + (p.cookieCount || 0) + (p.lastDomain ? " (" + p.lastDomain + ")" : "") + " · " + ago(p.updated);
+      content.appendChild(el("div", { className: "cmd-item" + (id === active ? " active" : "") }, [
+        el("span", { className: "cmd-icon" }, [p.icon || "👤"]),
+        el("div", { className: "cmd-body" }, [
+          el("div", { className: "cmd-name" }, [p.name + (id === active ? " · active" : "")]),
+          el("div", { className: "cmd-desc" }, [p.label || (p.ua || "browser default").slice(0, 50)]),
+          el("div", { className: "cmd-desc" }, [meta]),
+          p.agentContext ? el("div", { className: "cmd-desc" }, ["📝 " + String(p.agentContext).slice(0, 60) + (p.agentContext.length > 60 ? "…" : "")]) : null,
+        ]),
+        actions,
+      ]));
     });
   }
 
-  async function deleteProfile(id) {
-    var p = await load(); delete p[id]; await save(p); renderProfiles();
+  function launch(id) {
+    status("Launching…");
+    runTool("browser_profile_launch", { profileId: id }).then(
+      function (out) { status(out.split("\n").slice(0, 3).join(" · ")); setTimeout(function () { hide(); status(""); }, 1500); },
+      function (e) { status("⚠ " + ((e && e.message) || e)); }
+    );
+  }
+  function snapshot(id) {
+    status("Saving the current tab's session…");
+    runTool("browser_profile_save", { profileId: id }).then(
+      function (out) { status(out); renderProfiles(); },
+      function (e) { status("⚠ " + ((e && e.message) || e)); }
+    );
+  }
+  function remove(id) {
+    runTool("browser_profile_delete", { profileId: id }).then(
+      function () { status(""); renderProfiles(); },
+      function (e) { status("⚠ " + ((e && e.message) || e)); }
+    );
   }
 
-  // ── PROFILE EDITOR ────────────────────────────────────────────────────
+  // ── Editor ────────────────────────────────────────────────────────────
 
   async function showEditor(id) {
     var profiles = await load();
-    var p = id ? profiles[id] : { name:"", icon:"👤", ua:"", platform:"", lang:"", proxy:{}, cookies:[], agentContext:"", startUrl:"" };
+    var p = (id && profiles[id]) || { name: "", icon: "👤", ua: "", platform: "", lang: "", proxy: {}, cookies: [], agentContext: "", startUrl: "" };
     var isNew = !id;
-    var icons = ["👤","👨","👩","🧑","👨‍💻","👩‍💻","🕵️","🤖","👽","🦊","🐱","🐶","🦸","🧙","💼","🎭"];
+    var chosenIcon = p.icon || "👤";
+    var presetLabel = null; // set when a preset filled the UA fields
+    var prox = p.proxy || {};
 
-    content.innerHTML =
-      '<div style="padding:12px;overflow-y:auto">' +
-      '<button id="edBack" class="prof-btn">← Back</button>' +
-      '<h3 style="margin:8px 0;color:#ddd">' + (isNew ? "New Profile" : "Edit: " + esc(p.name)) + '</h3>' +
+    var name = el("input", { value: p.name || "", placeholder: "Work account" });
+    var ua = el("textarea", { rows: 2, placeholder: "Mozilla/5.0 … (pick a preset below or paste one)", value: p.ua || "" });
+    var plat = el("input", { value: p.platform || "", placeholder: "Win32" });
+    var lang = el("input", { value: p.lang || "", placeholder: "en-US,en;q=0.9" });
+    var preset = el("select", null, [el("option", { value: "" }, ["Custom / keep current"])].concat(
+      (tools() ? tools().uaPresetNames : []).map(function (k) { return el("option", { value: k }, [k]); }),
+      [el("option", { value: "random" }, ["🎲 Random"])]
+    ));
+    preset.addEventListener("change", function () {
+      if (!preset.value || !tools()) return;
+      var fp = tools().uaPreset(preset.value === "random" ? null : preset.value);
+      ua.value = fp.ua; plat.value = fp.platform; lang.value = fp.lang; presetLabel = fp.label;
+    });
+    var proxyOn = el("input", { type: "checkbox", checked: !!prox.enabled });
+    var proxyType = el("select", null, ["http", "https", "socks5"].map(function (t) { return el("option", { value: t, selected: (prox.type || "http") === t }, [t.toUpperCase()]); }));
+    var proxyHost = el("input", { value: prox.host || "", placeholder: "proxy.example.com" });
+    var proxyPort = el("input", { type: "number", value: prox.port || "", placeholder: "8080" });
+    var proxyUser = el("input", { value: prox.username || "", autocomplete: "off" });
+    var proxyPass = el("input", { type: "password", value: prox.password || "", autocomplete: "new-password" });
+    var startUrl = el("input", { value: p.startUrl || "", placeholder: "https://example.com" });
+    var notes = el("textarea", { id: "edCtx", rows: 6, placeholder: "What this profile is for, which account, the usual workflow…", value: p.agentContext || "" });
 
-      '<label class="ed-label">Name<input id="edName" value="' + esc(p.name) + '" placeholder="My Account #1" /></label>' +
+    var icons = el("div", { className: "ed-icons" }, ICONS.map(function (i) {
+      var s = el("span", { className: "ed-icon" + (i === chosenIcon ? " active" : "") }, [i]);
+      s.addEventListener("click", function () {
+        icons.querySelectorAll(".ed-icon").forEach(function (x) { x.classList.remove("active"); });
+        s.classList.add("active");
+        chosenIcon = i;
+      });
+      return s;
+    }));
 
-      '<label class="ed-label">Icon<div class="ed-icons" id="edIcons">' +
-      icons.map(function(i){ return '<span class="ed-icon'+(i===p.icon?' active':'')+'" data-i="'+i+'">'+i+'</span>'; }).join("") +
-      '</div></label>' +
-
-      '<div class="ed-section">🎭 Fingerprint</div>' +
-      '<label class="ed-label">UA preset<select id="edUAPreset"><option value="">Custom / keep current</option>' +
-      Object.keys(GEN).map(function(k){ return '<option value="'+k+'">'+k+'</option>'; }).join("") +
-      '<option value="random">🎲 Random</option></select></label>' +
-      '<label class="ed-label">User-Agent<textarea id="edUA" rows="2" placeholder="Mozilla/5.0...">' + esc(p.ua) + '</textarea></label>' +
-      '<div class="ed-row">' +
-      '<label class="ed-label">Platform<input id="edPlat" value="' + esc(p.platform) + '" placeholder="Win32" /></label>' +
-      '<label class="ed-label">Language<input id="edLang" value="' + esc(p.lang) + '" placeholder="en-US,en;q=0.9" /></label>' +
-      '</div>' +
-
-      '<div class="ed-section">🌐 Proxy</div>' +
-      '<label class="ed-label"><input type="checkbox" id="edProxyOn" ' + (p.proxy&&p.proxy.enabled?"checked":"") + ' /> Enable proxy</label>' +
-      '<div class="ed-row">' +
-      '<label class="ed-label">Type<select id="edProxyType"><option value="http"'+(p.proxy&&p.proxy.type==="http"?" selected":"")+'>HTTP</option><option value="https"'+(p.proxy&&p.proxy.type==="https"?" selected":"")+'>HTTPS</option><option value="socks5"'+(p.proxy&&p.proxy.type==="socks5"?" selected":"")+'>SOCKS5</option></select></label>' +
-      '<label class="ed-label">Host<input id="edProxyHost" value="' + esc(p.proxy&&p.proxy.host) + '" placeholder="proxy.example.com" /></label>' +
-      '<label class="ed-label">Port<input id="edProxyPort" type="number" value="' + (p.proxy&&p.proxy.port||"") + '" placeholder="8080" /></label>' +
-      '</div>' +
-      '<div class="ed-row">' +
-      '<label class="ed-label">Username<input id="edProxyUser" value="' + esc(p.proxy&&p.proxy.username) + '" /></label>' +
-      '<label class="ed-label">Password<input id="edProxyPass" type="password" value="' + esc(p.proxy&&p.proxy.password) + '" /></label>' +
-      '</div>' +
-
-      '<div class="ed-section">🌍 Start URL</div>' +
-      '<label class="ed-label"><input id="edUrl" value="' + esc(p.startUrl) + '" placeholder="https://facebook.com" /></label>' +
-
-      '<div class="ed-section">📝 Agent Context <span style="color:#888;font-weight:normal">(AI reads this when profile loads)</span></div>' +
-      '<textarea id="edCtx" rows="6" placeholder="This profile is for...\nAccount: ...\nWorkflow: ...\nCurrent status: ...\nImportant URLs: ...">' + esc(p.agentContext) + '</textarea>' +
-
-      '<div class="ed-section">🍪 Cookies</div>' +
-      '<div class="cmd-desc">' + (p.cookies&&p.cookies.length||0) + ' cookies saved. Use 💾 button to snapshot current cookies.</div>' +
-
-      '<div style="margin-top:16px;display:flex;gap:8px">' +
-      '<button id="edSave" class="prof-btn" style="padding:8px 20px;font-size:14px;background:var(--vscode-button-background,#0e639c);color:#fff;border:none">💾 Save</button>' +
-      '<button id="edCancel" class="prof-btn" style="padding:8px 16px">Cancel</button>' +
-      '</div>' +
-      '</div>';
-
-    // Icon picker
-    content.querySelectorAll(".ed-icon").forEach(function(el) {
-      el.onclick = function() {
-        content.querySelectorAll(".ed-icon").forEach(function(x){x.classList.remove("active");});
-        el.classList.add("active");
-      };
+    var saveBtn = el("button", { className: "prof-btn primary" }, ["💾 Save"]);
+    saveBtn.addEventListener("click", async function () {
+      var pid = id || ("prof_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6));
+      var all = await load();
+      var prev = all[pid] || {};
+      // Merge over what is stored: fields the editor doesn't show (cookies, lastDomain) survive an edit.
+      all[pid] = Object.assign({}, prev, {
+        name: name.value.trim() || "Unnamed",
+        icon: chosenIcon,
+        ua: ua.value.trim(),
+        platform: plat.value.trim(),
+        lang: lang.value.trim(),
+        label: presetLabel || (ua.value.trim() ? ua.value.trim().slice(0, 50) : "browser default"),
+        proxy: {
+          enabled: proxyOn.checked,
+          type: proxyType.value,
+          host: proxyHost.value.trim(),
+          port: proxyPort.value.trim(),
+          username: proxyUser.value,
+          password: proxyPass.value,
+        },
+        startUrl: startUrl.value.trim(),
+        agentContext: notes.value,
+        cookies: prev.cookies || [],
+        cookieCount: (prev.cookies || []).length,
+        created: prev.created || Date.now(),
+        updated: Date.now(),
+      });
+      await save(all);
+      await log(pid, isNew ? "Profile created" : "Profile edited");
+      status("");
+      renderProfiles();
     });
 
-    // UA preset
-    content.querySelector("#edUAPreset").onchange = function() {
-      var val = this.value;
-      if (!val) return;
-      var fp = genUA(val === "random" ? null : val);
-      content.querySelector("#edUA").value = fp.ua;
-      content.querySelector("#edPlat").value = fp.platform;
-      content.querySelector("#edLang").value = pick(LANGS);
-    };
-
-    // Save
-    content.querySelector("#edSave").onclick = async function() {
-      var pid = id || ("prof_" + Date.now().toString(36) + Math.random().toString(36).slice(2,6));
-      var profiles = await load();
-      var activeIcon = content.querySelector(".ed-icon.active");
-      profiles[pid] = {
-        name: content.querySelector("#edName").value || "Unnamed",
-        icon: activeIcon ? activeIcon.dataset.i : "👤",
-        ua: content.querySelector("#edUA").value,
-        platform: content.querySelector("#edPlat").value,
-        lang: content.querySelector("#edLang").value,
-        label: (function(){ var fp = content.querySelector("#edUA").value; return fp.slice(0,50); })(),
-        proxy: {
-          enabled: content.querySelector("#edProxyOn").checked,
-          type: content.querySelector("#edProxyType").value,
-          host: content.querySelector("#edProxyHost").value,
-          port: content.querySelector("#edProxyPort").value,
-          username: content.querySelector("#edProxyUser").value,
-          password: content.querySelector("#edProxyPass").value,
-        },
-        startUrl: content.querySelector("#edUrl").value,
-        agentContext: content.querySelector("#edCtx").value,
-        cookies: (p.cookies || []),
-        cookieCount: (p.cookies || []).length,
-        created: p.created || Date.now(),
-        updated: Date.now(),
-      };
-      await save(profiles);
-      await log(pid, isNew ? "Profile created" : "Profile edited");
-      renderProfiles();
-    };
-
-    content.querySelector("#edCancel").onclick = renderProfiles;
-    content.querySelector("#edBack").onclick = renderProfiles;
+    content.textContent = "";
+    content.appendChild(el("div", { className: "ed-wrap" }, [
+      el("button", { className: "prof-btn", onclick: renderProfiles }, ["← Back"]),
+      el("h3", { className: "ed-title" }, [isNew ? "New profile" : "Edit: " + p.name]),
+      field("Name", name),
+      el("label", { className: "ed-label" }, ["Icon", icons]),
+      el("div", { className: "ed-section" }, ["🎭 Identity"]),
+      field("Preset", preset),
+      field("User-Agent", ua),
+      el("div", { className: "ed-row" }, [field("Platform", plat), field("Language", lang)]),
+      el("div", { className: "ed-section" }, ["🌐 Proxy (applies to the whole browser while the profile's window is open)"]),
+      el("label", { className: "ed-label" }, [proxyOn, " Enable proxy"]),
+      el("div", { className: "ed-row" }, [field("Type", proxyType), field("Host", proxyHost), field("Port", proxyPort)]),
+      el("div", { className: "ed-row" }, [field("Username", proxyUser), field("Password", proxyPass)]),
+      el("div", { className: "ed-section" }, ["🌍 Start URL"]),
+      el("label", { className: "ed-label" }, [startUrl]),
+      el("div", { className: "ed-section" }, ["📝 Notes for the agent ", el("span", { className: "ed-hint" }, ["(returned by the launch tool as data — the agent reads them, it doesn't obey them)"])]),
+      notes,
+      el("div", { className: "ed-section" }, ["🍪 Cookies"]),
+      el("div", { className: "cmd-desc" }, [(p.cookies && p.cookies.length || 0) + " cookies saved" + (p.lastDomain ? " for " + p.lastDomain : "") + ". Use 💾 on the profile to snapshot the current tab's session."]),
+      el("div", { className: "ed-actions" }, [saveBtn, el("button", { className: "prof-btn", onclick: renderProfiles }, ["Cancel"])]),
+    ]));
   }
 
-  // ── UA GEN TAB ────────────────────────────────────────────────────────
+  // ── UA presets tab ────────────────────────────────────────────────────
 
   function renderUA() {
-    content.innerHTML = "";
-    // Random button
-    var rb = document.createElement("div"); rb.className = "cmd-item";
-    rb.innerHTML = '<span class="cmd-icon">🎲</span><div class="cmd-body"><div class="cmd-name">Random fingerprint</div><div class="cmd-desc">Generate and apply a completely random device</div></div>';
-    rb.onclick = function() { applyUA(genUA()); };
-    content.appendChild(rb);
-
-    Object.keys(GEN).forEach(function(type) {
-      var fp = genUA(type);
-      var item = document.createElement("div"); item.className = "cmd-item";
-      item.innerHTML =
-        '<div class="cmd-body" style="width:100%">' +
-        '<div class="cmd-name">' + esc(fp.label) + '</div>' +
-        '<div class="cmd-desc" style="word-break:break-all;font-family:monospace;font-size:10px">' + esc(fp.ua) + '</div>' +
-        '<div class="cmd-desc">Platform: ' + esc(fp.platform) + ' · Screen: ' + fp.screen + '</div>' +
-        '</div>' +
-        '<div class="prof-actions">' +
-        '<button class="prof-btn" data-a="apply" title="Apply">▶</button>' +
-        '<button class="prof-btn" data-a="copy" title="Copy">📋</button>' +
-        '</div>';
-      item.querySelector('[data-a="apply"]').onclick = function(e) { e.stopPropagation(); applyUA(fp); };
-      item.querySelector('[data-a="copy"]').onclick = function(e) { e.stopPropagation(); navigator.clipboard.writeText(fp.ua); e.target.textContent="✓"; setTimeout(function(){e.target.textContent="📋";},800); };
-      content.appendChild(item);
+    content.textContent = "";
+    if (!tools()) { content.appendChild(el("div", { className: "cmd-empty" }, ["The browser tools didn't load."])); return; }
+    content.appendChild(el("div", { className: "cmd-desc ed-hint" }, ["Apply = override the User-Agent, platform and language of the tab the agent works in (browser_set_useragent). Chrome shows its debugging bar on that tab while it is on."]));
+    [null].concat(tools().uaPresetNames).forEach(function (type) {
+      var fp = tools().uaPreset(type);
+      var apply = el("button", { className: "prof-btn", title: "Apply to the current tab" }, ["▶"]);
+      var copy = el("button", { className: "prof-btn", title: "Copy the User-Agent string" }, ["📋"]);
+      apply.addEventListener("click", function (e) {
+        e.stopPropagation();
+        status("Applying…");
+        runTool("browser_set_useragent", { userAgent: fp.ua, platform: fp.platform, language: fp.lang }).then(
+          function () { status("✓ " + fp.label + " — reload the page for the server to see it."); },
+          function (err) { status("⚠ " + ((err && err.message) || err)); }
+        );
+      });
+      copy.addEventListener("click", function (e) {
+        e.stopPropagation();
+        navigator.clipboard.writeText(fp.ua).then(function () { copy.textContent = "✓"; setTimeout(function () { copy.textContent = "📋"; }, 800); }, function () {});
+      });
+      content.appendChild(el("div", { className: "cmd-item" }, [
+        el("div", { className: "cmd-body wide" }, [
+          el("div", { className: "cmd-name" }, [type ? fp.label : "🎲 Random: " + fp.label]),
+          el("div", { className: "cmd-desc mono" }, [fp.ua]),
+          el("div", { className: "cmd-desc" }, ["Platform: " + fp.platform + " · Language: " + fp.lang]),
+        ]),
+        el("div", { className: "prof-actions" }, [apply, copy]),
+      ]));
     });
   }
 
-  function applyUA(fp) {
-    var input = document.getElementById("input");
-    input.value = "Set User-Agent to: " + fp.ua + " — platform: " + fp.platform + " — language: " + pick(LANGS) + ". Then reload the page.";
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    document.getElementById("send").click();
-    pp.classList.add("hidden");
-  }
-
-  // ── LOG TAB ───────────────────────────────────────────────────────────
+  // ── Log tab ───────────────────────────────────────────────────────────
 
   async function renderLog() {
     var profiles = await load();
     var logs = await getLogs();
-    content.innerHTML = "";
+    content.textContent = "";
     var all = [];
-    Object.keys(logs).forEach(function(pid) {
-      var name = profiles[pid] ? profiles[pid].name : "[deleted]";
-      var icon = profiles[pid] ? profiles[pid].icon : "❌";
-      logs[pid].forEach(function(l) { all.push({t:l.t, a:l.a, name:name, icon:icon}); });
+    Object.keys(logs).forEach(function (pid) {
+      var p = profiles[pid];
+      logs[pid].forEach(function (l) { all.push({ t: l.t, a: l.a, name: p ? p.name : "[deleted]", icon: p ? p.icon || "👤" : "❌" }); });
     });
-    all.sort(function(a,b){ return b.t - a.t; });
+    all.sort(function (a, b) { return b.t - a.t; });
     all = all.slice(0, 100);
-
-    if (!all.length) {
-      content.innerHTML = '<div style="padding:20px;text-align:center;color:#888">No activity yet.</div>';
-      return;
-    }
+    if (!all.length) { content.appendChild(el("div", { className: "cmd-empty" }, ["No activity yet."])); return; }
 
     var lastDay = "";
-    all.forEach(function(ev) {
+    var today = new Date().toDateString(), yesterday = new Date(Date.now() - 86400000).toDateString();
+    all.forEach(function (ev) {
       var d = new Date(ev.t);
       var day = d.toDateString();
       if (day !== lastDay) {
         lastDay = day;
-        var today = new Date().toDateString();
-        var label = day === today ? "Today" : day === new Date(Date.now()-86400000).toDateString() ? "Yesterday" : d.toLocaleDateString();
-        var h = document.createElement("div"); h.className = "cmd-group-title"; h.textContent = label;
-        content.appendChild(h);
+        content.appendChild(el("div", { className: "cmd-group-title" }, [day === today ? "Today" : day === yesterday ? "Yesterday" : d.toLocaleDateString()]));
       }
-      var item = document.createElement("div"); item.className = "cmd-item";
-      item.innerHTML = '<span class="cmd-icon">' + ev.icon + '</span><div class="cmd-body"><div class="cmd-name">' + esc(ev.name) + '</div><div class="cmd-desc">' + d.toLocaleTimeString() + " — " + esc(ev.a) + '</div></div>';
-      content.appendChild(item);
+      content.appendChild(el("div", { className: "cmd-item" }, [
+        el("span", { className: "cmd-icon" }, [ev.icon]),
+        el("div", { className: "cmd-body" }, [
+          el("div", { className: "cmd-name" }, [ev.name]),
+          el("div", { className: "cmd-desc" }, [d.toLocaleTimeString() + " — " + ev.a]),
+        ]),
+      ]));
     });
   }
-
-  // Expose for tools
-  window.AgentProfiles = { genUA: genUA, GEN: GEN, activate: activateProfile, snapshot: snapshotProfile, load: load, save: save, log: log };
 })();

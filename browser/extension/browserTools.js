@@ -224,6 +224,9 @@
 
   var attached = {};
   var detachTimers = {};
+  // Tabs whose DevTools session must stay open: a UA override (Network.setUserAgentOverride) lives only
+  // while the debugger is attached, so detaching after the usual idle period silently reverted it.
+  var pinned = {};
 
   chrome.debugger.onDetach.addListener(function (source) {
     delete attached[source.tabId];
@@ -245,10 +248,12 @@
       attached[tabId] = true;
     }
     clearTimeout(detachTimers[tabId]);
-    detachTimers[tabId] = setTimeout(function () {
-      delete attached[tabId];
-      chrome.debugger.detach({ tabId: tabId }).catch(function () {});
-    }, 8000);
+    if (!pinned[tabId]) {
+      detachTimers[tabId] = setTimeout(function () {
+        delete attached[tabId];
+        chrome.debugger.detach({ tabId: tabId }).catch(function () {});
+      }, 8000);
+    }
     return chrome.debugger.sendCommand({ tabId: tabId }, method, params || {});
   }
 
@@ -283,16 +288,25 @@
   var MODS = { Alt: 1, Control: 2, Ctrl: 2, Meta: 4, Cmd: 4, Command: 4, Shift: 8 };
   var EDIT_COMMANDS = { a: "selectAll", c: "copy", v: "paste", x: "cut", z: "undo", y: "redo" };
 
+  // A printable character as a key event: letters and digits get their real code/VK, anything else is
+  // delivered by its text alone.
+  function charKey(ch) {
+    if (/[a-z]/i.test(ch)) return { key: ch, code: "Key" + ch.toUpperCase(), vk: ch.toUpperCase().charCodeAt(0), text: ch };
+    if (/[0-9]/.test(ch)) return { key: ch, code: "Digit" + ch, vk: ch.charCodeAt(0), text: ch };
+    return { key: ch, code: "", vk: 0, text: ch };
+  }
+
   async function cdpKey(tabId, combo) {
     var parts = String(combo).split("+");
     var key = parts.pop() || "+";
     var mods = 0;
     parts.forEach(function (m) { mods |= MODS[m] || 0; });
-    var def = KEY_TABLE[key] || (key.length === 1
-      ? { key: key, code: /[a-z]/i.test(key) ? "Key" + key.toUpperCase() : "", vk: key.toUpperCase().charCodeAt(0), text: key }
-      : null);
+    var def = KEY_TABLE[key] || (key.length === 1 ? charKey(key) : null);
     if (!def) throw new Error("Unsupported key: " + combo);
-    var base = { key: def.key || key, code: def.code, windowsVirtualKeyCode: def.vk, nativeVirtualKeyCode: def.vk, modifiers: mods };
+    var base = { key: def.key || key, code: def.code, modifiers: mods };
+    // Only letters and digits have a virtual-key code we can state; a wrong one is worse than none
+    // ("." upper-cased is 46 = VK_DELETE and would delete instead of typing a dot).
+    if (def.vk) { base.windowsVirtualKeyCode = def.vk; base.nativeVirtualKeyCode = def.vk; }
     var hasText = def.text && !(mods & (1 | 2 | 4));
     var down = Object.assign({ type: hasText ? "keyDown" : "rawKeyDown" }, base);
     if (hasText) down.text = def.text;
@@ -639,6 +653,15 @@
     });
   }
 
+  function pageFieldKind(local) {
+    // What kind of form field a ref is, so fill_form can pick the right action for it.
+    var el = (window.__agentRefs || [])[local - 1];
+    if (!el || !el.isConnected) return { error: "stale" };
+    if (el instanceof HTMLSelectElement) return { kind: "select" };
+    if (el instanceof HTMLInputElement && (el.type === "checkbox" || el.type === "radio")) return { kind: "toggle", checked: el.checked };
+    return { kind: "text" };
+  }
+
   function pageFocusForTyping(local) {
     var el = (window.__agentRefs || [])[local - 1]; if (el && !el.isConnected) el = null;
     if (!el) return { error: "stale" };
@@ -862,6 +885,69 @@
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // User-Agent presets: realistic current browser/OS pairs with version pools, used by device
+  // profiles (tools and the 👤 panel alike — one generator, so they can't drift).
+
+  var UA_POOLS = {
+    chrome: ["120.0.6099.130", "122.0.6261.94", "124.0.6367.91", "126.0.6478.126", "128.0.6613.84", "130.0.6723.58", "132.0.6834.110", "134.0.6998.89", "136.0.7103.92", "140.0.7280.67", "145.0.7521.62", "148.0.7663.56", "150.0.7800.44", "152.0.7920.62"],
+    firefox: ["122.0", "125.0", "128.0", "130.0", "132.0", "134.0", "135.0"],
+    safari: ["17.0", "17.2", "17.4", "17.5", "18.0", "18.1"],
+    edge: ["120.0.2210.77", "130.0.2849.46", "140.0.3498.28", "145.0.3812.59", "150.0.4115.43", "152.0.4234.46"],
+    windows: ["10.0"], // Chrome reports NT 10.0 on Windows 11 too — "11.0" never occurs in the wild
+    mac: ["13_0", "13_3", "14_0", "14_2", "14_5", "15_0", "15_1"],
+    ios: ["16_2", "17_0", "17_2", "17_4", "17_5", "18_0"],
+    android: ["12", "13", "14", "15"],
+    phones: ["Pixel 7", "Pixel 8", "Pixel 8 Pro", "Pixel 9", "SM-S911B", "SM-S918B", "SM-S928B", "SM-A546B", "M2101K6G", "23078PND5G"],
+    languages: ["en-US,en;q=0.9", "en-GB,en;q=0.9", "de-DE,de;q=0.9,en;q=0.8", "fr-FR,fr;q=0.9,en;q=0.8", "es-ES,es;q=0.9,en;q=0.8", "ru-RU,ru;q=0.9,en;q=0.8", "ja-JP,ja;q=0.9,en;q=0.8", "zh-CN,zh;q=0.9,en;q=0.8", "pt-BR,pt;q=0.9,en;q=0.8", "ko-KR,ko;q=0.9,en;q=0.8", "tr-TR,tr;q=0.9,en;q=0.8"],
+  };
+  function pick(a) { return a[Math.floor(Math.random() * a.length)]; }
+  var WK = " AppleWebKit/537.36 (KHTML, like Gecko) ";
+  var UA_PRESETS = {
+    "win-chrome": function () { var v = pick(UA_POOLS.chrome); return { ua: "Mozilla/5.0 (Windows NT " + pick(UA_POOLS.windows) + "; Win64; x64)" + WK + "Chrome/" + v + " Safari/537.36", platform: "Win32", label: "Windows · Chrome " + v.split(".")[0] }; },
+    "win-edge": function () { var v = pick(UA_POOLS.edge); return { ua: "Mozilla/5.0 (Windows NT " + pick(UA_POOLS.windows) + "; Win64; x64)" + WK + "Chrome/" + v + " Safari/537.36 Edg/" + v, platform: "Win32", label: "Windows · Edge " + v.split(".")[0] }; },
+    "win-firefox": function () { var v = pick(UA_POOLS.firefox); return { ua: "Mozilla/5.0 (Windows NT " + pick(UA_POOLS.windows) + "; Win64; x64; rv:" + v + ") Gecko/20100101 Firefox/" + v, platform: "Win32", label: "Windows · Firefox " + v }; },
+    "mac-chrome": function () { var v = pick(UA_POOLS.chrome); return { ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X " + pick(UA_POOLS.mac) + ")" + WK + "Chrome/" + v + " Safari/537.36", platform: "MacIntel", label: "macOS · Chrome " + v.split(".")[0] }; },
+    "mac-safari": function () { var v = pick(UA_POOLS.safari); return { ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X " + pick(UA_POOLS.mac) + ") AppleWebKit/605.1.15 (KHTML, like Gecko) Version/" + v + " Safari/605.1.15", platform: "MacIntel", label: "macOS · Safari " + v }; },
+    "iphone": function () { var v = pick(UA_POOLS.safari); return { ua: "Mozilla/5.0 (iPhone; CPU iPhone OS " + pick(UA_POOLS.ios) + " like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/" + v + " Mobile/15E148 Safari/604.1", platform: "iPhone", label: "iPhone · Safari " + v }; },
+    "android": function () { var d = pick(UA_POOLS.phones), v = pick(UA_POOLS.chrome); return { ua: "Mozilla/5.0 (Linux; Android " + pick(UA_POOLS.android) + "; " + d + ")" + WK + "Chrome/" + v + " Mobile Safari/537.36", platform: "Linux armv8l", label: "Android · " + d }; },
+    "linux": function () { var v = pick(UA_POOLS.chrome); return { ua: "Mozilla/5.0 (X11; Linux x86_64)" + WK + "Chrome/" + v + " Safari/537.36", platform: "Linux x86_64", label: "Linux · Chrome " + v.split(".")[0] }; },
+  };
+  /** A preset by name ("win-chrome", …), or a random one. → { ua, platform, label, lang, type } */
+  function uaPreset(type) {
+    var key = UA_PRESETS[type] ? type : pick(Object.keys(UA_PRESETS));
+    var r = UA_PRESETS[key]();
+    r.type = key;
+    r.lang = pick(UA_POOLS.languages);
+    return r;
+  }
+
+  // Override the identity a tab presents, for as long as the tab lives: request headers through the
+  // DevTools protocol (the session is kept attached — the override dies with it), navigator.* through a
+  // MAIN-world pin that is redone on every load. Shared by browser_set_useragent and profile launches.
+  async function applyUaOverride(tabId, ua, platform, lang) {
+    var langs = lang ? lang.split(",").map(function (s) { return s.replace(/;q=[\d.]+/, "").trim(); }).filter(Boolean) : [];
+    pinned[tabId] = true;
+    clearTimeout(detachTimers[tabId]);
+    var viaCdp = function () {
+      return cdp(tabId, "Network.setUserAgentOverride", { userAgent: ua, platform: platform || "", acceptLanguage: lang || "" });
+    };
+    var inPage = function () {
+      return chrome.scripting.executeScript({ target: { tabId: tabId }, world: "MAIN", func: pageUaOverride, args: [ua, platform || "", langs] });
+    };
+    await viaCdp();
+    await inPage().catch(function () {}); // a blank/new tab has no document yet; the load watcher covers it
+    watchTabLoads(
+      tabId,
+      function () {
+        // Re-attach if the user dismissed the debugging bar, then re-pin navigator.* in the new document.
+        viaCdp().catch(function () {});
+        inPage().catch(function () {});
+      },
+      function () { delete pinned[tabId]; }
+    );
+  }
+
   function pageRunJs(code) {
     // Runs in the page's MAIN world (page CSP applies).
     function show(v) {
@@ -948,6 +1034,35 @@
   }
 
   // ---------------------------------------------------------------------------
+  // PDF rendering (DevTools Page.printToPDF — no print dialog).
+
+  function pdfBlob(base64) {
+    var bin = atob(base64), bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new Blob([bytes], { type: "application/pdf" });
+  }
+
+  // Render a standalone HTML document to PDF: open it in a background tab (a data: URL — its own
+  // opaque origin, so untrusted content never runs as the extension), print through DevTools, close.
+  async function htmlToPdf(html) {
+    var cur = await currentTab().catch(function () { return null; });
+    var dataUrl = "data:text/html;charset=utf-8;base64," + btoa(unescape(encodeURIComponent(html)));
+    var opts = { url: dataUrl, active: false };
+    if (cur) opts.windowId = cur.windowId;
+    var tab = await chrome.tabs.create(opts);
+    try {
+      await settle(tab.id, 10000);
+      var pdf = await cdp(tab.id, "Page.printToPDF", { printBackground: true });
+      return pdfBlob(pdf.data);
+    } finally {
+      clearTimeout(detachTimers[tab.id]);
+      delete attached[tab.id];
+      chrome.debugger.detach({ tabId: tab.id }).catch(function () {});
+      chrome.tabs.remove(tab.id).catch(function () {});
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Tool dispatch.
 
   async function quiet(tabId) {
@@ -967,6 +1082,81 @@
 
   function short(s) {
     return String(s).replace(/\s+/g, " ").slice(0, 80);
+  }
+
+  // The cookie jar of the tab the agent works in: a private (Incognito) window has its own, so cookie
+  // tools used there must not touch the user's regular session (chrome.cookies defaults to the panel's).
+  async function cookieStoreOf(tab) {
+    var stores = await chrome.cookies.getAllCookieStores();
+    var s = stores.find(function (st) { return (st.tabIds || []).indexOf(tab.id) !== -1; });
+    return s ? s.id : undefined;
+  }
+
+  // A URL that scopes to a stored cookie: chrome.cookies.remove/set need one, and a domain cookie's
+  // leading dot is not part of any host name.
+  function cookieUrl(c) {
+    return (c.secure ? "https://" : "http://") + String(c.domain || "").replace(/^\./, "") + (c.path || "/");
+  }
+
+  async function removeCookie(c, storeId) {
+    var details = { url: cookieUrl(c), name: c.name };
+    if (storeId) details.storeId = storeId;
+    return !!(await chrome.cookies.remove(details).catch(function () { return null; }));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Device profiles: storage shared with the 👤 panel (profiles.js).
+
+  var PROFILES_KEY = "agentProfiles";
+  var PROFILE_LOG_KEY = "agentProfileLogs";
+  var PROXY_BEFORE_KEY = "agentProxyBeforeProfile"; // { profileId, proxy } while a profile's proxy is applied
+
+  async function loadProfiles() {
+    return (await chrome.storage.local.get(PROFILES_KEY))[PROFILES_KEY] || {};
+  }
+  function saveProfiles(profiles) {
+    return chrome.storage.local.set({ [PROFILES_KEY]: profiles });
+  }
+  function proxyLabel(p) {
+    return p.proxy && p.proxy.enabled && p.proxy.host ? p.proxy.type + "://" + p.proxy.host + ":" + p.proxy.port : "direct";
+  }
+  async function logProfile(pid, action) {
+    var logs = (await chrome.storage.local.get(PROFILE_LOG_KEY))[PROFILE_LOG_KEY] || {};
+    (logs[pid] = logs[pid] || []).push({ t: Date.now(), a: action });
+    if (logs[pid].length > 300) logs[pid] = logs[pid].slice(-300);
+    await chrome.storage.local.set({ [PROFILE_LOG_KEY]: logs });
+  }
+
+  // The proxy a profile asks for is applied browser-wide (chrome.proxy has no per-window scope).
+  // The setting in place before the first profile launch is kept aside and restored by endProfile();
+  // a profile without a proxy launched over another profile's proxy goes direct, not through it.
+  async function applyProfileProxy(pid, p) {
+    var st = await chrome.storage.local.get(["agentProxy", PROXY_BEFORE_KEY]);
+    var before = st[PROXY_BEFORE_KEY];
+    var want = p.proxy && p.proxy.enabled && p.proxy.host
+      ? { enabled: true, type: p.proxy.type || "http", host: p.proxy.host, port: Number(p.proxy.port), username: p.proxy.username || "", password: p.proxy.password || "", profileId: pid }
+      : null;
+    if (!want && !before) return ""; // nothing to change
+    if (!before) await chrome.storage.local.set({ [PROXY_BEFORE_KEY]: { profileId: pid, proxy: st.agentProxy || null } });
+    else await chrome.storage.local.set({ [PROXY_BEFORE_KEY]: { profileId: pid, proxy: before.proxy } });
+    if (want) await chrome.storage.local.set({ agentProxy: want });
+    else if (before.proxy) await chrome.storage.local.set({ agentProxy: before.proxy });
+    else await chrome.storage.local.remove("agentProxy");
+    await sleep(500); // background.js applies it on the storage change
+    var status = (await chrome.storage.session.get("agentProxyStatus")).agentProxyStatus;
+    if (want && status && status.state === "error") return " — FAILED: " + status.message + " (traffic is not going through it)";
+    return want ? " (browser-wide while this profile is open)" : "";
+  }
+
+  async function endProfile(pid) {
+    var st = await chrome.storage.local.get([PROXY_BEFORE_KEY, "agentActiveProfile"]);
+    var before = st[PROXY_BEFORE_KEY];
+    if (before && before.profileId === pid) {
+      if (before.proxy) await chrome.storage.local.set({ agentProxy: before.proxy });
+      else await chrome.storage.local.remove("agentProxy");
+      await chrome.storage.local.remove(PROXY_BEFORE_KEY);
+    }
+    if (st.agentActiveProfile === pid) await chrome.storage.local.remove("agentActiveProfile");
   }
 
   var TOOLS = {
@@ -1273,17 +1463,23 @@
 
     browser_convert: async function (a) {
       if (!window.AgentConverter) throw new Error("Converter not loaded");
+      var cur = await currentTab().catch(function () { return null; });
       var result = await window.AgentConverter.convert({
         from: a.from, to: a.to, data: a.data || "",
         filename: a.filename, title: a.title,
         quality: a.quality, maxWidth: a.maxWidth, maxHeight: a.maxHeight,
         delimiter: a.delimiter,
+        windowId: cur ? cur.windowId : undefined,
       });
       if (result.error) throw new Error(result.error);
+      if (result.html && !result.blob) {
+        // md→pdf / html→pdf: the converter prepared the document, the PDF is rendered here (DevTools).
+        result.blob = await htmlToPdf(result.html);
+      }
       if (result.blob && a.save !== false) {
-        var dl = await window.AgentConverter.downloadAndOpen(result.blob, result.filename, a.open);
+        var dl = await window.AgentConverter.download(result.blob, result.filename);
         if (!dl.ok) return text("Conversion done but save failed: " + dl.error);
-        return text("Converted and " + (dl.opened ? "opened" : "saved") + ": " + dl.filename + " (" + (dl.size || result.blob.size) + " bytes)" + (result.rows ? " — " + result.rows + " rows" : ""));
+        return text("Converted and saved: " + dl.filename + " (" + (dl.size || result.blob.size) + " bytes)" + (result.rows ? " — " + result.rows + " rows" : ""));
       }
       if (result.text) return text(result.text.length > 5000 ? result.text.slice(0, 5000) + "\n... (truncated)" : result.text);
       return text("Converted: " + result.filename);
@@ -1296,12 +1492,11 @@
       // DevTools protocol, so it's the tab the agent is on — not the side panel —
       // and it saves without a manual print dialog.
       var pdf = await cdp(tab.id, "Page.printToPDF", { printBackground: true });
-      var bin = atob(pdf.data), bytes = new Uint8Array(bin.length);
-      for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      var blob = pdfBlob(pdf.data);
       var name = (tab.title || "page").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 50) + ".pdf";
-      var dl = await window.AgentConverter.downloadAndOpen(new Blob([bytes], { type: "application/pdf" }), name);
+      var dl = await window.AgentConverter.download(blob, name);
       if (!dl.ok) return text("Rendered the page to PDF but saving failed: " + dl.error);
-      return text("Saved the page as PDF: " + dl.filename + " (" + (dl.size || bytes.length) + " bytes)" + (dl.opened ? ", and opened it" : ""));
+      return text("Saved the page as PDF: " + dl.filename + " (" + (dl.size || blob.size) + " bytes)");
     },
 
     browser_save_page: async function (a) {
@@ -1326,197 +1521,24 @@
         mime = "text/html";
       }
       var blob = new Blob([content], { type: mime });
-      var dl = await window.AgentConverter.downloadAndOpen(blob, filename);
+      var dl = await window.AgentConverter.download(blob, filename);
+      if (!dl.ok) throw new Error("Saving failed: " + dl.error);
       return text("Saved: " + dl.filename + " (" + (dl.size || blob.size) + " bytes)");
     },
 
     browser_screenshot_save: async function (a) {
       if (!window.AgentConverter) throw new Error("Converter not loaded");
       var format = (a.format || "png").toLowerCase();
-      var result = await window.AgentConverter.convert({ from: "screenshot", to: format, quality: a.quality, filename: a.filename });
+      var tab = await currentTab(); // the tab the agent works in, whichever window it is in
+      if (!tab.active) {
+        await chrome.tabs.update(tab.id, { active: true });
+        await sleep(300);
+      }
+      var result = await window.AgentConverter.convert({ from: "screenshot", to: format, quality: a.quality, filename: a.filename, windowId: tab.windowId });
       if (result.error) throw new Error(result.error);
-      var dl = await window.AgentConverter.downloadAndOpen(result.blob, result.filename);
+      var dl = await window.AgentConverter.download(result.blob, result.filename);
+      if (!dl.ok) throw new Error("Saving failed: " + dl.error);
       return text("Screenshot saved: " + dl.filename + " (" + (dl.size || result.size) + " bytes)");
-    },
-
-    // Extract data from page element/URL, save as file, open with OS handler.
-    // No hardcoded URLs — data comes from whatever page the user is on.
-    browser_cache_extract: async function (a) {
-      var data = null;
-      var filename = a.filename || "resource.dat";
-      var tab = await currentTab();
-
-      if (a.ref) {
-        // Read from DOM element: data-cfg, data-src, data-content, textContent, href
-        var r = await act(tab.id, a.ref, function (local, attr) {
-          var el = (window.__agentRefs || [])[local - 1];
-          if (!el) return { error: "stale" };
-          // Try custom attribute first
-          if (attr && el.getAttribute(attr)) return { data: el.getAttribute(attr), type: "attr" };
-          // Auto-detect: data-* attributes with base64
-          var attrs = el.attributes;
-          for (var i = 0; i < attrs.length; i++) {
-            if (attrs[i].name.startsWith("data-") && attrs[i].value.length > 50) {
-              return { data: attrs[i].value, type: "attr:" + attrs[i].name };
-            }
-          }
-          // Href / src
-          if (el.href) return { url: el.href, type: "href" };
-          if (el.src) return { url: el.src, type: "src" };
-          // Hidden text content
-          if (el.textContent && el.textContent.length > 50) return { data: el.textContent.trim(), type: "text" };
-          return { error: "No data found on this element. Specify attr= parameter." };
-        }, [a.attr || ""]);
-        if (r.error) throw new Error(r.error);
-        if (r.data) data = r.data;
-        else if (r.url) {
-          // Fetch the URL content
-          var resp = await fetch(r.url);
-          var blob = await resp.blob();
-          var reader = new FileReader();
-          data = await new Promise(function (resolve) {
-            reader.onload = function () { resolve(reader.result.split(",")[1]); };
-            reader.readAsDataURL(blob);
-          });
-        }
-      } else if (a.url) {
-        // Fetch from URL on the page's domain (uses page cookies/session)
-        var fetchUrl = a.url;
-        if (!/^https?:\/\//i.test(fetchUrl)) {
-          // Relative URL — resolve against current tab
-          var tabUrl = tab.url;
-          var base = tabUrl.replace(/[^\/]*$/, "");
-          fetchUrl = base + fetchUrl;
-        }
-        var resp2 = await fetch(fetchUrl);
-        var blob2 = await resp2.blob();
-        var reader2 = new FileReader();
-        data = await new Promise(function (resolve) {
-          reader2.onload = function () { resolve(reader2.result.split(",")[1]); };
-          reader2.readAsDataURL(blob2);
-        });
-      } else if (a.selector) {
-        // CSS selector on the page
-        var r2 = await inTop(function (sel, attrName) {
-          var el = document.querySelector(sel);
-          if (!el) return { error: "No element matches: " + sel };
-          if (attrName && el.getAttribute(attrName)) return { data: el.getAttribute(attrName) };
-          for (var i = 0; i < el.attributes.length; i++) {
-            if (el.attributes[i].name.startsWith("data-") && el.attributes[i].value.length > 50) {
-              return { data: el.attributes[i].value };
-            }
-          }
-          if (el.textContent.length > 50) return { data: el.textContent.trim() };
-          if (el.href) return { url: el.href };
-          if (el.src) return { url: el.src };
-          return { error: "No data on element" };
-        }, [a.selector, a.attr || ""], "MAIN");
-        if (r2.error) throw new Error(r2.error);
-        if (r2.data) data = r2.data;
-        else if (r2.url) {
-          var resp3 = await fetch(r2.url);
-          var blob3 = await resp3.blob();
-          var reader3 = new FileReader();
-          data = await new Promise(function (resolve) {
-            reader3.onload = function () { resolve(reader3.result.split(",")[1]); };
-            reader3.readAsDataURL(blob3);
-          });
-        }
-      }
-
-      if (!data) throw new Error("No data extracted. Use ref=, url=, or selector= to specify the source.");
-
-      // Decode base64 to binary
-      var binary = atob(data);
-      var bytes = new Uint8Array(binary.length);
-      for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      var blob4 = new Blob([bytes], { type: "application/octet-stream" });
-      var blobUrl = URL.createObjectURL(blob4);
-
-      // Download and open
-      return new Promise(function (resolve) {
-        chrome.downloads.download({ url: blobUrl, filename: filename, conflictAction: "uniquify" }, function (id) {
-          if (chrome.runtime.lastError) {
-            URL.revokeObjectURL(blobUrl);
-            return resolve(text("Download failed: " + chrome.runtime.lastError.message));
-          }
-          var checks = 0;
-          var timer = setInterval(function () {
-            chrome.downloads.search({ id: id }, function (items) {
-              if (!items || !items.length) { clearInterval(timer); resolve(text("Error")); return; }
-              var item = items[0];
-              if (item.state === "complete") {
-                clearInterval(timer);
-                URL.revokeObjectURL(blobUrl);
-                if (a.open === false) { resolve(text("Saved: " + filename + " (" + bytes.length + " bytes)")); return; }
-                Promise.resolve()
-                  .then(function () { return chrome.downloads.open(id); })
-                  .then(
-                    function () { resolve(text("Saved and opened: " + filename + " (" + bytes.length + " bytes)")); },
-                    function () { resolve(text("Saved: " + filename + " (" + bytes.length + " bytes)")); }
-                  );
-              } else if (item.state === "interrupted") {
-                clearInterval(timer);
-                resolve(text("Failed: " + (item.error || "interrupted")));
-              } else if (++checks > 60) {
-                clearInterval(timer);
-                resolve(text("Timeout"));
-              }
-            });
-          }, 500);
-        });
-      });
-    },
-
-    browser_download_open: async function (a) {
-      var url = a.url;
-      if (!url) {
-        // If ref provided, get href from the element
-        if (a.ref) {
-          var tab = await currentTab();
-          var r = await act(tab.id, a.ref, function(local) {
-            var el = (window.__agentRefs || [])[local - 1];
-            if (!el) return { error: "stale" };
-            return { href: el.href || el.src || el.getAttribute("data-url") || "" };
-          }, []);
-          if (r.error) throw new Error(r.error);
-          url = r.href;
-        }
-      }
-      if (!url) throw new Error("url or ref is required");
-      url = normalizeUrl(url);
-
-      return new Promise(function (resolve, reject) {
-        chrome.downloads.download({ url: url }, function (downloadId) {
-          if (chrome.runtime.lastError) {
-            return resolve(text("Download failed: " + chrome.runtime.lastError.message));
-          }
-          // Wait for download to complete, then open it
-          var checks = 0;
-          var timer = setInterval(function () {
-            chrome.downloads.search({ id: downloadId }, function (items) {
-              if (!items || !items.length) { clearInterval(timer); resolve(text("Download not found")); return; }
-              var item = items[0];
-              if (item.state === "complete") {
-                clearInterval(timer);
-                var base = (item.filename || url).split(/[\\/]/).pop();
-                Promise.resolve()
-                  .then(function () { return chrome.downloads.open(downloadId); })
-                  .then(
-                    function () { resolve(text("Downloaded and opened: " + base + " (" + (item.fileSize || 0) + " bytes)")); },
-                    function () { resolve(text("Downloaded: " + base + " (" + (item.fileSize || 0) + " bytes)")); }
-                  );
-              } else if (item.state === "interrupted") {
-                clearInterval(timer);
-                resolve(text("Download interrupted: " + (item.error || "unknown error")));
-              } else if (++checks > 120) {
-                clearInterval(timer);
-                resolve(text("Download timed out after 60s"));
-              }
-            });
-          }, 500);
-        });
-      });
     },
 
     // =========================================================================
@@ -1524,9 +1546,10 @@
     // =========================================================================
 
     browser_cookies_get: async function (a) {
-      var url = a.url || (await currentTab()).url;
+      var tab = await currentTab();
+      var url = a.url || tab.url;
       var domain = a.domain || "";
-      var details = {};
+      var details = { storeId: await cookieStoreOf(tab) };
       if (url) details.url = url;
       if (domain) details.domain = domain;
       if (a.name) details.name = a.name;
@@ -1551,6 +1574,7 @@
         url: url,
         name: String(a.name),
         value: String(a.value || ""),
+        storeId: await cookieStoreOf(tab),
       };
       if (a.domain) details.domain = a.domain;
       if (a.path) details.path = a.path;
@@ -1568,30 +1592,30 @@
       if (!a.name) throw new Error("name is required");
       var tab = await currentTab();
       var url = a.url || tab.url;
-      await chrome.cookies.remove({ url: url, name: a.name });
-      return text("Deleted cookie: " + a.name);
+      var gone = await chrome.cookies.remove({ url: url, name: a.name, storeId: await cookieStoreOf(tab) });
+      return text(gone ? "Deleted cookie: " + a.name : "No cookie named " + a.name + " for " + url + ".");
     },
 
     browser_cookies_clear: async function (a) {
-      var url = a.url || (await currentTab()).url;
+      var tab = await currentTab();
+      var url = a.url || tab.url;
       var domain = a.domain || "";
-      var details = {};
+      var details = { storeId: await cookieStoreOf(tab) };
       if (url) details.url = url;
       if (domain) details.domain = domain;
       var cookies = await chrome.cookies.getAll(details);
       var count = 0;
       for (var i = 0; i < cookies.length; i++) {
-        var proto = cookies[i].secure ? "https://" : "http://";
-        await chrome.cookies.remove({ url: proto + cookies[i].domain + cookies[i].path, name: cookies[i].name });
-        count++;
+        if (await removeCookie(cookies[i], details.storeId)) count++;
       }
       return text("Cleared " + count + " cookies" + (domain ? " for " + domain : "") + ".");
     },
 
     browser_cookies_export: async function (a) {
-      var url = a.url || (await currentTab()).url;
+      var tab = await currentTab();
+      var url = a.url || tab.url;
       var domain = a.domain || "";
-      var details = {};
+      var details = { storeId: await cookieStoreOf(tab) };
       if (url) details.url = url;
       if (domain) details.domain = domain;
       var cookies = await chrome.cookies.getAll(details);
@@ -1606,23 +1630,28 @@
     browser_cookies_import: async function (a) {
       if (!a.cookies) throw new Error("cookies array is required");
       var list = typeof a.cookies === "string" ? JSON.parse(a.cookies) : a.cookies;
+      if (!Array.isArray(list)) throw new Error("cookies must be a JSON array of {name, value, domain, ...}.");
       var tab = await currentTab();
-      var count = 0;
+      var storeId = await cookieStoreOf(tab);
+      var count = 0, skipped = [];
       for (var i = 0; i < list.length; i++) {
-        var c = list[i];
-        var proto = c.secure ? "https://" : "http://";
-        var url = c.url || (proto + c.domain.replace(/^\./, "") + (c.path || "/"));
-        var details = { url: url, name: c.name, value: c.value };
+        var c = list[i] || {};
+        if (!c.name || (!c.url && !c.domain)) { skipped.push("#" + (i + 1) + " (needs name and domain or url)"); continue; }
+        var details = { url: c.url || cookieUrl(c), name: String(c.name), value: String(c.value == null ? "" : c.value), storeId: storeId };
         if (c.domain) details.domain = c.domain;
         if (c.path) details.path = c.path;
-        if (c.secure !== undefined) details.secure = c.secure;
-        if (c.httpOnly !== undefined) details.httpOnly = c.httpOnly;
+        if (c.secure !== undefined) details.secure = !!c.secure;
+        if (c.httpOnly !== undefined) details.httpOnly = !!c.httpOnly;
         if (c.sameSite) details.sameSite = c.sameSite;
-        if (c.expirationDate) details.expirationDate = c.expirationDate;
-        await chrome.cookies.set(details);
-        count++;
+        if (c.expirationDate) details.expirationDate = Number(c.expirationDate);
+        try {
+          if (await chrome.cookies.set(details)) count++;
+          else skipped.push(c.name + " (rejected by the browser)");
+        } catch (e) {
+          skipped.push(c.name + " (" + short((e && e.message) || e) + ")");
+        }
       }
-      return text("Imported " + count + " cookies.");
+      return text("Imported " + count + " of " + list.length + " cookies." + (skipped.length ? "\nSkipped: " + skipped.slice(0, 10).join(", ") : ""));
     },
 
     // =========================================================================
@@ -1636,24 +1665,9 @@
       var plat = String(a.platform || "");
       var lang = String(a.language || "");
       try {
-        await cdp(tab.id, "Network.enable");
-        await cdp(tab.id, "Network.setUserAgentOverride", {
-          userAgent: ua,
-          platform: plat,
-          acceptLanguage: lang,
-        });
-
-        // CDP covers the HTTP headers but not navigator.language(s), and a page-side defineProperty is lost
-        // with the page's JS context on every reload — so re-inject on each load of this tab. A real function
-        // with args, never code built as a string: the panel's CSP forbids eval/new Function.
-        var langs = lang ? lang.split(",").map(function (s) { return s.replace(/;q=[\d.]+/, "").trim(); }).filter(Boolean) : [];
-        var inject = function () {
-          return chrome.scripting.executeScript({ target: { tabId: tab.id }, world: "MAIN", func: pageUaOverride, args: [ua, plat, langs] });
-        };
-        await inject();
-        watchTabLoads(tab.id, function () { inject().catch(function () {}); });
+        await applyUaOverride(tab.id, ua, plat, lang);
       } catch (e) {
-        throw new Error("Could not override UA via DevTools: " + ((e && e.message) || e) + ". Try browser_run_js with navigator overrides.");
+        throw new Error("Could not override the User-Agent via DevTools: " + ((e && e.message) || e) + ". Another DevTools client (an open inspector?) may hold this tab.");
       }
       var result = "User-Agent set to: " + ua.slice(0, 100);
       if (plat) result += " | platform=" + plat;
@@ -1668,57 +1682,47 @@
     },
 
     // =========================================================================
-    // Multi-account / Profile isolation — sessions via incognito windows
+    // Windows — list, switch, close (a private window is one of them)
     // =========================================================================
 
-    browser_new_profile: async function (a) {
-      // Each "profile" is an incognito window — fully isolated cookies, storage, sessions
-      var url = normalizeUrl(a.url || "about:blank");
-      var win;
-      try {
-        win = await chrome.windows.create({ url: url, incognito: true, focused: !!a.focused });
-      } catch (e) {
-        throw new Error("Could not create isolated profile (" + ((e && e.message) || e) + "). Enable 'Allow in Incognito' for Agent Browser at chrome://extensions.");
-      }
-      var tab = win.tabs && win.tabs[0];
-      if (!tab) throw new Error("No tab in the new profile window.");
-      currentTabId = tab.id;
-      await settle(tab.id, 15000);
-      return text("New isolated profile (window " + win.id + ") opened. Cookies, storage and login state are separate from other windows.\n" + (await pageLine()));
-    },
-
-    browser_list_profiles: async function () {
+    browser_list_windows: async function () {
       var windows = await chrome.windows.getAll({ populate: true });
+      var cur = currentTabId;
       var lines = [];
       for (var i = 0; i < windows.length; i++) {
         var w = windows[i];
-        var tabs = (w.tabs || []).filter(function(t) { return !ownPage(t); });
-        var label = w.incognito ? "[ISOLATED] " : "[MAIN] ";
-        lines.push(label + "Window " + w.id + " (" + tabs.length + " tabs)" + (w.focused ? " *focused*" : ""));
+        var tabs = (w.tabs || []).filter(function (t) { return !ownPage(t); });
+        var label = w.incognito ? "[PRIVATE] " : "[NORMAL] ";
+        var mine = tabs.some(function (t) { return t.id === cur; });
+        lines.push(label + "Window " + w.id + " (" + tabs.length + " tabs)" + (w.focused ? " — focused" : "") + (mine ? " — you work here" : ""));
         for (var j = 0; j < Math.min(tabs.length, 5); j++) {
-          lines.push("  " + tabs[j].id + "  " + (tabs[j].title || "").slice(0, 50) + " — " + tabs[j].url);
+          lines.push("  " + (tabs[j].id === cur ? "* " : "  ") + tabs[j].id + "  " + (tabs[j].title || "(untitled)").slice(0, 50) + " — " + tabs[j].url);
         }
         if (tabs.length > 5) lines.push("  ... +" + (tabs.length - 5) + " more tabs");
       }
       return text(lines.join("\n") || "No windows.");
     },
 
-    browser_switch_profile: async function (a) {
-      if (!a.windowId) throw new Error("windowId is required (get it from browser_list_profiles)");
+    browser_switch_window: async function (a) {
+      if (!a.windowId) throw new Error("windowId is required (get it from browser_list_windows)");
       var win = await chrome.windows.update(a.windowId, { focused: true });
       var tabs = await chrome.tabs.query({ windowId: a.windowId, active: true });
-      if (tabs[0]) {
+      if (tabs[0] && !ownPage(tabs[0])) {
         currentTabId = tabs[0].id;
-        return text("Switched to window " + a.windowId + (win.incognito ? " (isolated)" : "") + ". " + (await pageLine()));
+        return text("Switched to window " + a.windowId + (win.incognito ? " (private)" : "") + ". " + (await pageLine()));
       }
-      return text("Switched to window " + a.windowId + " (no active tab).");
+      return text("Switched to window " + a.windowId + " (no website tab is active there — use browser_tabs / browser_switch_tab).");
     },
 
-    browser_close_profile: async function (a) {
+    browser_close_window: async function (a) {
       if (!a.windowId) throw new Error("windowId is required");
+      var w = await chrome.windows.get(a.windowId, { populate: true });
+      var tabs = (w.tabs || []);
+      var mine = await chrome.windows.getCurrent().catch(function () { return null; });
+      if (tabs.some(ownPage) || (mine && mine.id === w.id)) throw new Error("That window holds the agent's own panel — close it yourself if you mean to.");
       await chrome.windows.remove(a.windowId);
-      currentTabId = null;
-      return text("Closed window " + a.windowId + " and all its tabs/sessions.");
+      if (tabs.some(function (t) { return t.id === currentTabId; })) currentTabId = null;
+      return text("Closed window " + a.windowId + (w.incognito ? " (private — its session is gone)" : "") + " with " + tabs.length + " tab" + (tabs.length === 1 ? "" : "s") + ".");
     },
 
     // =========================================================================
@@ -1732,12 +1736,24 @@
       var fields = Array.isArray(a.fields) ? a.fields : Object.entries(a.fields).map(function(e) { return { ref: Number(e[0]), value: e[1] }; });
       var results = [];
       for (var i = 0; i < fields.length; i++) {
-        var f = fields[i];
+        var f = fields[i] || {};
         var entry = (refTables[tab.id] || {})[f.ref];
-        if (!entry) { results.push("[" + f.ref + "]: not found"); continue; }
+        if (!entry) { results.push("[" + f.ref + "]: no such ref — call browser_read_page first"); continue; }
         try {
-          var r = await act(tab.id, f.ref, pageType, [String(f.value), true, false]);
-          results.push("[" + f.ref + "]: " + (r.error ? "FAIL " + r.error : "ok"));
+          var kind = await act(tab.id, f.ref, pageFieldKind, []);
+          var r, note = "ok";
+          if (kind.kind === "select") {
+            r = await act(tab.id, f.ref, pageSelect, [String(f.value)]);
+            if (!r.error) note = 'selected "' + r.selected + '"';
+          } else if (kind.kind === "toggle") {
+            var on = !(f.value === false || f.value === 0 || /^(false|0|no|off|unchecked|)$/i.test(String(f.value).trim()));
+            r = kind.checked === on ? { ok: true } : await act(tab.id, f.ref, pageClick, [false, false], false);
+            note = on ? "checked" : "unchecked";
+          } else {
+            r = await act(tab.id, f.ref, pageType, [String(f.value == null ? "" : f.value), true, false]);
+            if (!r.error && !r.verified) note = "typed, but the field does not show the text — check it with browser_read_page";
+          }
+          results.push("[" + f.ref + "]: " + (r.error ? "FAIL " + r.error : note));
         } catch (e) {
           results.push("[" + f.ref + "]: error " + ((e && e.message) || e));
         }
@@ -1764,61 +1780,25 @@
       return text("Table (" + r.rows + " rows):\n" + r.data.map(function(row) { return row.join(" | "); }).join("\n"));
     },
 
-    browser_network_log: async function (a) {
-      var tab = await currentTab();
-      try {
-        await cdp(tab.id, "Network.enable");
-        var entries = [];
-        var timeout = (a.seconds || 3) * 1000;
-        var start = Date.now();
-        var listener = function(params) { entries.push(params); };
-        await sleep(timeout);
-        await cdp(tab.id, "Network.disable");
-        return text("Network logging ran for " + (a.seconds || 3) + "s. Use browser_run_js with performance.getEntriesByType('resource') for network data.");
-      } catch (e) {
-        return text("Network logging: " + ((e && e.message) || e));
-      }
-    },
-
     // =========================================================================
-    // Device profiles — isolated browser identity (UA + device config + proxy + cookies)
-    // Wraps fingerprint.js engine + chrome.storage
+    // Device profiles — a saved identity (User-Agent + platform + language), proxy, cookies and
+    // notes, kept in chrome.storage.local "agentProfiles" and shared with the 👤 panel (profiles.js).
     // =========================================================================
 
     browser_profile_create: async function (a) {
-      // Generates a full coherent device profile + saves with proxy/cookie config
       if (!a.name) throw new Error("name is required");
-      var PROFILES_KEY = "agentProfiles";
-      var profiles = (await chrome.storage.local.get(PROFILES_KEY))[PROFILES_KEY] || {};
+      var profiles = await loadProfiles();
       var pid = "prof_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-
-      // Generate fingerprint from device type using the built-in engine
-      var FP_ENGINE = window.AgentFingerprint;
-      var fp = null;
-      if (FP_ENGINE) {
-        fp = FP_ENGINE.generate(a.deviceType || "random", pid);
-      }
-
-      // Fallback UA generation if fingerprint engine not loaded
-      var DEVICE_TYPES = {
-        "win-chrome": function() { var v = "13" + Math.floor(Math.random()*10) + ".0." + (6000+Math.floor(Math.random()*2000)) + "." + Math.floor(Math.random()*100); return { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" + v + " Safari/537.36", platform: "Win32" }; },
-        "mac-chrome": function() { var v = "13" + Math.floor(Math.random()*10) + ".0." + (6000+Math.floor(Math.random()*2000)) + "." + Math.floor(Math.random()*100); return { ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_" + Math.floor(Math.random()*6) + ") AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" + v + " Safari/537.36", platform: "MacIntel" }; },
-        "android": function() { var v = "13" + Math.floor(Math.random()*10) + ".0." + (6000+Math.floor(Math.random()*2000)) + "." + Math.floor(Math.random()*100); return { ua: "Mozilla/5.0 (Linux; Android 1" + Math.floor(Math.random()*5) + "; Pixel " + (7+Math.floor(Math.random()*3)) + ") AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" + v + " Mobile Safari/537.36", platform: "Linux armv8l" }; },
-      };
-      var deviceGen = DEVICE_TYPES[a.deviceType] || DEVICE_TYPES["win-chrome"];
-      var device = fp || deviceGen();
-      var lang = a.language || "en-US,en;q=0.9";
-
+      var device = uaPreset(a.deviceType);
       var profile = {
-        name: a.name,
+        name: String(a.name),
         icon: a.icon || "🕵️",
         ua: a.userAgent || device.ua,
         platform: a.platform || device.platform,
-        lang: lang,
-        label: (a.userAgent || device.ua).slice(0, 50),
-        fingerprint: fp, // Full coherent fingerprint (canvas, WebGL, audio, etc.)
+        lang: a.language || device.lang,
+        label: a.userAgent ? String(a.userAgent).slice(0, 50) : device.label,
         proxy: {
-          enabled: !!(a.proxyHost),
+          enabled: !!a.proxyHost,
           type: a.proxyType || "http",
           host: a.proxyHost || "",
           port: a.proxyPort || "",
@@ -1832,29 +1812,23 @@
         created: Date.now(),
         updated: Date.now(),
       };
-
       profiles[pid] = profile;
-      await chrome.storage.local.set({ [PROFILES_KEY]: profiles });
+      await saveProfiles(profiles);
 
-      var result = "Created profile '" + a.name + "' (id: " + pid + ")\n";
+      var result = "Created profile '" + profile.name + "' (id: " + pid + ")\n";
       result += "UA: " + profile.ua.slice(0, 80) + "\n";
-      result += "Platform: " + profile.platform + "\n";
-      result += "Proxy: " + (profile.proxy.enabled ? profile.proxy.type + "://" + profile.proxy.host + ":" + profile.proxy.port : "direct") + "\n";
-      result += "Device config: " + (fp ? "full device profile applied" : "UA-only") + "\n";
-      result += "Use browser_profile_launch with id '" + pid + "' to start.";
+      result += "Platform: " + profile.platform + "  |  Language: " + profile.lang + "\n";
+      result += "Proxy: " + proxyLabel(profile) + "\n";
+      result += "Use browser_profile_launch with id '" + pid + "' to start; browser_profile_save after signing in keeps the session.";
       return text(result);
     },
 
     browser_profile_launch: async function (a) {
-      // Opens a new window and applies the full device profile.
-      // Uses a regular window (not incognito) because:
-      // 1. All incognito windows share ONE session — not isolated at all
-      // 2. Incognito often returns null for win.tabs
-      // 3. Extension may not have incognito permission
-      // Instead: clear cookies for target domains → import profile cookies → apply fingerprint
+      // Opens a regular (not Incognito) window and applies the device profile to it. Incognito would
+      // not help: every Incognito window shares one session, and the extension may not be allowed
+      // there. So the profile's saved cookies replace whatever the regular jar holds for its domains.
       if (!a.profileId) throw new Error("profileId is required (get from browser_profile_list)");
-      var PROFILES_KEY = "agentProfiles";
-      var profiles = (await chrome.storage.local.get(PROFILES_KEY))[PROFILES_KEY] || {};
+      var profiles = await loadProfiles();
       var p = profiles[a.profileId];
       if (!p) throw new Error("Profile not found: " + a.profileId);
 
@@ -1869,117 +1843,78 @@
       if (!tab) throw new Error("No tab in new window — try again");
       currentTabId = tab.id;
 
-      // 2. Apply proxy
-      if (p.proxy && p.proxy.enabled && p.proxy.host) {
-        await chrome.storage.local.set({
-          agentProxy: {
-            enabled: true,
-            type: p.proxy.type || "http",
-            host: p.proxy.host,
-            port: Number(p.proxy.port),
-            username: p.proxy.username || "",
-            password: p.proxy.password || "",
-          }
-        });
-        await sleep(500); // Let background.js apply it
-      }
+      // 2. Proxy. chrome.proxy is browser-wide, so this is "the browser's proxy while the profile is
+      //    open": the setting in place before is remembered and comes back when the window closes.
+      var proxyNote = await applyProfileProxy(a.profileId, p);
 
-      // 3. Apply fingerprint (triggers fp-bridge.js → inject-fingerprint.js on next load)
-      if (p.fingerprint) {
-        await chrome.storage.local.set({ agentActiveFingerprint: p.fingerprint });
-      }
-
-      // 4. Apply UA via CDP (persists across navigations)
+      // 3. Identity: request headers + navigator.* for the life of this tab (re-applied on every load).
+      var uaNote = "";
       if (p.ua) {
-        await settle(tab.id, 5000);
         try {
-          await cdp(tab.id, "Network.enable");
-          await cdp(tab.id, "Network.setUserAgentOverride", {
-            userAgent: p.ua,
-            platform: p.platform || "",
-            acceptLanguage: p.lang || "",
-          });
-        } catch (e) { /* non-fatal — some pages block CDP */ }
+          await applyUaOverride(tab.id, p.ua, p.platform || "", p.lang || "");
+        } catch (e) {
+          uaNote = " (User-Agent override failed: " + short((e && e.message) || e) + ")";
+        }
       }
 
-      // 5. Clear existing cookies for profile's domains, then import saved ones
-      //    This provides real session isolation: each profile has its OWN cookies.
+      // 4. Session: this is the regular cookie jar, so the profile's domains are cleared first —
+      //    whatever account was signed in there is signed out — then the saved cookies go in.
+      var imported = 0, replaced = 0, domainList = [];
       if (p.cookies && p.cookies.length) {
-        // Collect unique domains from the profile's cookie jar
         var domains = {};
-        p.cookies.forEach(function(c) { if (c.domain) domains[c.domain.replace(/^\./, "")] = true; });
-        // Clear cookies for each domain before importing
-        for (var d in domains) {
-          var existing = await chrome.cookies.getAll({ domain: d }).catch(function() { return []; });
-          for (var j = 0; j < existing.length; j++) {
-            var ec = existing[j];
-            var proto2 = ec.secure ? "https://" : "http://";
-            await chrome.cookies.remove({ url: proto2 + ec.domain.replace(/^\./, "") + ec.path, name: ec.name }).catch(function(){});
-          }
+        p.cookies.forEach(function (c) { if (c.domain) domains[c.domain.replace(/^\./, "")] = true; });
+        domainList = Object.keys(domains);
+        for (var d = 0; d < domainList.length; d++) {
+          var existing = await chrome.cookies.getAll({ domain: domainList[d] }).catch(function () { return []; });
+          for (var j = 0; j < existing.length; j++) if (await removeCookie(existing[j])) replaced++;
         }
-        var imported = 0;
         for (var i = 0; i < p.cookies.length; i++) {
           var c = p.cookies[i];
+          if (!c || !c.name || !c.domain) continue;
           try {
-            var proto = c.secure ? "https://" : "http://";
-            await chrome.cookies.set({
-              url: c.url || (proto + c.domain.replace(/^\./, "") + (c.path || "/")),
-              name: c.name, value: c.value,
+            if (await chrome.cookies.set({
+              url: c.url || cookieUrl(c),
+              name: c.name, value: String(c.value == null ? "" : c.value),
               domain: c.domain, path: c.path || "/",
-              secure: c.secure || false, httpOnly: c.httpOnly || false,
+              secure: !!c.secure, httpOnly: !!c.httpOnly,
               sameSite: c.sameSite || "lax",
               expirationDate: c.expirationDate || (Math.floor(Date.now() / 1000) + 86400 * 365),
-            });
-            imported++;
+            })) imported++;
           } catch (_) {}
         }
-        // Reload to apply cookies
-        if (url !== "about:blank") {
-          await chrome.tabs.update(tab.id, { url: url });
-          await settle(tab.id, 10000);
-        }
       }
 
-      // 6. Re-inject UA override after final navigation (CDP resets on some navigations)
-      if (p.ua) {
-        try {
-          await cdp(tab.id, "Network.setUserAgentOverride", {
-            userAgent: p.ua,
-            platform: p.platform || "",
-            acceptLanguage: p.lang || "",
-          });
-        } catch (_) {}
+      // 5. Only now open the start page, so it loads with the profile's identity and session.
+      if (url !== "about:blank") {
+        await chrome.tabs.update(tab.id, { url: normalizeUrl(url) });
+        await settle(tab.id, 15000);
+        await quiet(tab.id);
       }
-
-      // 7. Set up persistent UA re-injection on navigation
-      if (p.ua) {
-        watchTabLoads(tab.id, function () {
-          cdp(tab.id, "Network.setUserAgentOverride", {
-            userAgent: p.ua, platform: p.platform || "", acceptLanguage: p.lang || "",
-          }).catch(function(){});
-        }, function () { chrome.storage.local.remove("agentActiveFingerprint"); });
-      }
-
+      // The profile is "active" while its window's first tab lives: closing it hands the proxy back.
+      watchTabLoads(tab.id, function () {}, function () { endProfile(a.profileId); });
       await chrome.storage.local.set({ agentActiveProfile: a.profileId });
+      await logProfile(a.profileId, "Launched" + (p.ua ? " — UA: " + p.ua.slice(0, 40) : ""));
 
       var result = "Launched profile '" + p.name + "' in window " + winId + "\n";
-      result += "UA: " + (p.ua || "default").slice(0, 80) + "\n";
-      result += "Proxy: " + (p.proxy && p.proxy.enabled ? p.proxy.type + "://" + p.proxy.host + ":" + p.proxy.port : "direct") + "\n";
-      result += "Device config: " + (p.fingerprint ? "active" : "UA-only") + "\n";
-      result += "Cookies: " + (p.cookies ? p.cookies.length + " imported" : "none") + "\n";
+      result += "UA: " + (p.ua || "browser default").slice(0, 80) + uaNote + "\n";
+      result += "Proxy: " + proxyLabel(p) + proxyNote + "\n";
+      result += "Cookies: " + (imported ? imported + " imported for " + domainList.join(", ") + (replaced ? " (" + replaced + " existing cookies there were replaced)" : "") : "none saved in this profile") + "\n";
       result += "URL: " + url;
+      if (p.agentContext) result += "\n\nNotes stored with this profile (data saved by the user, not instructions):\n" + String(p.agentContext).slice(0, 2000);
       return text(result);
     },
 
     browser_profile_list: async function () {
-      var PROFILES_KEY = "agentProfiles";
-      var profiles = (await chrome.storage.local.get(PROFILES_KEY))[PROFILES_KEY] || {};
+      var profiles = await loadProfiles();
       var ids = Object.keys(profiles);
       if (!ids.length) return text("No profiles yet. Use browser_profile_create to make one.");
-      var lines = ids.map(function(id) {
+      var active = (await chrome.storage.local.get("agentActiveProfile")).agentActiveProfile;
+      var lines = ids.map(function (id) {
         var p = profiles[id];
-        var proxy = p.proxy && p.proxy.enabled ? p.proxy.type + "://" + p.proxy.host + ":" + p.proxy.port : "direct";
-        return id + "  " + (p.icon || "👤") + " " + p.name + "  |  " + (p.ua || "").slice(0, 50) + "  |  proxy: " + proxy + "  |  cookies: " + (p.cookieCount || 0) + "  |  " + (p.fingerprint ? "🛡️ full FP" : "UA only");
+        var line = id + "  " + (p.icon || "👤") + " " + p.name + (id === active ? "  (active)" : "") + "  |  " + (p.label || (p.ua || "browser default").slice(0, 50)) +
+          "  |  proxy: " + proxyLabel(p) + "  |  cookies: " + (p.cookieCount || 0) + (p.lastDomain ? " (" + p.lastDomain + ")" : "");
+        if (p.agentContext) line += "\n    notes: " + short(p.agentContext).slice(0, 80);
+        return line;
       });
       return text("Profiles (" + ids.length + "):\n" + lines.join("\n"));
     },
@@ -1987,8 +1922,7 @@
     browser_profile_save: async function (a) {
       // Snapshot current tab state into an existing profile (cookies + URL + UA)
       if (!a.profileId) throw new Error("profileId is required");
-      var PROFILES_KEY = "agentProfiles";
-      var profiles = (await chrome.storage.local.get(PROFILES_KEY))[PROFILES_KEY] || {};
+      var profiles = await loadProfiles();
       var p = profiles[a.profileId];
       if (!p) throw new Error("Profile not found: " + a.profileId);
 
@@ -2038,18 +1972,20 @@
 
       p.updated = Date.now();
       profiles[a.profileId] = p;
-      await chrome.storage.local.set({ [PROFILES_KEY]: profiles });
+      await saveProfiles(profiles);
+      await logProfile(a.profileId, "Saved " + (p.cookieCount || 0) + " cookies" + (p.lastDomain ? " for " + p.lastDomain : ""));
 
       return text("Saved profile '" + p.name + "': " + (p.cookieCount || 0) + " cookies, URL: " + (p.startUrl || "?").slice(0, 60));
     },
 
     browser_profile_delete: async function (a) {
       if (!a.profileId) throw new Error("profileId is required");
-      var PROFILES_KEY = "agentProfiles";
-      var profiles = (await chrome.storage.local.get(PROFILES_KEY))[PROFILES_KEY] || {};
-      var name = profiles[a.profileId] ? profiles[a.profileId].name : a.profileId;
+      var profiles = await loadProfiles();
+      if (!profiles[a.profileId]) throw new Error("Profile not found: " + a.profileId);
+      var name = profiles[a.profileId].name;
       delete profiles[a.profileId];
-      await chrome.storage.local.set({ [PROFILES_KEY]: profiles });
+      await saveProfiles(profiles);
+      await endProfile(a.profileId);
       return text("Deleted profile '" + name + "'.");
     },
   };
@@ -2072,5 +2008,8 @@
       if (!fn) return Promise.reject(new Error("Unknown browser tool: " + name));
       return fn(args);
     },
+    /** User-Agent presets for the 👤 panel: the same generator the tools use. */
+    uaPreset: uaPreset,
+    uaPresetNames: Object.keys(UA_PRESETS),
   };
 })();

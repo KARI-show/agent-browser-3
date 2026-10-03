@@ -424,12 +424,21 @@ test("browser_fill_form: array and object forms; unknown refs reported", { skip 
   const s = await read();
   const q = refOf(s, /"Search query"/);
   const email = refOf(s, /input:email/);
-  const out = await ok("browser_fill_form", { fields: [{ ref: q, value: "alpha" }, { ref: email, value: "a@b.co" }, { ref: 999, value: "x" }] });
-  assert.equal(out, `Form fill results:\n[${q}]: ok\n[${email}]: ok\n[999]: not found`);
+  const color = refOf(s, /select "color"/);
+  const agree = refOf(s, /input:checkbox "Agree"/);
+  const out = await ok("browser_fill_form", {
+    fields: [{ ref: q, value: "alpha" }, { ref: email, value: "a@b.co" }, { ref: color, value: "Green" }, { ref: agree, value: true }, { ref: 999, value: "x" }],
+  });
+  assert.equal(
+    out,
+    `Form fill results:\n[${q}]: ok\n[${email}]: ok\n[${color}]: selected "Green"\n[${agree}]: checked\n[999]: no such ref — call browser_read_page first`
+  );
   assert.equal(await inMain("q.value"), "alpha");
   assert.equal(await inMain("email.value"), "a@b.co");
-  await ok("browser_fill_form", { fields: { [q]: "beta", [email]: "c@d.co" } });
-  assert.equal(await inMain("q.value + '|' + email.value"), "beta|c@d.co");
+  assert.equal(await inMain("color.value + '|' + agree.checked"), "g|true");
+  await ok("browser_fill_form", { fields: { [q]: "beta", [email]: "c@d.co", [color]: "b", [agree]: "no" } });
+  assert.equal(await inMain("q.value + '|' + email.value + '|' + color.value + '|' + agree.checked"), "beta|c@d.co|b|false");
+  assert.match(await ok("browser_fill_form", { fields: { [color]: "Purple" } }), /FAIL No option matching "Purple"/);
   assert.match(await fails("browser_fill_form", {}), /fields is required/);
 });
 
@@ -613,7 +622,7 @@ test("browser_cookies_export / import round-trip", { skip }, async () => {
   // The TESTING.md example: a cookie for another site entirely.
   assert.equal(
     await ok("browser_cookies_import", { cookies: [{ name: "imported", value: "yes", domain: ".example.com", path: "/" }] }),
-    "Imported 1 cookies."
+    "Imported 1 of 1 cookies."
   );
   assert.match(await ok("browser_cookies_get", { url: "http://example.com/" }), /imported=yes \| domain=\.example\.com/);
   // String form is accepted too.
@@ -655,9 +664,9 @@ test("browser_get_useragent / browser_set_useragent: page and request headers", 
   assert.match(uaLog.find((e) => e.path === "/main.html").ua, /AgentE2E/);
 });
 
-// cdp() detaches the debugger after 8 s idle, and Network.setUserAgentOverride
-// dies with the session — the header and navigator.userAgent silently revert.
-test("browser_set_useragent: override survives a reload 10 s later", { skip, todo: "known: UA override is dropped when the debugger auto-detaches after 8 s (not fixed — persistent UA override is out of scope)" }, async () => {
+// cdp() detaches the debugger after 8 s idle and Network.setUserAgentOverride
+// dies with the session — so a tab with an override keeps its session pinned.
+test("browser_set_useragent: override survives a reload 10 s later", { skip }, async () => {
   await resetMain();
   await ok("browser_set_useragent", { userAgent: FAKE_UA });
   await sleep(10000); // the agent keeps working; the DevTools session idles out after 8 s
@@ -667,7 +676,7 @@ test("browser_set_useragent: override survives a reload 10 s later", { skip, tod
   assert.match(await ok("browser_get_useragent", {}), /AgentE2E/, "navigator.userAgent after reload");
 });
 
-// ── Private windows & profiles ─────────────────────────────────────────────
+// ── Private windows ────────────────────────────────────────────────────────
 
 test("browser_open_private_window: incognito window becomes the current tab", { skip }, async () => {
   await resetMain();
@@ -676,57 +685,101 @@ test("browser_open_private_window: incognito window becomes the current tab", { 
   const incognito = await inPanel(`chrome.windows.getAll({ populate: true }).then((ws) => ws.filter((w) => w.incognito).map((w) => w.id))`);
   assert.equal(incognito.length, 1);
   assert.match(await read(), /Title: Page Two/, "tools work inside the private window");
-  await ok("browser_close_profile", { windowId: incognito[0] });
+  await ok("browser_close_window", { windowId: incognito[0] });
 });
 
-test("browser_new_profile / list / switch / close", { skip }, async () => {
-  await resetMain();
-  const out = await ok("browser_new_profile", { url: `${BASE}/page2.html` });
-  const winId = Number(/window (\d+)\) opened/.exec(out)[1]);
-  assert.match(out, /Now at: Page Two/);
+async function openPrivate(url) {
+  await ok("browser_open_private_window", { url });
+  const ids = await inPanel(`chrome.windows.getAll().then((ws) => ws.filter((w) => w.incognito).map((w) => w.id))`);
+  return ids[ids.length - 1];
+}
 
-  const list = await ok("browser_list_profiles", {});
-  assert.match(list, new RegExp(`^\\[ISOLATED\\] Window ${winId} \\(1 tabs\\)`, "m"));
-  assert.match(list, /^\[MAIN\] Window \d+ \(\d+ tabs\)/m);
+test("browser_list_windows / switch / close", { skip }, async () => {
+  await resetMain();
+  const winId = await openPrivate(`${BASE}/page2.html`);
+
+  const list = await ok("browser_list_windows", {});
+  assert.match(list, new RegExp(`^\\[PRIVATE\\] Window ${winId} \\(1 tabs\\).* — you work here$`, "m"));
+  assert.match(list, /^\[NORMAL\] Window \d+ \(\d+ tabs\)/m);
+  assert.match(list, /^  \* \d+  Page Two — /m, "the current tab is starred");
   assert.doesNotMatch(list, /chrome-extension:/, "the panel itself is not listed");
 
   await ok("browser_switch_tab", { tabId: mainTabId });
-  assert.match(await ok("browser_switch_profile", { windowId: winId }), new RegExp(`^Switched to window ${winId} \\(isolated\\)\\. Now at: Page Two`));
-  assert.match(await fails("browser_switch_profile", {}), /windowId is required/);
+  assert.match(await ok("browser_switch_window", { windowId: winId }), new RegExp(`^Switched to window ${winId} \\(private\\)\\. Now at: Page Two`));
+  assert.match(await fails("browser_switch_window", {}), /windowId is required/);
 
-  assert.equal(await ok("browser_close_profile", { windowId: winId }), `Closed window ${winId} and all its tabs/sessions.`);
-  assert.doesNotMatch(await ok("browser_list_profiles", {}), /\[ISOLATED\]/);
-  assert.match(await fails("browser_close_profile", {}), /windowId is required/);
+  const mainWin = await inPanel(`chrome.tabs.get(${mainTabId}).then((t) => t.windowId)`);
+  assert.match(await fails("browser_close_window", { windowId: mainWin }), /agent's own panel/, "never closes the window the panel lives in");
+  assert.equal(await ok("browser_close_window", { windowId: winId }), `Closed window ${winId} (private — its session is gone) with 1 tab.`);
+  assert.doesNotMatch(await ok("browser_list_windows", {}), /\[PRIVATE\]/);
+  assert.match(await fails("browser_close_window", {}), /windowId is required/);
 });
 
-// Every Incognito window of a Chrome profile shares ONE off-the-record
-// session, so "5 accounts in 5 profiles" (tool description, system prompt)
-// can't work: account B inherits account A's cookies.
-test("browser_new_profile: two profiles don't share cookies (multi-account claim)", { skip, todo: "known: all incognito windows share one cookie jar — real per-account isolation is out of scope" }, async () => {
+// chrome.cookies.* without storeId would use the panel's (regular) cookie store;
+// the tools must act on the jar of the tab the agent works in.
+test("cookie tools act on the private window's own cookie store", { skip }, async () => {
   await resetMain();
-  const a = Number(/window (\d+)\)/.exec(await ok("browser_new_profile", { url: `${BASE}/page2.html` }))[1]);
-  await ok("browser_run_js", { code: `document.cookie = "account=A; path=/"` });
-  const b = Number(/window (\d+)\)/.exec(await ok("browser_new_profile", { url: `${BASE}/page2.html` }))[1]);
-  const seenInB = await ok("browser_run_js", { code: "document.cookie" });
-  await ok("browser_close_profile", { windowId: a });
-  await ok("browser_close_profile", { windowId: b });
-  assert.doesNotMatch(seenInB, /account=A/, "profile B sees profile A's login cookie");
-});
-
-// chrome.cookies.* without storeId uses the panel's (regular) cookie store,
-// so while the agent works in a private window the cookie tools hit the MAIN
-// profile — the opposite of what the isolation tools promise.
-test("cookie tools act on the private window's own cookie store", { skip, todo: "known: cookie tools use the main store, not the private window's (tied to the isolation feature, out of scope)" }, async () => {
-  await resetMain();
-  const win = Number(/window (\d+)\)/.exec(await ok("browser_new_profile", { url: `${BASE}/page2.html` }))[1]);
+  await inMain(`document.cookie = "shared=main; path=/"`);
+  const win = await openPrivate(`${BASE}/page2.html`);
   await ok("browser_cookies_set", { name: "incog", value: "1" });
   const pageSees = await ok("browser_run_js", { code: "document.cookie" });
-  await ok("browser_close_profile", { windowId: win });
+  const listed = await ok("browser_cookies_get", {});
+  assert.match(listed, /^incog=1 /m);
+  assert.doesNotMatch(listed, /shared=main/, "the main profile's cookies are not listed inside the private window");
+  assert.match(await ok("browser_cookies_clear", {}), /^Cleared 1 cookies\.$/);
+  await ok("browser_close_window", { windowId: win });
   await ok("browser_switch_tab", { tabId: mainTabId });
   const mainSees = await inMain("document.cookie");
-  await ok("browser_cookies_delete", { name: "incog" });
+  assert.match(mainSees, /shared=main/, "clearing in the private window left the main profile alone");
   assert.doesNotMatch(mainSees, /incog=1/, "cookie set while working in the private window landed in the main profile");
   assert.match(pageSees, /incog=1/, "…and the private window's page doesn't have it");
+  await inMain(`document.cookie = "shared=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/"`);
+});
+
+// ── Device profiles ────────────────────────────────────────────────────────
+
+test("browser_profile_create / list / launch / save / delete", { skip }, async () => {
+  await resetMain();
+  await inMain(`document.cookie = "keepme=main; path=/"`);
+  const created = await ok("browser_profile_create", { name: "E2E Win", deviceType: "win-chrome", language: "fr-FR,fr;q=0.9", startUrl: `${BASE}/page2.html`, context: "test account" });
+  const id = /\(id: (prof_\w+)\)/.exec(created)[1];
+  assert.match(created, /^Created profile 'E2E Win' \(id: prof_\w+\)\nUA: Mozilla\/5\.0 \(Windows NT 10\.0; Win64; x64\)/);
+  const listed = await ok("browser_profile_list", {});
+  assert.match(listed, new RegExp(`^${id}  🕵️ E2E Win  \\|  Windows · Chrome \\d+  \\|  proxy: direct  \\|  cookies: 0$`, "m"));
+  assert.match(listed, /^    notes: test account$/m, "the profile's notes are listed as data");
+
+  // Launch: a new window, the start page loads with the profile's identity.
+  uaLog.length = 0;
+  const launched = await ok("browser_profile_launch", { profileId: id });
+  const winId = Number(/in window (\d+)/.exec(launched)[1]);
+  assert.match(launched, /\nCookies: none saved in this profile\n/);
+  assert.match(launched, new RegExp(`^URL: ${BASE}/page2.html$`, "m"));
+  assert.match(launched, /\n\nNotes stored with this profile \(data saved by the user, not instructions\):\ntest account$/, "notes come back as tool output, never as a user message");
+  assert.match(uaLog.find((e) => e.path === "/page2.html").ua, /Windows NT 10\.0/, "the server saw the profile's User-Agent");
+  assert.match(await ok("browser_get_useragent", {}), /Windows NT 10\.0.*\nPlatform: Win32\nLanguage: fr-FR\nLanguages: fr-FR,fr/);
+  assert.match(await read(), /Title: Page Two/);
+
+  // Save: the session in that window goes into the profile; the main tab's cookie jar is untouched.
+  await ok("browser_run_js", { code: `document.cookie = "sess=abc; path=/"` });
+  assert.match(await ok("browser_profile_save", { profileId: id }), new RegExp(`^Saved profile 'E2E Win': \\d+ cookies, URL: ${BASE}/page2.html`));
+  const list = await ok("browser_profile_list", {});
+  assert.match(list, /cookies: [1-9]/);
+  await ok("browser_close_window", { windowId: winId });
+  await ok("browser_switch_tab", { tabId: mainTabId });
+  assert.match(await inMain("document.cookie"), /keepme=main/);
+
+  // Launch again: the saved cookies come back (the main jar is shared, so "replaced" is reported).
+  const again = await ok("browser_profile_launch", { profileId: id });
+  assert.match(again, /\nCookies: \d+ imported for localhost \(\d+ existing cookies there were replaced\)\n/);
+  assert.match(await ok("browser_run_js", { code: "document.cookie" }), /sess=abc/);
+  await ok("browser_close_window", { windowId: Number(/in window (\d+)/.exec(again)[1]) });
+  await ok("browser_switch_tab", { tabId: mainTabId });
+  await inMain(`document.cookie = "sess=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/"; document.cookie = "keepme=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/"`);
+
+  assert.equal(await ok("browser_profile_delete", { profileId: id }), "Deleted profile 'E2E Win'.");
+  assert.match(await ok("browser_profile_list", {}), /^No profiles yet/);
+  assert.match(await fails("browser_profile_launch", { profileId: id }), /Profile not found/);
+  assert.match(await fails("browser_profile_create", {}), /name is required/);
 });
 
 // ── Files: converter, save, screenshot ─────────────────────────────────────
@@ -734,7 +787,7 @@ test("cookie tools act on the private window's own cookie store", { skip, todo: 
 test("browser_convert: csv→json, json→csv, md→html, table→csv, text→file, image→jpg", { skip }, async () => {
   await resetMain();
   const csvOut = await ok("browser_convert", { from: "csv", to: "json", data: "name,age\nJohn,30\nJane,25", filename: "people.json" });
-  assert.match(csvOut, /^Converted and (opened|saved): .*people\.json \(\d+ bytes\) — 2 rows$/);
+  assert.match(csvOut, /^Converted and saved: .*people\.json \(\d+ bytes\) — 2 rows$/);
   assert.deepEqual(JSON.parse(readFileSync(await downloaded("people.json"), "utf8")), [
     { name: "John", age: "30" },
     { name: "Jane", age: "25" },
@@ -761,23 +814,29 @@ test("browser_convert: csv→json, json→csv, md→html, table→csv, text→fi
   assert.match(await fails("browser_convert", { from: "docx", to: "odt", data: "x" }), /Unknown conversion: docx → odt/);
 });
 
-test("browser_convert: md→pdf opens a print view of the markdown", { skip }, async () => {
-  await inPanel(`(() => {
-    window.__printed = [];
-    window.__realOpen = window.open;
-    window.open = () => {
-      const doc = { html: "", write(s) { this.html += s; }, close() {} };
-      return { document: doc, print() { window.__printed.push(doc.html); }, close() {} };
-    };
-    return true;
-  })()`);
-  try {
-    await ok("browser_convert", { from: "md", to: "pdf", data: "# Printable" });
-    const printed = await waitUntil(() => inPanel("window.__printed[0]"), 5000, "print");
-    assert.match(printed, /<h1>Printable<\/h1>/);
-  } finally {
-    await inPanel("window.open = window.__realOpen, true");
-  }
+// md→pdf / html→pdf render the document in a background tab through the DevTools
+// protocol — a real PDF file, no print dialog — and the tab is closed again.
+test("browser_convert: md→pdf and html→pdf save real PDF files", { skip }, async () => {
+  await resetMain();
+  const tabsBefore = await inPanel("chrome.tabs.query({}).then((t) => t.length)");
+  const out = await ok("browser_convert", { from: "md", to: "pdf", data: "# Printable\n\nSome **bold** text.", filename: "printable.pdf" });
+  assert.match(out, /^Converted and saved: .*printable\.pdf \(\d+ bytes\)$/);
+  const pdf = readFileSync(await downloaded("printable.pdf"));
+  assert.equal(pdf.subarray(0, 5).toString("latin1"), "%PDF-", "a real PDF file");
+  assert.ok(pdf.length > 1000, "not an empty PDF");
+
+  await ok("browser_convert", { from: "html", to: "pdf", data: "<p>Fragment</p>", filename: "fragment.pdf" });
+  assert.equal(readFileSync(await downloaded("fragment.pdf")).subarray(0, 5).toString("latin1"), "%PDF-");
+  await waitUntil(async () => (await inPanel("chrome.tabs.query({}).then((t) => t.length)")) === tabsBefore, 5000, "render tabs closed");
+  assert.match(await read(), /Title: Fixture Main/, "the agent's tab is untouched");
+});
+
+test("browser_convert: code blocks survive markdown→html untouched", { skip }, async () => {
+  await ok("browser_convert", { from: "md", to: "html", data: "# T\n\n```js\nconst a = *b* # not a heading\n```\n\ntext", filename: "code.html" });
+  const html = readFileSync(await downloaded("code.html"), "utf8");
+  assert.match(html, /<pre><code>const a = \*b\* # not a heading<\/code><\/pre>/);
+  assert.match(html, /<p>text<\/p>/);
+  assert.doesNotMatch(html, /<p><pre>|<em>b<\/em>/);
 });
 
 // Regression: page_to_pdf renders the current tab (not the side panel) to a
@@ -791,16 +850,14 @@ test("browser_page_to_pdf: saves the current page as a real PDF", { skip }, asyn
   assert.ok(pdf.length > 1000, "not an empty PDF");
 });
 
-// Regression: chrome.downloads.open needs a user gesture; a tool call never has
-// one, so it rejects. The download helper must await that and report "saved"
-// (not "opened") instead of leaking an unhandled rejection.
-test("browser_convert: reports 'saved' when it can't open without a user gesture", { skip }, async () => {
+// Files are saved, never opened (chrome.downloads.open needs a user gesture a tool call lacks).
+test("browser_convert: text→file is saved and reported as saved", { skip }, async () => {
   const seen = panelErrors.length;
   const out = await ok("browser_convert", { from: "text", to: "txt", data: "open me", filename: "open-me.txt" });
-  assert.match(out, /^Converted and saved: /, "no false 'opened' without a gesture");
+  assert.match(out, /^Converted and saved: /);
   assert.equal(readFileSync(await downloaded("open-me.txt"), "utf8"), "open me");
   await sleep(300); // let any stray rejection surface
-  assert.deepEqual(panelErrors.slice(seen), [], "downloads.open must not leak a rejection");
+  assert.deepEqual(panelErrors.slice(seen), [], "saving must not leak a rejection");
 });
 
 test("browser_save_page: html / txt / md", { skip }, async () => {
@@ -821,25 +878,11 @@ test("browser_screenshot_save: png and jpg files", { skip }, async () => {
   assert.equal(readFileSync(await downloaded("shot.jpg")).readUInt16BE(0), 0xffd8);
 });
 
-// ── Implemented in the panel but not declared to the model ─────────────────
-
-test("undeclared: browser_download_open / browser_cache_extract / browser_network_log", { skip }, async () => {
-  await resetMain();
-  // "opened" only when downloads.open actually succeeds (no user gesture here).
-  assert.match(await ok("browser_download_open", { url: `${BASE}/file.txt` }), /^Downloaded(?: and opened)?: file\.txt \(\d+ bytes\)/);
-  assert.equal(readFileSync(await downloaded("file.txt"), "utf8"), "downloaded file body");
-
-  assert.match(await ok("browser_cache_extract", { selector: "#blob", filename: "blob.bin", open: false }), /^Saved: blob\.bin/);
-  assert.equal(readFileSync(await downloaded("blob.bin"), "utf8"), SAMPLE_TEXT);
-
-  assert.match(await ok("browser_network_log", { seconds: 1 }), /Use browser_run_js with performance\.getEntriesByType/);
-});
-
 // ── Coverage ───────────────────────────────────────────────────────────────
 
 test("every tool declared in browser/host/tools.ts was exercised", { skip }, () => {
   const declared = [...readFileSync(join(root, "browser", "host", "tools.ts"), "utf8").matchAll(/name: "(browser_\w+)"/g)].map((m) => m[1]);
-  assert.equal(declared.length, 43);
+  assert.equal(declared.length, 42);
   assert.deepEqual(declared.filter((n) => !exercised.has(n)), []);
 });
 
