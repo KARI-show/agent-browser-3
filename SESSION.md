@@ -180,3 +180,61 @@ theme variables instead of hard-coded dark colours; editing keeps cookies/lastDo
 8. src/tunnel.ts downloads cloudflared unpinned/unverified; relay token has no rotation and rides in
    URLs/clipboard/Telegram.
 9. Options page validation duplicated with background.js; `options.css` no-op rule.
+
+## Superpowers pass (2026-10-04, branch claude/cool-cerf-76p498)
+Goal: turn the browser extension into a tool people keep using (and pay for): zero-token repeats,
+work while the user is away, data from the page's own API, memory per site. Store-ready.
+Baseline: `npm run check` 121/121.
+
+### Design
+- **Recipes** (`browser/extension/automation.js`, shared by the panel and the service worker):
+  every `AgentBrowserTools.run()` call is traced; ref-based actions carry a durable *locator*
+  captured at snapshot time (stable id, data-testid, kind + accessible name, name/placeholder, href, frame).
+  A recipe = recorded steps with locators; replay re-reads the page and scores the fresh elements
+  against the stored locator (no model, no tokens). Typed values can become `{{params}}`; password
+  fields are never stored (become `{{password}}`). A failed step hands the rest to the agent ("heal").
+  Tools: browser_recipe_save/run/list/delete. UI: 🧩 panel → Recipes, "Save as recipe" strip after a run.
+- **Watchers**: background.js imports converter/browserTools/automation; `chrome.alarms` runs a
+  watcher in a background tab: extract (page text / CSS selector / table / recipe outputs), hash, diff,
+  notify (chrome.notifications + Telegram sendMessage with the bot from `agentRemote`), event feed.
+  Tools: browser_watch_create/list/delete (+ run now). UI: 🧩 panel → Watchers.
+- **Network tap**: browser_network_capture start/stop/read via CDP Network.* on the agent's tab
+  (JSON/XHR/fetch bodies, ring buffer). Gated like cookies.
+- **Site memory**: browser_memory_save/list/delete, `agentSiteMemory` per host; browser_read_page
+  appends the host's notes (data, not instructions).
+- browserTools.js is runnable in the service worker (globalThis, no window.*), so watchers work with
+  the panel closed.
+
+### State
+Done in this pass (all on claude/cool-cerf-76p498):
+- browser/extension/browserTools.js: every `run()` call traced (name, stored-safe args, element locator captured at
+  snapshot time, outcome, url); `AgentBrowserTools.{trace,clearTrace,onStep,setTurn,refs,setCurrentTab,run(…,replay)}`;
+  runs in the service worker too (globalThis, no window.*; profile_launch creates the window itself there);
+  `browser_read_page` appends the site's memory block; `browser_network_capture` (CDP Network.*, ring buffer, lazy bodies).
+- browser/extension/automation.js (new, shared): locator scoring (id 100 · data-testid 90 · exact text 50 · name 40 ·
+  href 45 · placeholder 30 · kind 15 · frame mismatch −25; min 45; ties → same ordinal), buildRecipe (drops observe
+  tools + failed steps, start URL from the first navigation, {{params}}, passwords → {{password}} secret param),
+  runRecipe (fresh snapshot per locator step, one retry after 1.5 s, outputs of extraction steps collected, honest
+  failure report with the unrun steps), watchers (alarms, background tab in the focused normal window or a minimized
+  own window, text/selector/table/recipe extraction, FNV hash, set diff, notifications + Telegram sendMessage,
+  event feed ≤100, 3 errors in a row reported once), site memory (host → parent domain → `*`, 20 notes/host).
+- browser/extension/automations.js (new): 🧩 panel — Recipes (save dialog with parameter candidates, editor, run
+  with progress, "Fix with the agent", "Discuss in chat"), Watchers (editor, check now, pause, feed, "Explain"),
+  Memory; "Save as recipe" strip after a run; unseen-changes dot; turn tagging of the trace (convId/turn).
+- background.js importScripts converter/browserTools/automation; onAlarm → runWatcherById; runWatcher message;
+  notification click opens the page; syncAlarms on install/startup. converter.js: data: URL fallback (no
+  createObjectURL in a worker), globalThis export. manifest: alarms + notifications, downloads.open dropped
+  (unused since the product pass; an unused permission is a store-review flag), v0.2.0.
+- browser/host/tools.ts: 11 new tools (53 total) + system prompt sections. commands.js: 3 new quick commands.
+- cli-proxy/queue-manager: disallowedTools as the first-class SDK option (extraArgs worked by Array#toString luck).
+- Tests: tests/automation.test.mjs (10, vm + fakes, incl. the worker pipeline), e2e: network tap, recipes (replay on
+  a page with shifted refs, honest failure, re-record), the 🧩 panel, watchers through the real service worker, memory.
+- Removed: fingerprint.js / fp-bridge.js / inject-fingerprint.js (restored by 695c5e0 but loaded by nothing).
+
+### Open
+- Recipes replay in the panel's tab; a recipe that opens new tabs mid-way follows them (browser_click does) but a
+  `browser_switch_tab` step is dropped (ids are not stable) — such flows need re-recording as one tab.
+- Watcher notifications in headless Chromium are a no-op; verified by hand only on a desktop.
+- No "summarize the change with the model" in the worker (would need the engine there); the panel's 💬 Explain does it.
+- Store listing itself (screenshots, privacy policy text, the key/ID) is the owner's; the manifest and permissions
+  are ready: every permission is used (alarms/notifications by watchers).

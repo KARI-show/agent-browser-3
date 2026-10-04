@@ -46,6 +46,12 @@ side panel (extension)                         native host (Node)
 - **Tools** — declared in `host/tools.ts` as an in-process MCP server; each call
   is sent to the panel, which runs it on the current tab with
   `chrome.scripting` / `chrome.tabs` (`extension/browserTools.js`).
+- **Automation** — `extension/automation.js`: recipes (the traced tool calls with a
+  durable locator per element, replayed without the model), watchers (checked on
+  `chrome.alarms` by the service worker with the panel closed; changes go to a
+  notification and Telegram) and site memory (notes `browser_read_page` shows on
+  that site). `extension/automations.js` is the 🧩 panel over them. The tool
+  runtime has no DOM dependency, so `background.js` imports it for the watchers.
 
 The agent gets **no shell and no file access** (built-in tools are limited to
 WebSearch/WebFetch/TodoWrite/AskUserQuestion, and Read only for attached files),

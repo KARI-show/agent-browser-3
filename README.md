@@ -1,13 +1,13 @@
 # Agent IDE
 
-> **Claude-powered AI agent** that lives in your editor and your browser — reads pages, clicks, types, manages cookies, switches accounts, converts documents, and automates workflows. Runs on your Claude subscription (no API key needed).
+> **Claude-powered AI agent** that lives in your editor and your browser — reads pages, clicks, types, manages cookies, switches accounts, converts documents, and automates workflows. Does a task once with the model, then **replays it as a recipe for free**, **watches pages for changes** while you're away, reads a site's **own API** instead of scraping, and **remembers each site**. Runs on your Claude subscription (no API key needed).
 
 Two runtimes, one codebase:
 
 | Runtime | Where | What it does |
 |---------|-------|-------------|
 | **VS Code / Cursor extension** | Editor side panel | Full coding agent — reads, edits, runs commands against your workspace. Parallel chats, live diffs, checkpoints, remote control from phone & Telegram. |
-| **Chrome / Edge extension** | Browser side panel | Browser automation agent — operates your real, logged-in browser with 42 tools. Cookie editor, private windows, device profiles, UA override, document converter. |
+| **Chrome / Edge extension** | Browser side panel | Browser automation agent — operates your real, logged-in browser with 53 tools. Recipes (record once, replay without the model), watchers (scheduled change detection → notification / Telegram), network tap, site memory, cookie editor, private windows, device profiles, UA override, document converter. |
 
 ---
 
@@ -53,9 +53,38 @@ Two runtimes, one codebase:
 
 ---
 
-## 🌐 Browser Extension — 42 Tools
+## 🌐 Browser Extension — 53 Tools
 
-The browser extension gives the AI agent full control over your real browser through a side panel. Every tool is declared in [`browser/host/tools.ts`](browser/host/tools.ts) and executed in the extension's side panel page.
+The browser extension gives the AI agent full control over your real browser through a side panel. Every tool is declared in [`browser/host/tools.ts`](browser/host/tools.ts) and executed in the extension's side panel page (and, for watchers, in the service worker — with the panel closed).
+
+### 🧩 Recipes — do it once, replay for free
+
+Every tool call the agent makes is traced, and every element it acts on is remembered by what identifies it — a stable id, `data-testid`, its kind and accessible name, `name`/placeholder, link path, frame — not by a ref number. **Save the chat's actions as a recipe** (the 🧩 panel offers it after a run, or the agent calls `browser_recipe_save` when you ask it to "remember this" / "do this every time") and replay it any time **without the model**: zero tokens, seconds instead of minutes, deterministic. Replay re-reads the page and scores the fresh elements against the stored locator, so it survives re-renders and shifted layouts. Typed values can become `{{parameters}}` asked at run time; **password fields are never stored**. If a step fails (the site changed), the run stops there, says exactly what was not done, and one click hands the rest to the agent — which finishes by hand and re-records the recipe with the fix.
+
+| Tool | Description |
+|------|-------------|
+| `browser_recipe_save` | Save this chat's actions (or only the last turn's) as a recipe: name, description, `params` (values → placeholders), `id` to re-record an existing one. |
+| `browser_recipe_run` | Replay a recipe on the current tab or a new one with `params`; returns the step-by-step result and the outputs of extraction steps. |
+| `browser_recipe_list` | Saved recipes: steps, start page, parameters, last run. |
+| `browser_recipe_delete` | Delete one. |
+
+### 👁 Watchers — know when a page changes
+
+A watcher checks a page **on a schedule in the background** (`chrome.alarms` in the service worker; the panel can be closed): opens it in a background tab, extracts the part that matters — the page text, a **CSS selector**, a **table**, or **a recipe's outputs** — hashes it, and when it differs from the last check, reports the added/removed lines as a **system notification** and a **Telegram message** (the bot from the Remote settings). No model involved, so a watcher costs nothing to run. Price drops, stock, order status, a new message on a portal, a job posting: the 🧩 panel keeps the feed of changes, and "💬 Explain" sends a change to the agent.
+
+| Tool | Description |
+|------|-------------|
+| `browser_watch_create` | Watch `url` every `every` minutes (default 30, minimum 1); `mode` text / selector / table / recipe; `waitFor` text for slow pages. The first check sets the baseline. |
+| `browser_watch_list` | Watchers with schedule, last check, error state and the recent changes. |
+| `browser_watch_delete` | Stop and delete one. |
+
+### 📡 Network tap — the page's own API
+
+Instead of scraping a rendered list, read what the page itself receives: `browser_network_capture` (`start` → trigger the request → `read`) captures the XHR/fetch responses on the tab through the DevTools protocol and returns their JSON — complete, structured, pagination visible. Gated like the cookie tools (response bodies can carry session data).
+
+### 🧠 Site memory — it gets better on the second visit
+
+`browser_memory_save` keeps what the agent (or you, in the 🧩 panel) learnt about a site: where the export button is, how its search behaves, your preferences there. `browser_read_page` shows the site's notes — for the host, its parent domain and global `*` notes — on every later visit, clearly marked as data, not instructions. `browser_memory_list` / `browser_memory_delete` manage them.
 
 ### Core — Navigation & Reading
 
@@ -168,8 +197,8 @@ All conversions run locally — no server calls, no external dependencies.
 - **Windows** — New private window, List windows, Switch, Close, Copy session to a private window
 - **Device profiles** — List, New, Launch, Save session into profile
 - **User-Agent** — Check UA, iPhone/Android/Mac/Windows presets, Custom UA
-- **Automation** — Fill form, Extract table, Extract links, Screenshot all tabs, Monitor changes
-- **Data & Research** — Summarize page, Google search, Compare tabs
+- **Automation** — Fill form, Extract table, Extract links, Screenshot all tabs, Watch this page for changes, Save this chat as a recipe
+- **Data & Research** — Summarize page, Google search, Compare tabs, Read the page's API (network tap)
 - **Convert** — Save as HTML/TXT/PDF, Extract table to CSV, CSV↔JSON, Markdown→HTML
 
 ### 🛰 Relay — Remote Access
@@ -196,7 +225,9 @@ Connect the browser extension to a WebSocket relay hub for remote control via Te
 │  Browser Extension (Chrome/Edge)│
 │  browser/extension/             │
 │  Manifest V3, side panel        │
-│  42 browser_* tools             │
+│  53 browser_* tools             │
+│  Recipes, watchers (service     │
+│  worker + alarms), memory, tap  │
 │  Cookie editor, profiles, UA    │
 │  Converter, commands, relay     │
 ├─────────────────────────────────┤
@@ -220,9 +251,11 @@ media/                        # Webview styles + bundled JS
 browser/
   extension/                  # Browser extension (Manifest V3)
     manifest.json
-    background.js             # Service worker
+    background.js             # Service worker: proxy, window creation, watcher alarms
     sidepanel.html/css        # Side panel UI
-    browserTools.js           # 42 browser tools implementation
+    browserTools.js           # 53 browser tools implementation + the call trace with element locators
+    automation.js             # Recipes, watchers, site memory (shared by the panel and the service worker)
+    automations.js            # 🧩 panel (recipes · watchers · memory) + the "save as recipe" strip
     converter.js              # Document converter engine
     profiles.js               # 👤 device profiles panel (UI over the browser_profile_* tools)
     commands.js               # Quick commands panel
