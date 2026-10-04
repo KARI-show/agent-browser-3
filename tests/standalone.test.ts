@@ -4,7 +4,7 @@ import * as http from "http";
 import * as net from "net";
 import Anthropic from "@anthropic-ai/sdk";
 import { ASK_TOOL, ToolDef, ToolOutput, TurnCallbacks, compactHistory, describeError, effortFor, modelTraits, runTurn, slimForSummary, wellFormed } from "../browser/standalone/engine";
-import { LocalHost, LocalHostDeps, repairHistory, stripThinking } from "../browser/standalone/localHost";
+import { LocalHost, LocalHostDeps, rejectedContent, repairHistory, stripThinking } from "../browser/standalone/localHost";
 import { ConvStore, KV } from "../browser/standalone/store";
 
 // ---- a mock Claude API: scripted streaming responses, requests recorded ------------
@@ -55,18 +55,24 @@ function sse(r: Scripted): string {
   return out;
 }
 
-async function mockApi(script: Scripted[], opts: { models?: string[] } = {}) {
+async function mockApi(script: Scripted[], opts: { models?: string[]; modelsStatus?: number } = {}) {
   const requests: any[] = [];
   const headers: http.IncomingHttpHeaders[] = [];
   const paths: string[] = [];
   const sockets = new Set<net.Socket>();
+  let modelsHits = 0;
   const server = http.createServer((req, res) => {
     let body = "";
     req.on("data", (d) => (body += d));
     req.on("end", () => {
       headers.push(req.headers);
       if (req.method === "GET" && req.url?.startsWith("/v1/models")) {
+        modelsHits++;
         res.setHeader("content-type", "application/json");
+        if (opts.modelsStatus) {
+          res.writeHead(opts.modelsStatus); // a gateway without a Models API
+          return void res.end(JSON.stringify({ type: "error", error: { type: "not_found_error", message: "Not found." } }));
+        }
         return void res.end(JSON.stringify({ data: (opts.models ?? ["claude-opus-5-5"]).map((id) => ({ id, display_name: id === "claude-opus-5-5" ? "Claude Opus 5.5" : id, type: "model", created_at: "2026-01-01T00:00:00Z", max_input_tokens: 1000000, max_tokens: 128000, capabilities: null })), has_more: false, first_id: "x", last_id: "x" }));
       }
       paths.push(req.url ?? "");
@@ -92,6 +98,9 @@ async function mockApi(script: Scripted[], opts: { models?: string[] } = {}) {
     requests,
     headers,
     paths,
+    get modelsHits() {
+      return modelsHits;
+    },
     client: () => new Anthropic({ apiKey: "sk-test", baseURL: `http://127.0.0.1:${port}`, maxRetries: 0 }),
     close: () => {
       for (const s of sockets) s.destroy();
@@ -739,6 +748,14 @@ test("panel protocol: /compact replaces the whole history with a summary and the
     assert.equal(last.length, 3, "summary, acknowledgement, new prompt");
     assert.match(last[0].content, /SUMMARY TEXT/);
     assert.equal(last[2].content[0].text, "continue");
+    // Retry still finds the message behind the bubble after a compaction; going back before it is refused.
+    t.posted.length = 0;
+    void t.h.handle({ type: "regenerate" });
+    await t.waitFor(() => t.types().includes("idle"));
+    assert.equal(api.requests[3].messages.length, 3, "summary, acknowledgement, the same prompt again");
+    await t.h.handle({ type: "rewind", userIndex: 0 });
+    assert.ok(t.posted.some((m) => m.type === "notice" && /compacted/.test(m.message)));
+    assert.ok(!t.posted.some((m) => m.type === "confirm"));
   } finally {
     api.close();
   }
@@ -882,7 +899,7 @@ test("the requested effort is clamped to a level the model supports", async () =
   }
 });
 
-test("panel: a message the API rejects is taken back out of the history, so the chat isn't dead afterwards", async () => {
+test("panel: a message the API rejects is taken back out of both histories and handed back to the composer", async () => {
   const api = await mockApi([
     { blocks: [], stop: "end_turn", status: 400, errorType: "invalid_request_error", message: "messages.0.content.0.image.source.base64: image exceeds 5 MB" },
     { blocks: [{ type: "text", text: "fine now" }], stop: "end_turn" },
@@ -892,13 +909,157 @@ test("panel: a message the API rejects is taken back out of the history, so the 
     await t.h.handle({ type: "ready" });
     void t.h.handle({ type: "prompt", text: "look at this" });
     await t.waitFor(() => t.types().includes("idle"));
-    assert.ok(t.posted.some((m) => m.type === "error" && /rejected the request/.test(m.message)));
+    assert.ok(t.posted.some((m) => m.type === "error" && /rejected the request/.test(m.message) && /back in the composer/.test(m.message)));
+    const reload = t.posted.find((m) => m.type === "loadConversation");
+    assert.equal(reload.draft, "look at this", "the words go back to the composer");
+    assert.deepEqual(reload.messages.map((m: any) => m.kind), ["error"], "no orphan bubble without an API message behind it");
     t.posted.length = 0;
     void t.h.handle({ type: "prompt", text: "never mind, hello" });
     await t.waitFor(() => t.types().includes("idle"));
     assert.equal(api.requests[1].messages.length, 1, "the rejected turn is not replayed");
     assert.equal(api.requests[1].messages[0].content[0].text, "never mind, hello");
     assert.ok(t.posted.some((m) => m.type === "text"));
+  } finally {
+    api.close();
+  }
+});
+
+test("panel: a 400 that isn't about the message (model, billing, context) leaves it in the chat", async () => {
+  const api = await mockApi([
+    { blocks: [], stop: "end_turn", status: 400, errorType: "invalid_request_error", message: "The free trial offers these models: claude-haiku-4-5." },
+    { blocks: [{ type: "text", text: "ok" }], stop: "end_turn" },
+  ]);
+  try {
+    const t = host(api);
+    await t.h.handle({ type: "ready" });
+    void t.h.handle({ type: "prompt", text: "hello" });
+    await t.waitFor(() => t.types().includes("idle"));
+    assert.ok(!t.posted.some((m) => m.type === "loadConversation"), "nothing is rolled back");
+    void t.h.handle({ type: "prompt", text: "again" });
+    await t.waitFor(() => t.posted.filter((m) => m.type === "idle").length >= 2);
+    assert.deepEqual(api.requests[1].messages.map((m: any) => m.content[0].text), ["hello", "again"], "the first message is still part of the chat");
+    assert.deepEqual(rejectedContent(Anthropic.APIError.generate(413, undefined, "too big", new Headers())), true);
+    assert.deepEqual(rejectedContent(Anthropic.APIError.generate(400, { error: { type: "invalid_request_error", message: "prompt is too long: 3 tokens > 2 maximum" } }, "", new Headers())), false);
+  } finally {
+    api.close();
+  }
+});
+
+test("panel: a gateway without /v1/models is asked once, not on every prompt", async () => {
+  const api = await mockApi([{ blocks: [{ type: "text", text: "x" }], stop: "end_turn" }], { modelsStatus: 404 });
+  try {
+    const t = host(api);
+    await t.h.handle({ type: "ready" });
+    await t.waitFor(() => api.modelsHits === 1);
+    for (const text of ["one", "two"]) {
+      t.posted.length = 0;
+      void t.h.handle({ type: "prompt", text });
+      await t.waitFor(() => t.types().includes("idle"));
+    }
+    assert.equal(api.modelsHits, 1, "the failed attempt is remembered");
+    assert.equal(api.requests[0].model, "claude-opus-5-5", "the chosen model is used as it is");
+    await t.h.handle({ type: "recheckAuth" }); // the user came back from the settings: they may point elsewhere now
+    t.posted.length = 0;
+    void t.h.handle({ type: "prompt", text: "three" });
+    await t.waitFor(() => t.types().includes("idle"));
+    assert.equal(api.modelsHits, 2);
+  } finally {
+    api.close();
+  }
+});
+
+test("panel: Retry runs the last user message again on a history cut back to it; refused while running", async () => {
+  const api = await mockApi([
+    { blocks: [{ type: "text", text: "Checking." }, { type: "tool_use", id: "t1", name: "browser_read_page", input: {} }], stop: "tool_use" },
+    { blocks: [{ type: "text", text: "first answer" }], stop: "end_turn" },
+    { blocks: [{ type: "text", text: "second answer" }], stop: "end_turn" },
+  ]);
+  try {
+    const t = host(api);
+    await t.h.handle({ type: "ready" });
+    await t.h.handle({ type: "regenerate" });
+    assert.equal(api.requests.length, 0, "nothing to retry in an empty panel");
+    void t.h.handle({ type: "prompt", text: "what is here?" });
+    await t.waitFor(() => t.types().includes("idle"));
+    t.posted.length = 0;
+    void t.h.handle({ type: "regenerate" });
+    await t.waitFor(() => t.types().includes("idle"));
+    const reload = t.posted.find((m) => m.type === "loadConversation");
+    assert.deepEqual(reload.messages.map((m: any) => m.kind), ["user"], "the transcript is cut back to the question before the run");
+    assert.equal(reload.draft, undefined);
+    assert.ok(t.types().indexOf("loadConversation") < t.types().indexOf("started"));
+    assert.equal(api.requests[2].messages.length, 1, "the API history too");
+    assert.equal(api.requests[2].messages[0].content[0].text, "what is here?");
+    assert.equal(t.posted.filter((m) => m.type === "text").map((m) => m.text).join(""), "second answer");
+    const saved = [...t.kv.data.values()].find((v: any) => v?.apiMessages) as any;
+    assert.deepEqual(saved.messages.map((m: any) => m.kind), ["user", "assistant", "status"]);
+    assert.equal(saved.apiMessages.length, 2);
+  } finally {
+    api.close();
+  }
+  const busy = await mockApi([{ blocks: [], stop: "end_turn", stall: true }]);
+  try {
+    const t = host(busy);
+    await t.h.handle({ type: "ready" });
+    void t.h.handle({ type: "prompt", text: "long job" });
+    await t.waitFor(() => t.types().includes("started"));
+    t.posted.length = 0;
+    await t.h.handle({ type: "regenerate" });
+    await t.h.handle({ type: "rewind", userIndex: 0 });
+    assert.equal(t.posted.filter((m) => m.type === "notice" && /running/.test(m.message)).length, 2);
+    assert.equal(busy.requests.length, 1);
+    await t.h.handle({ type: "interrupt" });
+    await t.waitFor(() => t.types().includes("idle"));
+  } finally {
+    busy.close();
+  }
+});
+
+test("panel: ↩ on a user message asks first, then rolls both histories back and hands the words to the composer", async () => {
+  const api = await mockApi([
+    { blocks: [{ type: "text", text: "A1" }], stop: "end_turn" },
+    { blocks: [{ type: "text", text: "A2" }], stop: "end_turn" },
+    { blocks: [{ type: "text", text: "A3" }], stop: "end_turn" },
+  ]);
+  try {
+    const t = host(api);
+    await t.h.handle({ type: "ready" });
+    void t.h.handle({ type: "prompt", text: "Q1" });
+    await t.waitFor(() => t.types().includes("idle"));
+    await t.h.handle({ type: "uploadAttachment", name: "cat.png", dataUrl: "data:image/png;base64,iVBORw0KGgo=" });
+    const chip = t.posted.find((m) => m.type === "attached");
+    t.posted.length = 0;
+    void t.h.handle({ type: "prompt", text: "Q2", attachments: [chip.path] });
+    await t.waitFor(() => t.types().includes("idle"));
+
+    t.posted.length = 0;
+    void t.h.handle({ type: "rewind", userIndex: 1 });
+    await t.waitFor(() => t.types().includes("confirm"));
+    const card = t.posted.find((m) => m.type === "confirm");
+    assert.match(card.title, /Roll the conversation back/);
+    await t.h.handle({ type: "confirmResponse", id: card.id, value: null }); // Cancel
+    await tick(20);
+    assert.ok(t.posted.some((m) => m.type === "confirmResolved" && m.id === card.id));
+    assert.ok(!t.posted.some((m) => m.type === "loadConversation"), "cancelled: nothing changed");
+
+    t.posted.length = 0;
+    void t.h.handle({ type: "rewind", userIndex: 1 });
+    await t.waitFor(() => t.types().includes("confirm"));
+    await t.h.handle({ type: "confirmResponse", id: t.posted.find((m) => m.type === "confirm").id, value: "keep" });
+    await t.waitFor(() => t.types().includes("loadConversation"));
+    const reload = t.posted.find((m) => m.type === "loadConversation");
+    assert.deepEqual(reload.messages.map((m: any) => m.text), ["Q1", "A1", "✓ done"]);
+    assert.equal(reload.draft, "Q2", "the words come back without the attachment label");
+    assert.ok(t.posted.some((m) => m.type === "contextUsage" && m.info === null));
+    assert.ok(t.posted.some((m) => m.type === "info" && /Rolled back/.test(m.text)));
+    const saved = [...t.kv.data.values()].find((v: any) => v?.apiMessages) as any;
+    assert.equal(saved.apiMessages.length, 2, "persisted: Q1 and its answer");
+    assert.equal(saved.context, undefined);
+
+    t.posted.length = 0;
+    void t.h.handle({ type: "prompt", text: "Q2 again" });
+    await t.waitFor(() => t.types().includes("idle"));
+    assert.deepEqual(api.requests[2].messages.map((m: any) => (typeof m.content === "string" ? m.content : m.content[0].text)), ["Q1", "A1", "Q2 again"]);
   } finally {
     api.close();
   }
@@ -1080,6 +1241,30 @@ test("a chat saved under a different prompt/tool set drops its old thinking bloc
     const only: Anthropic.MessageParam[] = [{ role: "assistant", content: [{ type: "thinking", thinking: "t", signature: "s" }] }];
     stripThinking(only);
     assert.equal((only[0].content as Anthropic.ContentBlockParam[])[0].type, "text", "a turn that was only thinking keeps a valid placeholder");
+  } finally {
+    api.close();
+  }
+});
+
+test("a chat saved before builds were stamped drops its thinking blocks too, and is stamped", async () => {
+  const api = await mockApi([{ blocks: [{ type: "text", text: "second" }], stop: "end_turn" }]);
+  try {
+    const kv = memoryKv();
+    kv.data.set("agentConvIndex", [{ id: "c1", time: 1, pinned: false, title: "old", preview: "" }]);
+    kv.data.set("agentConv:c1", {
+      id: "c1", title: "old", time: 1,
+      messages: [{ kind: "user", text: "one" }, { kind: "assistant", text: "first" }],
+      apiMessages: [{ role: "user", content: "one" }, { role: "assistant", content: [{ type: "thinking", thinking: "hm", signature: "SIG" }, { type: "text", text: "first" }] }],
+    });
+    kv.data.set("agentLocalPrefs", { model: "claude-opus-5-5", mode: "agent", activeId: "c1" });
+    const t = host(api, { promptId: "B" }, kv);
+    await t.h.handle({ type: "ready" });
+    void t.h.handle({ type: "prompt", text: "two" });
+    await t.waitFor(() => t.types().includes("idle"));
+    const sent = JSON.stringify(api.requests[0].messages);
+    assert.ok(!/thinking/.test(sent), "no promptId at all counts as a different build");
+    assert.match(sent, /first/);
+    await t.waitFor(() => (kv.data.get("agentConv:c1") as any)?.promptId === "B");
   } finally {
     api.close();
   }
