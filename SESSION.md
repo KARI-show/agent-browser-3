@@ -231,13 +231,8 @@ Done in this pass (all on claude/cool-cerf-76p498):
   a page with shifted refs, honest failure, re-record), the 🧩 panel, watchers through the real service worker, memory.
 - fingerprint.js / fp-bridge.js / inject-fingerprint.js — RESTORED (see AGENTS.md: do NOT delete).
 
-### TODO: Fix the device config (fingerprint) stack
-The three fingerprint files exist but are broken. DO NOT DELETE THEM. Fix them instead:
-1. **fp-bridge.js** writes config to a DOM element `<div id="__agent_fp">`, but inject-fingerprint.js reads a different global → fix the bridge to use the same mechanism
-2. **Race condition**: inject-fingerprint.js runs BEFORE fp-bridge.js (both are content_scripts at document_start) → ensure bridge runs first, or have inject wait for the config
-3. **Profile launch** creates a fingerprint object in `browser_profile_create` but never passes it to inject-fingerprint.js → wire `agentActiveFingerprint` from chrome.storage into fp-bridge → inject
-4. Re-add the content_scripts entries in manifest.json (they were removed)
-5. Test: create a profile with full device config → launch → verify navigator/canvas/webgl overrides on the target page
+### Device config stack — done (2026-10-04, see "Device config pass" below)
+The three files are wired and tested; the TODO that stood here is resolved there.
 
 ### Open
 - Recipes replay in the panel's tab; a recipe that opens new tabs mid-way follows them (browser_click does) but a
@@ -246,3 +241,72 @@ The three fingerprint files exist but are broken. DO NOT DELETE THEM. Fix them i
 - No "summarize the change with the model" in the worker (would need the engine there); the panel's 💬 Explain does it.
 - Store listing itself (screenshots, privacy policy text, the key/ID) is the owner's; the manifest and permissions
   are ready: every permission is used (alarms/notifications by watchers).
+
+## Device config pass (2026-10-04, branch claude/admiring-newton-2qhpnu)
+Goal: the TODO above — make the device config stack (fingerprint.js / fp-bridge.js / inject-fingerprint.js)
+actually run for device profiles, without deleting anything. Baseline: `npm run check` 131/131.
+
+### What was wrong
+- Nothing loaded fingerprint.js (window.* export, no <script>/importScripts); the manifest content_scripts had
+  been removed; profiles never stored a device config; `agentActiveFingerprint` was written by no one.
+- fp-bridge.js awaited chrome.storage before writing the DOM element, inject-fingerprint.js read it
+  synchronously → always empty. A content script can't read storage synchronously at all, so "bridge first"
+  is not achievable that way: the MAIN-world side must wait, and by then a page script may have run.
+- inject-fingerprint.js: `rng` undefined (ReferenceError mid-file, half-applied state), canvas noise written
+  back into the real canvas on every read (double noise, unstable hashes, drawings corrupted), wrong GL
+  constants (MAX_VERTEX_UNIFORM_VECTORS / MAX_VERTEX_TEXTURE_IMAGE_UNITS / ALIASED_POINT_SIZE_RANGE),
+  anisotropy never mapped, client-hint platform hard-coded to Windows/macOS, `getHighEntropyValues` ignored
+  the hints asked for.
+
+### Design
+- **fingerprint.js** — `globalThis.FingerprintEngine`: the 6 device templates (unchanged), `configFor(profile, pid)`
+  = template hardware + the profile's own UA/platform/language, brands/fullVersionList derived from the UA in
+  use (`brandsFromUa`, Edge aware; non-Chromium UA → no client hints), noise seeded by the profile id;
+  `templateFor(pid, idOrUa)`, `describe()`, `uaMetadata()` (DevTools client hints). Loaded by sidepanel.html
+  and background.js.
+- **Delivery, primary — DevTools** (browserTools.js `setIdentity` / `applyIdentity`, shared with
+  browser_set_useragent): on the pinned session of a profile tab `Network.setUserAgentOverride` (+ userAgentMetadata
+  → Sec-CH-UA headers and navigator.userAgentData natively), `Page.addScriptToEvaluateOnNewDocument(runImmediately)`
+  with inject-fingerprint.js and the config embedded in place of its `EMBEDDED` marker — before any page script —
+  `Emulation.setTimezoneOverride`, `Emulation.setHardwareConcurrencyOverride`; `Target.setAutoAttach(flatten)` so
+  cross-origin frames (own targets) get the same on `Target.attachedToTarget`. A dismissed debugging bar → the next
+  load re-applies everything (cdp() re-attaches on "not attached"). The window is the profile's scope:
+  `chrome.tabs.onCreated` in it → same identity; `chrome.windows.onRemoved` → endProfile (proxy back, config
+  forgotten) — closing the first tab no longer ends the profile.
+- **Delivery, fallback — content scripts** (fp-bridge.js + inject-fingerprint.js) registered with
+  `chrome.scripting.registerContentScripts` (MAIN world for the page side, all_frames, persistAcrossSessions:false)
+  only while a profile window is open; the bridge asks the service worker (`deviceConfig` message) for the config of
+  its window (`chrome.storage.session agentDeviceWindow:<id>`, written at launch), writes the `<script type=json>` element
+  and fires an event; the page side applies it only if `document.scripts` is still empty — never two identities in one
+  document. background.js also drops the window entry / unregisters the scripts on windows.onRemoved (panel closed).
+  No static manifest content_scripts: nothing runs in the user's own tabs.
+- **inject-fingerprint.js** rewritten around `applyDeviceConfig(FP)`: idempotent (an own `hardwareConcurrency` on
+  navigator marks a done document), canvas noise into a copy (same bytes on every read, canvas untouched),
+  AudioBuffer.getChannelData noise once per buffer, correct GL constants, userAgentData platform from the UA's OS,
+  getHighEntropyValues answers the hints asked, time zone / layout noise / plugins / battery / gamepads / WebRTC kept.
+- Tools: browser_profile_create `device` (template id | none | auto: a template of the UA's OS for desktop Chrome/Edge,
+  none for Firefox/Safari/phones/Linux; with `device` and no preset the template's own UA); create/launch report
+  "Device: …"; browser_profile_list shows each profile's template and lists the templates. browser_set_useragent on a
+  profile tab keeps the template and re-derives the hints. 👤 panel: Device template select (follows the preset's OS,
+  fills UA/platform from the template), "Device:" in the list. Tool count unchanged (53).
+
+### Tests
+- tests/deviceConfig.test.mjs (9): configFor / brands / templates / describe; inject in a vm page (navigator, hints,
+  screen, WebGL, time zone, plugins, layout noise, WebRTC, native toString), canvas noise stable + canvas untouched,
+  idempotence, no-config no-op; bridge → page handshake, null reply, "page script already ran" guard.
+- e2e (real Chromium): profile with a template → server sees UA + `Sec-CH-UA-Platform: "Windows"`; the page (oracle
+  session) sees one coherent device incl. GPU string and canvas noise; the cross-origin iframe target too; a tab opened
+  by target=_blank from the profile page carries it; fallback scripts registered while the window is open and gone
+  after; the user's own tab unchanged; set_useragent inside the window keeps the template, hints follow the new UA.
+- Result: `npm run check` → 140/140 (131 + 9); e2e `tests/e2e/browserTools.e2e.mjs` → 54/54 (53 + 1), Chromium 141.
+- Two things the e2e caught on the way: `Page.addScriptToEvaluateOnNewDocument` only fires for later documents
+  while the Page domain is enabled (`Page.enable` — without it only the fallback ran, which masked the gap); and a
+  frame auto-attached without `waitForDebuggerOnStart` had run its first script before the config arrived — frames
+  now start paused and are resumed once the identity is in place (every extension context resumes a paused frame
+  after 1.5 s as a safety net, so a vanished panel can't leave one hanging).
+
+### Open
+- The fallback (content-script) path is covered by the unit test and by the registration check in e2e, not by a
+  page that reached it: with the DevTools route working, nothing in headless Chromium misses it.
+- Workers/OffscreenCanvas keep the real values except what the Emulation overrides cover (threads, time zone).
+- Only desktop Windows/macOS Chrome templates exist; adding one = a DEVICES entry (fingerprint.js).

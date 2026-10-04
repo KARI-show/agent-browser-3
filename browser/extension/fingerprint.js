@@ -1,18 +1,21 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// FINGERPRINT ENGINE v1 — Coherent device profile generation & management
+// DEVICE CONFIG ENGINE — coherent device templates for device profiles
 //
-// 背景：Device profiles must present a COHERENT browser configuration.
-// Randomizing values independently is an instant detection signal.
-// All values must come from ONE plausible real device.
+// A device profile may carry a device template: one real machine's worth of
+// values (CPU threads, memory, screen, GPU strings, audio, media devices,
+// battery, plugins, fonts, time zone) that a browser on that device reports
+// together. Values picked independently contradict each other; a template
+// doesn't. The profile's own User-Agent, platform and language ride on top of
+// the template (configFor), and the client-hint brands are derived from that
+// UA, so an edited UA keeps the rest consistent.
 //
-// 设计意图：Pre-built device profiles sampled from real hardware.
-// Each profile = consistent set of 50+ parameters that a real browser
-// on that device would report. Seed-based deterministic noise for
-// canvas/audio ensures stability across page loads and restarts.
+// Seed-based noise (canvas / audio) is keyed on the profile id: the same
+// profile looks the same across page loads and restarts; two profiles differ.
 //
-// 约束：Extension-level overrides cannot match Chromium C++ patching.
-// Worker/OffscreenCanvas hash delta is a known limitation.
-// toString() masking on all overrides is mandatory to avoid Proxy tells.
+// Loaded by the side panel (sidepanel.html) and the service worker
+// (background.js importScripts) — globalThis only, no window.* — and applied
+// to a page by inject-fingerprint.js, which browserTools.js injects through
+// the DevTools protocol (profile windows) or the fp-bridge.js content script.
 // ═══════════════════════════════════════════════════════════════════════════
 (function () {
   "use strict";
@@ -338,11 +341,124 @@
     };
   }
 
+  // ── PROFILE → ACTIVE CONFIG ───────────────────────────────────────────
+
+  function osFromUa(ua) {
+    ua = String(ua || "");
+    if (/Windows/.test(ua)) return "win";
+    if (/Android/.test(ua)) return "android";
+    if (/iPhone|iPad|iPod/.test(ua)) return "ios";
+    if (/Macintosh|Mac OS X/.test(ua)) return "mac";
+    if (/Linux|X11/.test(ua)) return "linux";
+    return null;
+  }
+
+  var OS_NAMES = { win: "Windows", mac: "macOS", linux: "Linux", android: "Android", ios: "iOS" };
+
+  /** Client-hint brands for a Chromium UA (Chrome or Edge); null for anything else — no hints are then overridden. */
+  function brandsFromUa(ua) {
+    var m = /Chrome\/(\d+)(\.[\d.]+)?/.exec(String(ua || ""));
+    if (!m) return null;
+    var major = m[1];
+    var full = m[1] + (m[2] || ".0.0.0");
+    var edge = /Edg\/([\d.]+)/.exec(ua);
+    var product = edge ? "Microsoft Edge" : "Google Chrome";
+    var productFull = edge ? edge[1] : full;
+    var productMajor = productFull.split(".")[0];
+    return {
+      brands: [{ brand: "Chromium", version: major }, { brand: product, version: productMajor }, { brand: "Not.A/Brand", version: "99" }],
+      fullVersionList: [{ brand: "Chromium", version: full }, { brand: product, version: productFull }, { brand: "Not.A/Brand", version: "99.0.0.0" }],
+    };
+  }
+
+  /** "fr-FR,fr;q=0.9,en;q=0.8" → ["fr-FR", "fr", "en"] */
+  function parseLangs(lang) {
+    return String(lang || "").split(",").map(function (s) { return s.replace(/;q=[\d.]+/, "").trim(); }).filter(Boolean);
+  }
+
+  /** The templates for an OS ("win" | "mac"), or all of them. */
+  function templatesFor(os) {
+    return os ? DEVICES.filter(function (d) { return d.os === os; }) : DEVICES.slice();
+  }
+
+  /** Pick a template for a profile: by id, else one for the UA's OS (stable per profile id), else null. */
+  function templateFor(profileId, deviceIdOrUa) {
+    var byId = DEVICES.find(function (d) { return d.id === deviceIdOrUa; });
+    if (byId) return byId;
+    var list = templatesFor(osFromUa(deviceIdOrUa));
+    if (!list.length) return null;
+    return list[seedHash(String(profileId)) % list.length];
+  }
+
+  /** One line about a template for tool output and the panel. */
+  function describe(fp) {
+    if (!fp) return "User-Agent only";
+    var gpu = fp.webgl && fp.webgl.unmaskedRenderer ? /\((?:NVIDIA|AMD|Intel|Apple), (.+?)(?: Direct3D11.*|, Unspecified Version)?\)$/.exec(fp.webgl.unmaskedRenderer) : null;
+    var parts = [];
+    if (fp.screen) parts.push(fp.screen.width + "×" + fp.screen.height);
+    if (fp.hardwareConcurrency) parts.push(fp.hardwareConcurrency + " threads");
+    if (fp.deviceMemory) parts.push(fp.deviceMemory + " GB");
+    if (gpu) parts.push(gpu[1].replace(/ANGLE Metal Renderer: /, ""));
+    if (fp.timezone) parts.push(fp.timezone);
+    return fp.label + (parts.length ? " (" + parts.join(", ") + ")" : "");
+  }
+
+  /**
+   * The config a profile presents when launched, or null for a User-Agent-only profile.
+   * The template gives the hardware; the profile's own UA / platform / language win over
+   * the template's, and the client-hint brands follow the UA that is actually in use.
+   */
+  function configFor(profile, profileId) {
+    if (!profile || !profile.device || profile.device === "none") return null;
+    var tpl = DEVICES.find(function (d) { return d.id === profile.device; });
+    if (!tpl) return null;
+    var fp = generateProfile(String(profileId || profile.device), tpl.id);
+    if (profile.ua) fp.ua = String(profile.ua);
+    if (profile.platform) fp.platform = String(profile.platform);
+    var langs = parseLangs(profile.lang);
+    if (langs.length) fp.langs = langs;
+    fp.os = osFromUa(fp.ua) || fp.os;
+    fp.osName = OS_NAMES[fp.os] || "Windows";
+    fp.mobile = /Mobile|Android|iPhone/.test(fp.ua);
+    var b = brandsFromUa(fp.ua);
+    if (b) {
+      fp.brands = b.brands;
+      fp.fullVersionList = b.fullVersionList;
+    } else {
+      delete fp.brands;
+      delete fp.fullVersionList;
+    }
+    return fp;
+  }
+
+  /** The DevTools userAgentMetadata for a config (Sec-CH-UA headers + navigator.userAgentData), or null. */
+  function uaMetadata(fp) {
+    if (!fp || !fp.brands) return null;
+    return {
+      brands: fp.brands,
+      fullVersionList: fp.fullVersionList || fp.brands,
+      platform: fp.osName || OS_NAMES[fp.os] || "Windows",
+      platformVersion: fp.platformVersion || "10.0.0",
+      architecture: fp.arch || "x86",
+      model: fp.model || "",
+      mobile: !!fp.mobile,
+      bitness: fp.bitness || "64",
+    };
+  }
+
   // ── EXPORT ────────────────────────────────────────────────────────────
 
-  window.FingerprintEngine = {
+  globalThis.FingerprintEngine = {
     DEVICES: DEVICES,
     generate: generateProfile,
+    configFor: configFor,
+    templateFor: templateFor,
+    templatesFor: templatesFor,
+    describe: describe,
+    uaMetadata: uaMetadata,
+    brandsFromUa: brandsFromUa,
+    osFromUa: osFromUa,
+    parseLangs: parseLangs,
     canvasNoise: canvasNoiseFn,
     audioNoise: audioNoiseFn,
     createPRNG: createPRNG,
