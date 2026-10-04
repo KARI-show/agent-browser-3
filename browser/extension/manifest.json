@@ -17,7 +17,8 @@
     "privacy",
     "unlimitedStorage",
     "cookies",
-    "downloads"
+    "downloads",
+    "downloads.open"
   ],
   "host_permissions": [
     "<all_urls>"
