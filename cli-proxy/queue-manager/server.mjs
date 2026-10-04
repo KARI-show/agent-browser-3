@@ -859,18 +859,18 @@ async function createHandler(store) {
           // state.json и показывает юзеру всю инфраструктуру.
           // Design: disallowedTools блокирует ВСЕ встроенные тулы CLI. Модель может использовать
           // ТОЛЬКО browser_* тулы через MCP server. Никакого доступа к серверу.
+          // It is a first-class SDK option (Options.disallowedTools); through extraArgs it only
+          // worked because Array#toString happens to produce the comma list the CLI flag accepts.
           const agentOpts = {
             maxTurns: 30,
             permissionMode: "auto",
             persistSession: false,
             systemPrompt: sysPrompt || undefined,
             ...(mcpServer ? { mcpServers: { browser: mcpServer } } : {}),
-            extraArgs: {
-              model: body.model,
-              disallowedTools: ["Read", "Write", "Edit", "MultiEdit", "Bash", "BatchTool",
-                "ListDir", "SearchFiles", "Grep", "Glob", "TodoRead", "TodoWrite",
-                "WebFetch", "WebSearch", "Task"],
-            },
+            disallowedTools: ["Read", "Write", "Edit", "MultiEdit", "Bash", "BatchTool",
+              "ListDir", "SearchFiles", "Grep", "Glob", "TodoRead", "TodoWrite",
+              "WebFetch", "WebSearch", "Task"],
+            extraArgs: { model: body.model },
           };
 
           for await (const msg of agentQuery({ prompt: contextPrefix + promptText, options: agentOpts })) {
