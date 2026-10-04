@@ -135,10 +135,11 @@
   // Recipes
   // ═══════════════════════════════════════════════════════════════════════
 
-  // Tools that only look, or that cannot be replayed (ids of tabs/windows, attached files, secrets).
+  // Tools that only look, or that cannot be replayed (ids of windows, attached files, secrets). A tab switch
+  // is kept: its tab id is useless later, but the tab's address is recorded and matched on replay.
   var NOT_RECORDED = {
     browser_read_page: 1, browser_find: 1, browser_screenshot: 1, browser_tabs: 1, browser_list_windows: 1,
-    browser_get_useragent: 1, browser_profile_list: 1, browser_switch_tab: 1, browser_switch_window: 1, browser_close_window: 1,
+    browser_get_useragent: 1, browser_profile_list: 1, browser_switch_window: 1, browser_close_window: 1,
     browser_upload_file: 1, browser_cookies_get: 1, browser_cookies_set: 1, browser_cookies_delete: 1, browser_cookies_export: 1,
     browser_cookies_import: 1, browser_profile_create: 1, browser_profile_save: 1, browser_profile_delete: 1, browser_network_capture: 1,
     browser_recipe_save: 1, browser_recipe_run: 1, browser_recipe_list: 1, browser_recipe_delete: 1,
@@ -207,6 +208,7 @@
       var st = { tool: s.name, args: clone(s.args) || {} };
       if (s.loc) st.loc = s.loc;
       if (s.toLoc) st.toLoc = s.toLoc;
+      if (s.name === "browser_switch_tab") st.tabUrl = s.url || ""; // where the switch landed — the id below is meaningless later
       delete st.args.tabId; // never valid on a later run
       return st;
     });
@@ -247,6 +249,7 @@
       case "browser_fill_form": return "fill " + ((a.fields || []).length) + " fields";
       case "browser_navigate": return a.action ? "go " + a.action : "open " + a.url;
       case "browser_new_tab": return "open " + a.url + " in a new tab";
+      case "browser_switch_tab": return "switch to the tab at " + (st.tabUrl || "?");
       case "browser_press_key": return "press " + a.key;
       case "browser_scroll": return "scroll " + (a.direction || (a.ref ? "to " + what : "down"));
       case "browser_hover": return "hover " + what;
@@ -273,6 +276,22 @@
     if (scope === "all" || !last.turn) return all;
     if (scope === "last") return all.filter(function (s) { return s.turn && s.turn.convId === last.turn.convId && s.turn.n === last.turn.n; });
     return all.filter(function (s) { return s.turn && s.turn.convId === last.turn.convId; });
+  }
+
+  /** The id of an open tab at `url` (exact address first, then same origin and path), from browser_tabs. */
+  async function tabAt(T, url) {
+    var want;
+    try { want = new URL(url); } catch (_) { return null; }
+    var lines = outText(await T.run("browser_tabs", {}, true)).split("\n");
+    var tabs = [];
+    lines.forEach(function (l) {
+      var m = /^\*?\s*(\d+)\s+.*? — (\S+)$/.exec(l);
+      if (m) tabs.push({ id: Number(m[1]), url: m[2] });
+    });
+    var exact = tabs.find(function (t) { return t.url === url; });
+    if (exact) return exact.id;
+    var same = tabs.find(function (t) { try { var u = new URL(t.url); return u.origin === want.origin && u.pathname === want.pathname; } catch (_) { return false; } });
+    return same ? same.id : null;
   }
 
   /** Replay a recipe on the current tab (or a new one). opts: { newTab, onStep(i, total, label, status), signal } */
@@ -307,6 +326,12 @@
             var m2 = await resolveLoc(st.toLoc);
             if (!m2) throw new Error("Could not find the drop target " + describeLoc(st.toLoc) + ".");
             args.toRef = m2.ref;
+          }
+          if (st.tool === "browser_switch_tab") {
+            var target = fillParams(st.tabUrl || "", params);
+            var tabId = await tabAt(T, target);
+            if (tabId === null) throw new Error("No open tab at " + (target || "the recorded address") + ".");
+            args = { tabId: tabId };
           }
           if (st.tool === "browser_fill_form" && Array.isArray(args.fields)) {
             var fields = [];
