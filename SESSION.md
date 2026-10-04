@@ -357,7 +357,30 @@ remote / panel UI / options), each rebased onto this branch and merged.
   Tests: 9 new (standalone 5, bridgeAgent 4) → 156; trialSignin e2e 3/3.
 - Known (shared UI, src/webview/main.ts): `userIndex` counts only rendered bubbles (HISTORY_TAIL 40 + "Earlier messages"),
   so rewind on a chat over 40 entries is off by the hidden count — in VS Code too.
-__AGENT_SECTIONS__
+
+### Done — remote / panel UI / options (browser/extension, relay, parallel pass)
+- relay.js (browser node) handles the web app's controls: newChat (the phone becomes a follower of the chat it created
+  until it opens another), setModel / setMode / compact / regenerate / rewind for the sender's open chat, delete / rename /
+  pin by id, uploadAttachment (the host's `attached` routed back to the uploader — `AgentRemote.claimAttached`, 60 s queue),
+  interrupt for a non-active chat (opens it, stops once `loadConversation` confirms — the built-in backend opens chats
+  asynchronously), `ready` for a deleted chat → error; `confirm` / `confirmResolved` mirrored, `confirmResponse` passed.
+  Dead `openChat` / `listChats` branches and the write-only `config` removed. nodeGone is the hub's (relay/hub.mjs).
+- Remote link: no clipboard write; shown in the panel, kept in the session status (`link`), copyable on the options page.
+- `autostart` setting (migrated once from `enabled`) apart from "on now" (`chrome.storage.session.agentRemoteOn`).
+- relay/bot.mjs exits on a getMe failure instead of idling; remote.ts waits for the bot's verdict (10 s) → `remoteReady.botError`
+  → notice in the panel. New tests/relayBot.test.mjs (fake Bot API).
+- shim.js: approval cards from the native host get the element words (`AgentBrowserTools.describe`); dropped files are
+  uploaded like 📎; `body.backend-local|native` → sidepanel.css hides Retry/↩ for the native host.
+- proxyConfig.js: one proxy validation for options.js and background.js; options.css no-op rule and telegram.js
+  `question.msgId` removed. Tests: 158 unit; remote e2e extended (8/8 with trialSignin); browserTools 54/54.
+- Noted, not done: telegram.js `/stop` still sends openConversation + interrupt back to back (the same race relay.js now
+  avoids; changing it moves an existing test's assertion); `started` for a fresh chat on the native host has no chat id
+  and is dropped by the mirror (`runState` follows, harmless).
+
+### Result
+`npm run check` → 158/158 (140 → 158); e2e → 62/62 (browserTools 54, remote 5, trialSignin 3), Chromium 141.
+`npm run package:browser` → dist-browser/agent-browser.zip (manifest 0.3.0). Backlog of the product pass: 1, 2, 3, 4, 5, 6, 7, 9
+closed; 8 (cloudflared pin) open, see below. Manual pass left: browser/TESTING.md §3.8, §6.8–6.10, §10.12–10.19, §12.13, §13.
 
 ### Open
 - src/tunnel.ts still downloads cloudflared "latest" unverified (backlog 8): pinning needs a release tag + checksums,

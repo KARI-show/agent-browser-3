@@ -204,6 +204,22 @@ decides) and another takes over when it closes.
   switches the panel to it; Stop and Allow/Deny work from the phone. Streamed
   text is merged into ≤10 relay messages a second, under the relay's
   per-socket rate limit.
+- What else the phone / web app can do: start a new chat ("+" — its stream is
+  sent to that phone until it opens another chat), change model and mode,
+  compact, Retry and ↩ (built-in agent) for the chat it has open; delete,
+  rename and pin any chat; attach files (uploaded bytes, the chip comes back
+  to the uploader); Stop a chat that is not the one on screen — the panel
+  switches to it first. A chat that no longer exists answers with an error
+  instead of silence.
+- On/off: the 🛰 button is "on now" for this browser session (kept in
+  `chrome.storage.session`, gone after a restart). *Start remote automatically
+  when the panel opens* is a separate setting on the options page. The link
+  the panel shows carries the relay token; it is no longer copied to the
+  clipboard on its own — copy it from the panel or from the Remote section of
+  the settings page (**Copy link**). If the helper's Telegram bot fails to
+  start (bad token, no network), the panel says so while the relay and tunnel
+  keep working.
+- Files dropped onto the panel are attached like files picked with 📎.
 
 ## Build
 
