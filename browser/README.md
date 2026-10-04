@@ -121,9 +121,29 @@ Incognito window (no cookies, storage or history shared with your other
 tabs) and works there. It needs Chrome's **"Allow in Incognito"** switch on
 for this extension (`chrome://extensions` → Agent Browser → Details) — the
 settings page shows whether that's on, and the tool fails with that
-instruction if it isn't. This is an ordinary Incognito window, not a
-fingerprint or identity change: sites still see the same browser and exit
-address (combine it with a proxy above for a different exit address too).
+instruction if it isn't. This is an ordinary Incognito window, not an
+identity change: sites still see the same browser and exit address (a device
+profile below changes what the browser presents; a proxy above changes the
+exit address).
+
+### Device profiles
+
+A device profile (👤 panel, `browser_profile_*` tools) is a saved identity —
+User-Agent, platform, language — plus a **device template**, a proxy, a cookie
+jar and notes for the agent. The template (`extension/fingerprint.js`) is one
+real machine's values: screen, CPU threads, memory, GPU, audio, media devices,
+battery, plugins, time zone. Launching the profile opens a window in which
+every page presents that machine: the panel installs the config into the
+tab's DevTools session (`Network.setUserAgentOverride` with client hints,
+`Page.addScriptToEvaluateOnNewDocument` with `extension/inject-fingerprint.js`
+before any page script, `Emulation` time zone / CPU threads; cross-origin
+frames through `Target.setAutoAttach`; tabs opened from the window too). While
+a profile window is open, `extension/fp-bridge.js` + `inject-fingerprint.js`
+are also registered as content scripts (`chrome.scripting`) as a fallback for
+a frame the DevTools route missed: the bridge asks the service worker for the
+window's config (`chrome.storage.session` `agentDeviceWindow:<id>`), and the page
+side applies it only if no page script has run yet. Closing the window
+restores the proxy, forgets the config and unregisters the scripts.
 
 | Mode | Browser actions |
 | --- | --- |

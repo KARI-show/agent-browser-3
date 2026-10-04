@@ -76,6 +76,9 @@
 | 6.5 | Вкладка 🎭 UA presets → нажать ▶ | UA применяется к текущей вкладке напрямую (без сообщения в чат); `Check UA` показывает его и после перезагрузки |
 | 6.6 | Вкладка 📜 Log | Показывает историю действий по профилям (и из чата, и из панели) |
 | 6.7 | Агент: `Launch the device profile named X` | Ответ инструмента содержит notes профиля как данные; агент их не исполняет |
+| 6.8 | В редакторе профиля выбрать Device template (например «Windows 11 — i7-13700K / RTX 4060»), сохранить, ▶ | В списке «Device: Windows 11 …»; в окне профиля открыть любой сайт с информацией об устройстве (например browserleaks.com/javascript, /canvas, /webgl) — экран 2560×1440, 24 потока, 32 GB, GPU RTX 4060, time zone America/New_York, client hints Windows; то же во вкладке, открытой по ссылке из этого окна, и в iframe |
+| 6.9 | Закрыть окно профиля → в обычной вкладке проверить устройство | Реальные значения; `chrome.scripting.getRegisteredContentScripts()` пуст |
+| 6.10 | Preset «iPhone» или «Firefox» в редакторе | Device template сбрасывается на «User-Agent only» (шаблоны — только Windows/macOS Chrome) |
 
 ## 7. Document Converter
 

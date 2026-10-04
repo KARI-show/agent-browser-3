@@ -244,9 +244,10 @@
 
   chrome.debugger.onDetach.addListener(function (source) {
     delete attached[source.tabId];
+    delete deviceReady[source.tabId]; // the new-document script and the emulation died with the session
   });
 
-  async function cdp(tabId, method, params) {
+  async function cdp(tabId, method, params, retried) {
     if (!attached[tabId]) {
       try {
         await chrome.debugger.attach({ tabId: tabId }, "1.3");
@@ -268,7 +269,16 @@
         chrome.debugger.detach({ tabId: tabId }).catch(function () {});
       }, 8000);
     }
-    return chrome.debugger.sendCommand({ tabId: tabId }, method, params || {});
+    try {
+      return await chrome.debugger.sendCommand({ tabId: tabId }, method, params || {});
+    } catch (e) {
+      // The user dismissed the debugging bar (onDetach may not have run yet): attach again, once.
+      if (!retried && /not attached|Detached while/i.test(String((e && e.message) || e))) {
+        delete attached[tabId];
+        return cdp(tabId, method, params, true);
+      }
+      throw e;
+    }
   }
 
   async function cdpMove(tabId, x, y) {
@@ -957,30 +967,124 @@
     return r;
   }
 
-  // Override the identity a tab presents, for as long as the tab lives: request headers through the
-  // DevTools protocol (the session is kept attached — the override dies with it), navigator.* through a
-  // MAIN-world pin that is redone on every load. Shared by browser_set_useragent and profile launches.
-  async function applyUaOverride(tabId, ua, platform, lang) {
-    var langs = lang ? lang.split(",").map(function (s) { return s.replace(/;q=[\d.]+/, "").trim(); }).filter(Boolean) : [];
+  // ---------------------------------------------------------------------------
+  // The identity a tab presents, for as long as the tab lives: User-Agent / platform / language
+  // (browser_set_useragent, profiles) and, for a device profile, its device config (fingerprint.js
+  // configFor → inject-fingerprint.js). Everything rides on the tab's DevTools session, which stays
+  // attached (pinned): the request headers (Network.setUserAgentOverride, client hints included), the
+  // page script installed before any page script runs (Page.addScriptToEvaluateOnNewDocument), the time
+  // zone and CPU-thread emulation, and the same for cross-origin frames, which are targets of their own
+  // (Target.setAutoAttach). navigator.* is also pinned in the MAIN world on every load — belt and braces
+  // for the UA-only case. A dismissed debugging bar ends the session: the next load re-applies it all.
+
+  var identities = {}; // tabId -> { ua, platform, lang, langs, device: config | null }
+  var deviceReady = {}; // tabId -> { identifier } while the new-document script is installed on the live session
+  var deviceScriptText = null; // inject-fingerprint.js, fetched once
+
+  function engine() { return globalThis.FingerprintEngine || null; }
+
+  async function deviceScript(cfg) {
+    if (deviceScriptText === null) deviceScriptText = await (await fetch(chrome.runtime.getURL("inject-fingerprint.js"))).text();
+    var marker = "null; /*__DEVICE_CONFIG__*/";
+    if (deviceScriptText.indexOf(marker) === -1) throw new Error("inject-fingerprint.js has no config marker");
+    return deviceScriptText.replace(marker, JSON.stringify(cfg) + ";");
+  }
+
+  function uaOverrideParams(id) {
+    var p = { userAgent: id.ua, platform: id.platform || "", acceptLanguage: id.lang || "" };
+    var meta = id.device && engine() ? engine().uaMetadata(id.device) : null;
+    if (meta) p.userAgentMetadata = meta;
+    return p;
+  }
+
+  // (Re)apply a tab's identity to its DevTools session. Cheap when already in place.
+  async function applyIdentity(tabId) {
+    var id = identities[tabId];
+    if (!id) return;
+    var params = uaOverrideParams(id);
+    try {
+      await cdp(tabId, "Network.setUserAgentOverride", params);
+    } catch (e) {
+      if (!params.userAgentMetadata) throw e;
+      delete params.userAgentMetadata; // an older browser without client-hint overrides: the UA still goes through
+      await cdp(tabId, "Network.setUserAgentOverride", params);
+    }
+    if (!id.device || deviceReady[tabId]) return;
+    // The Page domain must be on for the script to run in the documents to come (not only the current one).
+    await cdp(tabId, "Page.enable");
+    var r = await cdp(tabId, "Page.addScriptToEvaluateOnNewDocument", { source: await deviceScript(id.device), runImmediately: true });
+    deviceReady[tabId] = { identifier: r && r.identifier };
+    var swallow = function () {};
+    if (id.device.timezone) await cdp(tabId, "Emulation.setTimezoneOverride", { timezoneId: id.device.timezone }).catch(swallow);
+    if (id.device.hardwareConcurrency) await cdp(tabId, "Emulation.setHardwareConcurrencyOverride", { hardwareConcurrency: id.device.hardwareConcurrency }).catch(swallow);
+    // Cross-origin frames: attach to them as they appear, paused, so the identity is in place before their
+    // first script (Target.attachedToTarget below installs it and resumes them).
+    await cdp(tabId, "Target.setAutoAttach", AUTO_ATTACH).catch(swallow);
+  }
+
+  var AUTO_ATTACH = { autoAttach: true, waitForDebuggerOnStart: true, flatten: true };
+
+  // Every context of the extension (this panel, other panels, the service worker) sees the event. The one
+  // that holds the tab's identity installs it and resumes the frame at once; the others resume it after a
+  // grace period — a safety net so that no frame stays paused if the panel that attached is gone.
+  chrome.debugger.onEvent.addListener(function (source, method, params) {
+    if (method !== "Target.attachedToTarget" || !params || !params.sessionId) return;
+    var id = identities[source.tabId];
+    var info = params.targetInfo || {};
+    var target = { tabId: source.tabId, sessionId: params.sessionId };
+    var run = function (m, p) { return chrome.debugger.sendCommand(target, m, p || {}).catch(function () {}); };
+    var resume = function () { if (params.waitingForDebugger) return run("Runtime.runIfWaitingForDebugger"); };
+    if (!id) {
+      setTimeout(function () { resume(); }, 1500);
+      return;
+    }
+    (async function () {
+      if (id.device && (info.type === "iframe" || info.type === "page")) {
+        await run("Network.setUserAgentOverride", uaOverrideParams(id));
+        await run("Page.enable");
+        await run("Page.addScriptToEvaluateOnNewDocument", { source: await deviceScript(id.device), runImmediately: true });
+        if (id.device.timezone) await run("Emulation.setTimezoneOverride", { timezoneId: id.device.timezone });
+        if (id.device.hardwareConcurrency) await run("Emulation.setHardwareConcurrencyOverride", { hardwareConcurrency: id.device.hardwareConcurrency });
+        await run("Target.setAutoAttach", AUTO_ATTACH);
+      } else if (/worker/.test(info.type || "")) {
+        await run("Network.setUserAgentOverride", uaOverrideParams(id));
+      }
+    })().catch(function () {}).then(resume);
+  });
+
+  // Give a tab an identity: { ua, platform, lang, device } (device = a config from FingerprintEngine.configFor,
+  // or null for User-Agent only). Shared by browser_set_useragent and profile launches.
+  async function setIdentity(tabId, id) {
+    id = Object.assign({}, id);
+    id.langs = id.lang ? id.lang.split(",").map(function (s) { return s.replace(/;q=[\d.]+/, "").trim(); }).filter(Boolean) : [];
+    var prev = identities[tabId];
+    identities[tabId] = id;
     pinned[tabId] = true;
     clearTimeout(detachTimers[tabId]);
-    var viaCdp = function () {
-      return cdp(tabId, "Network.setUserAgentOverride", { userAgent: ua, platform: platform || "", acceptLanguage: lang || "" });
-    };
+    // A device config is a different script: drop the one installed for the previous identity.
+    if (deviceReady[tabId] && (!prev || JSON.stringify(prev.device) !== JSON.stringify(id.device))) {
+      if (deviceReady[tabId].identifier) await cdp(tabId, "Page.removeScriptToEvaluateOnNewDocument", { identifier: deviceReady[tabId].identifier }).catch(function () {});
+      delete deviceReady[tabId];
+    }
     var inPage = function () {
-      return chrome.scripting.executeScript({ target: { tabId: tabId }, world: "MAIN", func: pageUaOverride, args: [ua, platform || "", langs] });
+      return chrome.scripting.executeScript({ target: { tabId: tabId }, world: "MAIN", func: pageUaOverride, args: [id.ua, id.platform || "", id.langs] });
     };
-    await viaCdp();
+    await applyIdentity(tabId);
     await inPage().catch(function () {}); // a blank/new tab has no document yet; the load watcher covers it
     watchTabLoads(
       tabId,
       function () {
         // Re-attach if the user dismissed the debugging bar, then re-pin navigator.* in the new document.
-        viaCdp().catch(function () {});
+        applyIdentity(tabId).catch(function () {});
         inPage().catch(function () {});
       },
-      function () { delete pinned[tabId]; }
+      function () { delete pinned[tabId]; delete identities[tabId]; delete deviceReady[tabId]; }
     );
+  }
+
+  /** The device config a tab presents, or null. */
+  function deviceOf(tabId) {
+    return identities[tabId] ? identities[tabId].device : null;
   }
 
   function pageRunJs(code) {
@@ -1210,6 +1314,17 @@
   function proxyLabel(p) {
     return p.proxy && p.proxy.enabled && p.proxy.host ? p.proxy.type + "://" + p.proxy.host + ":" + p.proxy.port : "direct";
   }
+  function deviceLine(p) {
+    var E = engine();
+    var tpl = E && p.device ? E.DEVICES.find(function (d) { return d.id === p.device; }) : null;
+    return tpl ? E.describe(tpl) : "User-Agent only (no device template)";
+  }
+  function deviceTemplatesLine() {
+    var E = engine();
+    if (!E) return "";
+    return "\n\nDevice templates (browser_profile_create device=<id>; 'none' = User-Agent only):\n" +
+      E.DEVICES.map(function (d) { return "  " + d.id + " — " + E.describe(d); }).join("\n");
+  }
   async function logProfile(pid, action) {
     var logs = (await chrome.storage.local.get(PROFILE_LOG_KEY))[PROFILE_LOG_KEY] || {};
     (logs[pid] = logs[pid] || []).push({ t: Date.now(), a: action });
@@ -1247,7 +1362,74 @@
       await chrome.storage.local.remove(PROXY_BEFORE_KEY);
     }
     if (st.agentActiveProfile === pid) await chrome.storage.local.remove("agentActiveProfile");
+    Object.keys(profileWindows).forEach(function (w) {
+      if (profileWindows[w].pid !== pid) return;
+      chrome.tabs.onCreated.removeListener(profileWindows[w].onCreated);
+      delete profileWindows[w];
+    });
+    await forgetDeviceWindows(function (cfg, winId) { return cfg.profileId === pid; });
   }
+
+  // ── Device config delivery ──────────────────────────────────────────────
+  // A profile window's device config is kept in chrome.storage.session under "agentDeviceWindow:<id>"
+  // (one key per window — the panel and the service worker never rewrite each other's entries): the
+  // service worker answers fp-bridge.js from it, and the content-script pair (bridge + page script) is
+  // registered only while at least one such window is open (persistAcrossSessions: false — a browser
+  // restart clears both). Tabs the panel attaches to get the config through DevTools before any page
+  // script; the content scripts are the fallback for a frame that route missed.
+
+  var DEVICE_WINDOW_PREFIX = "agentDeviceWindow:";
+  var DEVICE_SCRIPTS = [
+    { id: "agent-device-bridge", js: ["fp-bridge.js"], matches: ["<all_urls>"], runAt: "document_start", allFrames: true, matchOriginAsFallback: true, persistAcrossSessions: false },
+    { id: "agent-device-config", js: ["inject-fingerprint.js"], matches: ["<all_urls>"], runAt: "document_start", allFrames: true, matchOriginAsFallback: true, world: "MAIN", persistAcrossSessions: false },
+  ];
+  var profileWindows = {}; // winId -> { pid, identity, onCreated } (this panel's launches)
+
+  async function registeredDeviceScripts() {
+    return chrome.scripting.getRegisteredContentScripts({ ids: DEVICE_SCRIPTS.map(function (d) { return d.id; }) });
+  }
+  async function ensureDeviceScripts() {
+    var have = await registeredDeviceScripts();
+    var missing = DEVICE_SCRIPTS.filter(function (d) { return !have.some(function (h) { return h.id === d.id; }); });
+    if (missing.length) await chrome.scripting.registerContentScripts(missing);
+  }
+  async function deviceWindows() {
+    var all = await chrome.storage.session.get(null);
+    var out = {};
+    Object.keys(all).forEach(function (k) { if (k.indexOf(DEVICE_WINDOW_PREFIX) === 0) out[k.slice(DEVICE_WINDOW_PREFIX.length)] = all[k]; });
+    return out;
+  }
+  async function forgetDeviceWindows(drop) {
+    var map = await deviceWindows();
+    var gone = Object.keys(map).filter(function (w) { return drop(map[w], Number(w)); });
+    if (gone.length) await chrome.storage.session.remove(gone.map(function (w) { return DEVICE_WINDOW_PREFIX + w; }));
+    if (Object.keys(map).length === gone.length) {
+      var have = await registeredDeviceScripts();
+      if (have.length) await chrome.scripting.unregisterContentScripts({ ids: have.map(function (h) { return h.id; }) });
+    }
+  }
+
+  // The window is the profile's: tabs opened in it get the identity too, closing it ends the profile.
+  async function startProfileWindow(pid, winId, identity) {
+    var onCreated = function (t) {
+      if (t.windowId !== winId || ownPage(t) || !(identity.ua || identity.device)) return;
+      setIdentity(t.id, identity).catch(function () {});
+    };
+    chrome.tabs.onCreated.addListener(onCreated);
+    profileWindows[winId] = { pid: pid, identity: identity, onCreated: onCreated };
+    if (identity.device) {
+      await chrome.storage.session.set({ [DEVICE_WINDOW_PREFIX + winId]: identity.device });
+      await ensureDeviceScripts();
+    }
+  }
+
+  chrome.windows.onRemoved.addListener(function (winId) {
+    var w = profileWindows[winId];
+    if (!w) return;
+    chrome.tabs.onCreated.removeListener(w.onCreated);
+    delete profileWindows[winId];
+    endProfile(w.pid).catch(function () {});
+  });
 
   var TOOLS = {
     browser_read_page: async function (a) {
@@ -1810,10 +1992,19 @@
       var ua = String(a.userAgent);
       var plat = String(a.platform || "");
       var lang = String(a.language || "");
+      // A profile tab keeps its device config; its UA-derived parts (client hints) follow the new UA.
+      var dev = deviceOf(tab.id);
+      var device = dev && engine() ? engine().configFor({ device: dev.id, ua: ua, platform: plat, lang: lang }, dev.profileId) : null;
+      var identity = { ua: ua, platform: plat, lang: lang, device: device };
       try {
-        await applyUaOverride(tab.id, ua, plat, lang);
+        await setIdentity(tab.id, identity);
       } catch (e) {
         throw new Error("Could not override the User-Agent via DevTools: " + ((e && e.message) || e) + ". Another DevTools client (an open inspector?) may hold this tab.");
+      }
+      // In a profile window the window's identity follows: tabs opened later and the fallback scripts use it.
+      if (profileWindows[tab.windowId]) {
+        profileWindows[tab.windowId].identity = identity;
+        if (device) await chrome.storage.session.set({ [DEVICE_WINDOW_PREFIX + tab.windowId]: device });
       }
       var result = "User-Agent set to: " + ua.slice(0, 100);
       if (plat) result += " | platform=" + plat;
@@ -1936,6 +2127,18 @@
       var profiles = await loadProfiles();
       var pid = "prof_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
       var device = uaPreset(a.deviceType);
+      var E = engine();
+      // Device template: the one asked for, else one for the OS of a desktop Chromium UA (none for a
+      // custom UA, Firefox, Safari, phones or Linux — the templates are Windows / macOS Chrome machines).
+      var tpl = null;
+      if (E && a.device && a.device !== "none") {
+        tpl = E.DEVICES.find(function (d) { return d.id === a.device; });
+        if (!tpl) throw new Error("Unknown device template '" + a.device + "'. Templates: " + E.DEVICES.map(function (d) { return d.id + " (" + d.label + ")"; }).join(", ") + "; 'none' = User-Agent only.");
+        if (!a.deviceType && !a.userAgent) device = { ua: tpl.ua, platform: tpl.platform, lang: device.lang, label: E.osFromUa(tpl.ua) === "mac" ? "macOS" : "Windows", type: "template" };
+        if (device.type === "template") device.label += " · Chrome " + (/Chrome\/(\d+)/.exec(tpl.ua) || [0, "?"])[1];
+      } else if (E && a.device !== "none" && !a.userAgent && /Chrome\//.test(device.ua) && !/Mobile|Android/.test(device.ua)) {
+        tpl = E.templateFor(pid, device.ua);
+      }
       var profile = {
         name: String(a.name),
         icon: a.icon || "🕵️",
@@ -1943,6 +2146,8 @@
         platform: a.platform || device.platform,
         lang: a.language || device.lang,
         label: a.userAgent ? String(a.userAgent).slice(0, 50) : device.label,
+        device: tpl ? tpl.id : "",
+        deviceLabel: tpl ? tpl.label : "",
         proxy: {
           enabled: !!a.proxyHost,
           type: a.proxyType || "http",
@@ -1965,6 +2170,7 @@
       result += "UA: " + profile.ua.slice(0, 80) + "\n";
       result += "Platform: " + profile.platform + "  |  Language: " + profile.lang + "\n";
       result += "Proxy: " + proxyLabel(profile) + "\n";
+      result += "Device: " + deviceLine(profile) + "\n";
       result += "Use browser_profile_launch with id '" + pid + "' to start; browser_profile_save after signing in keeps the session.";
       return text(result);
     },
@@ -1999,14 +2205,20 @@
       //    open": the setting in place before is remembered and comes back when the window closes.
       var proxyNote = await applyProfileProxy(a.profileId, p);
 
-      // 3. Identity: request headers + navigator.* for the life of this tab (re-applied on every load).
+      // 3. Identity: request headers, navigator.* and the device config for the life of this window's
+      //    tabs (re-applied on every load; tabs opened in the window get it too).
       var uaNote = "";
-      if (p.ua) {
+      var cfg = engine() ? engine().configFor(p, a.profileId) : null;
+      var identity = cfg || p.ua ? { ua: p.ua || cfg.ua, platform: p.platform || (cfg ? cfg.platform : ""), lang: p.lang || "", device: cfg } : null;
+      if (identity) {
         try {
-          await applyUaOverride(tab.id, p.ua, p.platform || "", p.lang || "");
+          await setIdentity(tab.id, identity);
         } catch (e) {
-          uaNote = " (User-Agent override failed: " + short((e && e.message) || e) + ")";
+          uaNote = " (identity override failed: " + short((e && e.message) || e) + ")";
         }
+        await startProfileWindow(a.profileId, winId, identity);
+      } else {
+        await startProfileWindow(a.profileId, winId, { ua: "", platform: "", lang: "", device: null });
       }
 
       // 4. Session: this is the regular cookie jar, so the profile's domains are cleared first —
@@ -2042,13 +2254,13 @@
         await settle(tab.id, 15000);
         await quiet(tab.id);
       }
-      // The profile is "active" while its window's first tab lives: closing it hands the proxy back.
-      watchTabLoads(tab.id, function () {}, function () { endProfile(a.profileId); });
+      // The profile is "active" while its window lives: closing the window hands the proxy back.
       await chrome.storage.local.set({ agentActiveProfile: a.profileId });
-      await logProfile(a.profileId, "Launched" + (p.ua ? " — UA: " + p.ua.slice(0, 40) : ""));
+      await logProfile(a.profileId, "Launched" + (p.ua ? " — UA: " + p.ua.slice(0, 40) : "") + (cfg ? " — device: " + cfg.label : ""));
 
       var result = "Launched profile '" + p.name + "' in window " + winId + "\n";
-      result += "UA: " + (p.ua || "browser default").slice(0, 80) + uaNote + "\n";
+      result += "UA: " + (identity ? identity.ua : "browser default").slice(0, 80) + uaNote + "\n";
+      result += "Device: " + (cfg ? engine().describe(cfg) + " — applied to every page in this window" : "User-Agent only") + "\n";
       result += "Proxy: " + proxyLabel(p) + proxyNote + "\n";
       result += "Cookies: " + (imported ? imported + " imported for " + domainList.join(", ") + (replaced ? " (" + replaced + " existing cookies there were replaced)" : "") : "none saved in this profile") + "\n";
       result += "URL: " + url;
@@ -2059,16 +2271,17 @@
     browser_profile_list: async function () {
       var profiles = await loadProfiles();
       var ids = Object.keys(profiles);
-      if (!ids.length) return text("No profiles yet. Use browser_profile_create to make one.");
+      if (!ids.length) return text("No profiles yet. Use browser_profile_create to make one." + deviceTemplatesLine());
       var active = (await chrome.storage.local.get("agentActiveProfile")).agentActiveProfile;
       var lines = ids.map(function (id) {
         var p = profiles[id];
         var line = id + "  " + (p.icon || "👤") + " " + p.name + (id === active ? "  (active)" : "") + "  |  " + (p.label || (p.ua || "browser default").slice(0, 50)) +
+          "  |  device: " + (p.device ? p.deviceLabel || p.device : "UA only") +
           "  |  proxy: " + proxyLabel(p) + "  |  cookies: " + (p.cookieCount || 0) + (p.lastDomain ? " (" + p.lastDomain + ")" : "");
         if (p.agentContext) line += "\n    notes: " + short(p.agentContext).slice(0, 80);
         return line;
       });
-      return text("Profiles (" + ids.length + "):\n" + lines.join("\n"));
+      return text("Profiles (" + ids.length + "):\n" + lines.join("\n") + deviceTemplatesLine());
     },
 
     browser_profile_save: async function (a) {
@@ -2178,7 +2391,7 @@
     Object.keys(args).forEach(function (k) {
       var v = args[k];
       if (name === "browser_upload_file" && k === "data") return;
-      if (SECRET_ARGS[name] && k !== "name" && k !== "domain" && k !== "url" && k !== "deviceType") return;
+      if (SECRET_ARGS[name] && k !== "name" && k !== "domain" && k !== "url" && k !== "deviceType" && k !== "device") return;
       a[k] = v;
     });
     return a;
@@ -2269,5 +2482,7 @@
     /** User-Agent presets for the 👤 panel: the same generator the tools use. */
     uaPreset: uaPreset,
     uaPresetNames: Object.keys(UA_PRESETS),
+    /** The device config the tab the agent works in presents (null = the real one / UA only). */
+    deviceOf: function (tabId) { return deviceOf(tabId === undefined ? currentTabId : tabId); },
   };
 })();

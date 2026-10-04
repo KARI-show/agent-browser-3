@@ -4,6 +4,6 @@
 <body>
 <button id="fb" onclick="fc.textContent = 'Frame clicks: ' + (++window.n)">Frame button</button>
 <span id="fc">Frame clicks: 0</span>
-<script>window.n = 0;</script>
+<script>window.n = 0; window.__earlyThreads = navigator.hardwareConcurrency;</script>
 </body>
 </html>

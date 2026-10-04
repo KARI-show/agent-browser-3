@@ -1,6 +1,8 @@
 // 👤 Profiles panel — the UI over the device profiles the browser_profile_*
 // tools manage (chrome.storage.local "agentProfiles"): identity (User-Agent,
-// platform, language), proxy, saved cookies, start URL and notes.
+// platform, language), device template (fingerprint.js — screen, CPU, memory,
+// GPU, time zone… presented together with the UA), proxy, saved cookies,
+// start URL and notes.
 //
 // Launch, save and delete go through the very same tool implementations the
 // agent uses (window.AgentBrowserTools.run), so there is one code path and one
@@ -14,6 +16,8 @@
   var ICONS = ["👤", "👨", "👩", "🧑", "👨‍💻", "👩‍💻", "🕵️", "🤖", "👽", "🦊", "🐱", "🐶", "🦸", "🧙", "💼", "🎭"];
 
   function tools() { return window.AgentBrowserTools; }
+  function engine() { return window.FingerprintEngine || null; }
+  function deviceLabel(p) { return p.device ? (p.deviceLabel || p.device) : "UA only"; }
   async function load() { return ((await chrome.storage.local.get(STORAGE_KEY))[STORAGE_KEY]) || {}; }
   async function save(p) { await chrome.storage.local.set({ [STORAGE_KEY]: p }); }
   async function getLogs() { return ((await chrome.storage.local.get(LOG_KEY))[LOG_KEY]) || {}; }
@@ -124,7 +128,7 @@
       el("span", { className: "cmd-icon" }, ["➕"]),
       el("div", { className: "cmd-body" }, [
         el("div", { className: "cmd-name" }, ["New profile"]),
-        el("div", { className: "cmd-desc" }, ["Identity (User-Agent, platform, language) + proxy + saved cookies + notes for the agent"]),
+        el("div", { className: "cmd-desc" }, ["Identity (User-Agent, platform, language), device template, proxy, saved cookies and notes for the agent"]),
       ]),
     ]));
 
@@ -141,7 +145,7 @@
         el("button", { className: "prof-btn", title: "Edit", onclick: function (e) { e.stopPropagation(); showEditor(id); } }, ["✏️"]),
         el("button", { className: "prof-btn", title: "Delete", onclick: function (e) { e.stopPropagation(); if (confirm("Delete '" + p.name + "'?")) remove(id); } }, ["🗑"]),
       ]);
-      var meta = "Proxy: " + proxyLabel(p) + " · Cookies: " + (p.cookieCount || 0) + (p.lastDomain ? " (" + p.lastDomain + ")" : "") + " · " + ago(p.updated);
+      var meta = "Device: " + deviceLabel(p) + " · Proxy: " + proxyLabel(p) + " · Cookies: " + (p.cookieCount || 0) + (p.lastDomain ? " (" + p.lastDomain + ")" : "") + " · " + ago(p.updated);
       content.appendChild(el("div", { className: "cmd-item" + (id === active ? " active" : "") }, [
         el("span", { className: "cmd-icon" }, [p.icon || "👤"]),
         el("div", { className: "cmd-body" }, [
@@ -194,10 +198,33 @@
       (tools() ? tools().uaPresetNames : []).map(function (k) { return el("option", { value: k }, [k]); }),
       [el("option", { value: "random" }, ["🎲 Random"])]
     ));
+    // Device template: the hardware the window presents along with the UA. Templates are Windows / macOS
+    // Chrome machines, so a preset for anything else (Firefox, Safari, phones, Linux) means UA only.
+    var E = engine();
+    var templates = E ? E.DEVICES : [];
+    var deviceSel = el("select", null, [el("option", { value: "", selected: !p.device }, ["User-Agent only (no device template)"])].concat(
+      templates.map(function (d) { return el("option", { value: d.id, selected: p.device === d.id }, [E.describe(d)]); })
+    ));
+    function fitsTemplates(uaStr) { return !!E && /Chrome\//.test(uaStr) && !/Mobile|Android/.test(uaStr) && E.templatesFor(E.osFromUa(uaStr)).length > 0; }
     preset.addEventListener("change", function () {
       if (!preset.value || !tools()) return;
       var fp = tools().uaPreset(preset.value === "random" ? null : preset.value);
       ua.value = fp.ua; plat.value = fp.platform; lang.value = fp.lang; presetLabel = fp.label;
+      if (!E) return;
+      if (!fitsTemplates(fp.ua)) { deviceSel.value = ""; return; }
+      var cur = templates.find(function (d) { return d.id === deviceSel.value; });
+      var os = E.osFromUa(fp.ua);
+      if (!cur || cur.os !== os) deviceSel.value = E.templatesFor(os)[0].id; // a template of the preset's OS
+    });
+    deviceSel.addEventListener("change", function () {
+      var d = templates.find(function (t) { return t.id === deviceSel.value; });
+      if (!d) return;
+      // The template's own UA/platform keep the Chrome version, OS and hardware consistent; the user may still edit them.
+      if (!fitsTemplates(ua.value) || E.osFromUa(ua.value) !== d.os) {
+        ua.value = d.ua; plat.value = d.platform;
+        presetLabel = (d.os === "mac" ? "macOS" : "Windows") + " · Chrome " + (/Chrome\/(\d+)/.exec(d.ua) || [0, "?"])[1];
+        preset.value = "";
+      }
     });
     var proxyOn = el("input", { type: "checkbox", checked: !!prox.enabled });
     var proxyType = el("select", null, ["http", "https", "socks5"].map(function (t) { return el("option", { value: t, selected: (prox.type || "http") === t }, [t.toUpperCase()]); }));
@@ -231,6 +258,8 @@
         platform: plat.value.trim(),
         lang: lang.value.trim(),
         label: presetLabel || (ua.value.trim() ? ua.value.trim().slice(0, 50) : "browser default"),
+        device: deviceSel.value,
+        deviceLabel: (templates.find(function (d) { return d.id === deviceSel.value; }) || { label: "" }).label,
         proxy: {
           enabled: proxyOn.checked,
           type: proxyType.value,
@@ -262,6 +291,8 @@
       field("Preset", preset),
       field("User-Agent", ua),
       el("div", { className: "ed-row" }, [field("Platform", plat), field("Language", lang)]),
+      el("div", { className: "ed-section" }, ["🖥 Device template ", el("span", { className: "ed-hint" }, ["(screen, CPU threads, memory, GPU, audio, time zone — one real machine's values, presented with the UA to every page in the profile's window)"])]),
+      field("Device", deviceSel),
       el("div", { className: "ed-section" }, ["🌐 Proxy (applies to the whole browser while the profile's window is open)"]),
       el("label", { className: "ed-label" }, [proxyOn, " Enable proxy"]),
       el("div", { className: "ed-row" }, [field("Type", proxyType), field("Host", proxyHost), field("Port", proxyPort)]),

@@ -5,7 +5,7 @@ chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(consol
 // Watchers run here, on chrome.alarms, with the panel closed: the same tool
 // runtime the panel uses (browserTools.js has no DOM dependency) plus the
 // automation module that knows how to check a page and report a change.
-importScripts("converter.js", "browserTools.js", "automation.js");
+importScripts("fingerprint.js", "converter.js", "browserTools.js", "automation.js");
 
 chrome.alarms.onAlarm.addListener(function (alarm) {
   if (alarm.name.indexOf(AgentAutomation.ALARM_PREFIX) !== 0) return;
@@ -229,6 +229,33 @@ chrome.webRequest.onAuthRequired.addListener(
   { urls: ["<all_urls>"] },
   ["asyncBlocking"]
 );
+
+// ── Device config for a profile window ──────────────────────────────────
+// fp-bridge.js (content script, registered while a device profile window is
+// open) asks which device config the window its frame lives in presents; the
+// panel stored it under the window id when it launched the profile. Frames in
+// other windows get null. The pair of content scripts is unregistered with
+// the last profile window — here too, in case the panel is gone by then.
+var DEVICE_WINDOW_PREFIX = "agentDeviceWindow:"; // one chrome.storage.session key per profile window
+var DEVICE_SCRIPT_IDS = ["agent-device-bridge", "agent-device-config"];
+
+chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  if (!msg || msg.type !== "deviceConfig" || !sender || !sender.tab) return;
+  var key = DEVICE_WINDOW_PREFIX + sender.tab.windowId;
+  chrome.storage.session.get(key).then(function (st) { sendResponse(st[key] || null); }, function () { sendResponse(null); });
+  return true;
+});
+
+chrome.windows.onRemoved.addListener(function (winId) {
+  var key = DEVICE_WINDOW_PREFIX + winId;
+  chrome.storage.session.get(null).then(async function (all) {
+    if (!(key in all)) return;
+    await chrome.storage.session.remove(key);
+    if (Object.keys(all).some(function (k) { return k !== key && k.indexOf(DEVICE_WINDOW_PREFIX) === 0; })) return;
+    var have = await chrome.scripting.getRegisteredContentScripts({ ids: DEVICE_SCRIPT_IDS });
+    if (have.length) await chrome.scripting.unregisterContentScripts({ ids: have.map(function (h) { return h.id; }) });
+  }).catch(function (e) { console.warn("[device] window cleanup:", e); });
+});
 
 // ── Requests from the side panel ────────────────────────────────────────
 // Some browsers (Edge) refuse chrome.windows.create from a side panel, so the

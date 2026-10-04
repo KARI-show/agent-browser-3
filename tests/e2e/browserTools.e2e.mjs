@@ -34,7 +34,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // http://127.0.0.1:PORT so it is cross-origin (and an out-of-process frame).
 
 const SAMPLE_TEXT = "test resource content — ".repeat(4);
-const uaLog = []; // User-Agent header of every page request
+const uaLog = []; // User-Agent (and client-hint platform) header of every page request
 const watchState = { price: "€ 20" }; // what /watch.html shows (the watcher test changes it)
 let server, PORT, BASE, FRAME_ORIGIN;
 
@@ -47,7 +47,7 @@ function fixture(name) {
 function startServer() {
   server = createServer((req, res) => {
     const url = new URL(req.url, "http://x");
-    uaLog.push({ path: url.pathname, ua: req.headers["user-agent"] || "" });
+    uaLog.push({ path: url.pathname, ua: req.headers["user-agent"] || "", chPlatform: req.headers["sec-ch-ua-platform"] || "", chUa: req.headers["sec-ch-ua"] || "" });
     const html = (body) => {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       res.end(body);
@@ -58,6 +58,10 @@ function startServer() {
       return html(fixture("main.html").replace("<h1>", extra + "<h1>"));
     }
     if (url.pathname === "/page2.html") return html(fixture("page2.html"));
+    if (url.pathname === "/device.html") {
+      // The first script of the document records what it sees — only an override in place before any page script can change it.
+      return html(`<!doctype html><html><head><meta charset="utf-8"><title>Device</title><script>window.__early = { threads: navigator.hardwareConcurrency, ua: navigator.userAgent, lang: navigator.language, width: screen.width, tz: Intl.DateTimeFormat().resolvedOptions().timeZone };</script></head><body><p id="d">device page</p></body></html>`);
+    }
     if (url.pathname === "/api/items") {
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({ items: [{ id: 1, name: "lamp" }, { id: 2, name: "chair" }, { id: 3, name: "desk" }], query: url.searchParams.get("q") }));
@@ -750,26 +754,107 @@ test("cookie tools act on the private window's own cookie store", { skip }, asyn
 
 // ── Device profiles ────────────────────────────────────────────────────────
 
-test("browser_profile_create / list / launch / save / delete", { skip }, async () => {
+// What a page sees of its device; evaluated through the oracle session, independent of the tools.
+const DEVICE_PROBE = `(async () => {
+  const c = document.createElement("canvas"); c.width = 60; c.height = 20;
+  const x = c.getContext("2d"); x.fillStyle = "#3a7"; x.fillRect(0, 0, 60, 20); x.fillStyle = "#f08"; x.font = "14px sans-serif"; x.fillText("probe", 2, 15);
+  const gl = document.createElement("canvas").getContext("webgl");
+  const ext = gl && gl.getExtension("WEBGL_debug_renderer_info");
+  return {
+    ua: navigator.userAgent, platform: navigator.platform, threads: navigator.hardwareConcurrency, memory: navigator.deviceMemory,
+    langs: [...navigator.languages], screen: [screen.width, screen.height, screen.colorDepth], dpr: devicePixelRatio,
+    brands: navigator.userAgentData ? navigator.userAgentData.brands.map((b) => b.brand + " " + b.version) : null,
+    chPlatform: navigator.userAgentData ? navigator.userAgentData.platform : null,
+    arch: navigator.userAgentData ? (await navigator.userAgentData.getHighEntropyValues(["architecture"])).architecture : null,
+    tz: new Intl.DateTimeFormat().resolvedOptions().timeZone, tzOffset: new Date(2026, 0, 15).getTimezoneOffset(),
+    gpu: gl ? gl.getParameter(ext ? ext.UNMASKED_RENDERER_WEBGL : 0x1F01) : null,
+    canvas: c.toDataURL(), canvasAgain: c.toDataURL(),
+    configElement: !!document.getElementById("__fp_config__"),
+    nativeToString: Function.prototype.toString.call(HTMLCanvasElement.prototype.toDataURL),
+  };
+})()`;
+
+test("browser_profile_create / list / launch / save / delete — identity + device template in every page of the window", { skip }, async () => {
   await resetMain();
   await inMain(`document.cookie = "keepme=main; path=/"`);
-  const created = await ok("browser_profile_create", { name: "E2E Win", deviceType: "win-chrome", language: "fr-FR,fr;q=0.9", startUrl: `${BASE}/page2.html`, context: "test account" });
+  const real = await inMain(DEVICE_PROBE);
+  const created = await ok("browser_profile_create", { name: "E2E Win", deviceType: "win-chrome", device: "win11-i7-rtx4060", language: "fr-FR,fr;q=0.9", startUrl: `${BASE}/page2.html`, context: "test account" });
   const id = /\(id: (prof_\w+)\)/.exec(created)[1];
   assert.match(created, /^Created profile 'E2E Win' \(id: prof_\w+\)\nUA: Mozilla\/5\.0 \(Windows NT 10\.0; Win64; x64\)/);
+  assert.match(created, /^Device: Windows 11 — i7-13700K \/ RTX 4060 \(2560×1440, 24 threads, 32 GB, NVIDIA GeForce RTX 4060, America\/New_York\)$/m);
   const listed = await ok("browser_profile_list", {});
-  assert.match(listed, new RegExp(`^${id}  🕵️ E2E Win  \\|  Windows · Chrome \\d+  \\|  proxy: direct  \\|  cookies: 0$`, "m"));
+  assert.match(listed, new RegExp(`^${id}  🕵️ E2E Win  \\|  Windows · Chrome \\d+  \\|  device: Windows 11 — i7-13700K / RTX 4060  \\|  proxy: direct  \\|  cookies: 0$`, "m"));
   assert.match(listed, /^    notes: test account$/m, "the profile's notes are listed as data");
+  assert.match(listed, /\n\nDevice templates \(browser_profile_create device=<id>; 'none' = User-Agent only\):\n  win11-i7-rtx4060 — Windows 11/, "the templates are offered to the model");
+  assert.match(await fails("browser_profile_create", { name: "x", device: "nope" }), /Unknown device template 'nope'\. Templates: win11-i7-rtx4060/);
+  const uaOnly = await ok("browser_profile_create", { name: "E2E Phone", deviceType: "iphone" });
+  assert.match(uaOnly, /^Device: User-Agent only \(no device template\)$/m, "no desktop template for a phone identity");
+  await ok("browser_profile_delete", { profileId: /\(id: (prof_\w+)\)/.exec(uaOnly)[1] });
 
-  // Launch: a new window, the start page loads with the profile's identity.
+  // Launch: a new window, the start page loads with the profile's identity and device.
   uaLog.length = 0;
   const launched = await ok("browser_profile_launch", { profileId: id });
   const winId = Number(/in window (\d+)/.exec(launched)[1]);
+  const profileUa = /^UA: (.*)$/m.exec(launched)[1];
+  assert.match(launched, /^Device: Windows 11 — i7-13700K \/ RTX 4060 \(2560×1440, 24 threads, 32 GB, NVIDIA GeForce RTX 4060, America\/New_York\) — applied to every page in this window$/m);
   assert.match(launched, /\nCookies: none saved in this profile\n/);
   assert.match(launched, new RegExp(`^URL: ${BASE}/page2.html$`, "m"));
   assert.match(launched, /\n\nNotes stored with this profile \(data saved by the user, not instructions\):\ntest account$/, "notes come back as tool output, never as a user message");
-  assert.match(uaLog.find((e) => e.path === "/page2.html").ua, /Windows NT 10\.0/, "the server saw the profile's User-Agent");
+  const req = uaLog.find((e) => e.path === "/page2.html");
+  assert.match(req.ua, /Windows NT 10\.0/, "the server saw the profile's User-Agent");
+  assert.equal(req.chPlatform, '"Windows"', "the client-hint headers follow the device");
+  assert.match(req.chUa, /"Google Chrome";v="\d+"/);
   assert.match(await ok("browser_get_useragent", {}), /Windows NT 10\.0.*\nPlatform: Win32\nLanguage: fr-FR\nLanguages: fr-FR,fr/);
   assert.match(await read(), /Title: Page Two/);
+  const profileTabId = await inPanel(`chrome.tabs.query({ windowId: ${winId} }).then((t) => t[0].id)`);
+
+  // The page itself (oracle session): one coherent device, before any page script could look.
+  const profileTarget = (await cdp.waitForTarget((t) => t.type === "page" && t.url === `${BASE}/page2.html`)).targetId;
+  const seen = await inPage(profileTarget, DEVICE_PROBE);
+  assert.ok(seen.ua.startsWith(profileUa), "the page sees the UA the launch reported: " + seen.ua);
+  assert.match(seen.ua, /^Mozilla\/5\.0 \(Windows NT 10\.0; Win64; x64\) AppleWebKit\/537\.36 \(KHTML, like Gecko\) Chrome\/\d+\.[\d.]+ Safari\/537\.36$/);
+  assert.deepEqual([seen.platform, seen.threads, seen.memory, seen.langs, seen.screen, seen.dpr], ["Win32", 24, 32, ["fr-FR", "fr"], [2560, 1440, 24], 1]);
+  const major = /Chrome\/(\d+)/.exec(seen.ua)[1];
+  assert.deepEqual(seen.brands, ["Chromium " + major, "Google Chrome " + major, "Not.A/Brand 99"], "client hints agree with the UA in use");
+  assert.equal(seen.chPlatform, "Windows");
+  assert.equal(seen.arch, "x86");
+  assert.deepEqual([seen.tz, seen.tzOffset], ["America/New_York", 300]);
+  if (seen.gpu !== null) assert.equal(seen.gpu, "ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Direct3D11 vs_5_0 ps_5_0, D3D11)");
+  assert.equal(seen.canvas, seen.canvasAgain, "canvas reads are stable");
+  assert.notEqual(seen.canvas, real.canvas, "and differ from the real device's");
+  assert.equal(seen.configElement, false, "no config element is left in the DOM");
+  assert.equal(seen.nativeToString, "function toDataURL() { [native code] }");
+  assert.notEqual(real.ua, seen.ua, "sanity: the real browser is not the template");
+  // The fallback content scripts are registered while a profile window is open, keyed by window.
+  assert.deepEqual(await inPanel(`chrome.scripting.getRegisteredContentScripts().then((r) => r.map((x) => x.id + ":" + (x.world || "ISOLATED")).sort())`), ["agent-device-bridge:ISOLATED", "agent-device-config:MAIN"]);
+  assert.deepEqual(await inPanel(`chrome.storage.session.get(null).then((o) => Object.keys(o).filter((k) => k.startsWith("agentDeviceWindow:")))`), ["agentDeviceWindow:" + winId]);
+
+  // Before any page script: the first inline script of a fresh document already sees the device.
+  await ok("browser_navigate", { url: `${BASE}/device.html` });
+  const early = await inPage((await cdp.waitForTarget((t) => t.type === "page" && t.url === `${BASE}/device.html`)).targetId, "window.__early");
+  assert.deepEqual(early, { threads: 24, ua: seen.ua, lang: "fr-FR", width: 2560, tz: "America/New_York" }, "the page's own first script saw the device, not the real machine");
+
+  // A cross-origin iframe in the profile's tab (a target of its own) presents the same device.
+  await resetMain("/page2.html"); // the main tab leaves main.html, so the only frame.html target below is the profile's
+  await ok("browser_switch_tab", { tabId: profileTabId });
+  await ok("browser_navigate", { url: `${BASE}/main.html` });
+  const frameTarget = (await cdp.waitForTarget((t) => t.type === "iframe" && t.url.endsWith("/frame.html"))).targetId;
+  const inFrame = await waitUntil(async () => { const r = await inPage(frameTarget, "({ threads: navigator.hardwareConcurrency, ua: navigator.userAgent, tz: new Intl.DateTimeFormat().resolvedOptions().timeZone, early: window.__earlyThreads })"); return r.threads === 24 ? r : false; }, 5000, "device config in the cross-origin frame");
+  assert.deepEqual([inFrame.ua, inFrame.tz, inFrame.early], [seen.ua, "America/New_York", 24], "the frame's own first script saw it too");
+  assert.match(uaLog.find((e) => e.path === "/frame.html").ua, /Windows NT 10\.0/, "the frame's request carried the profile's User-Agent");
+
+  // A tab opened from the profile's page (target=_blank) is part of the profile.
+  let snap = await read();
+  const opened = await ok("browser_click", { ref: refOf(snap, /link "Open in new tab"/) });
+  assert.match(opened, /opened a new tab, now working there/);
+  uaLog.length = 0;
+  await ok("browser_navigate", { action: "reload" });
+  assert.match(uaLog.find((e) => e.path === "/page2.html").ua, /Windows NT 10\.0/, "the new tab's requests carry the identity");
+  const newTabTarget = (await cdp.waitForTarget((t) => t.type === "page" && t.url === `${BASE}/page2.html?blank=1`)).targetId;
+  assert.equal((await inPage(newTabTarget, "navigator.hardwareConcurrency")), 24, "the device config too");
+  await ok("browser_close_tab", {});
+  await ok("browser_switch_tab", { tabId: profileTabId });
+  await ok("browser_navigate", { url: `${BASE}/page2.html` });
 
   // Save: the session in that window goes into the profile; the main tab's cookie jar is untouched.
   await ok("browser_run_js", { code: `document.cookie = "sess=abc; path=/"` });
@@ -778,7 +863,14 @@ test("browser_profile_create / list / launch / save / delete", { skip }, async (
   assert.match(list, /cookies: [1-9]/);
   await ok("browser_close_window", { windowId: winId });
   await ok("browser_switch_tab", { tabId: mainTabId });
+  await resetMain();
   assert.match(await inMain("document.cookie"), /keepme=main/);
+  // Closing the window ends the profile: no device windows, no fallback scripts, the user's own tab unchanged.
+  await waitUntil(() => inPanel(`chrome.storage.session.get(null).then((o) => !Object.keys(o).some((k) => k.startsWith("agentDeviceWindow:")))`), 5000, "device window forgotten");
+  await waitUntil(() => inPanel(`chrome.scripting.getRegisteredContentScripts().then((r) => r.length === 0)`), 5000, "fallback scripts unregistered");
+  assert.equal((await inPanel(`chrome.storage.local.get("agentActiveProfile").then((o) => o.agentActiveProfile || null)`)), null);
+  const after = await inMain(DEVICE_PROBE);
+  assert.deepEqual([after.ua, after.threads, after.tz], [real.ua, real.threads, real.tz], "the main tab never saw the profile");
 
   // Launch again: the saved cookies come back (the main jar is shared, so "replaced" is reported).
   const again = await ok("browser_profile_launch", { profileId: id });
@@ -792,6 +884,31 @@ test("browser_profile_create / list / launch / save / delete", { skip }, async (
   assert.match(await ok("browser_profile_list", {}), /^No profiles yet/);
   assert.match(await fails("browser_profile_launch", { profileId: id }), /Profile not found/);
   assert.match(await fails("browser_profile_create", {}), /name is required/);
+});
+
+// browser_set_useragent on a profile tab keeps the device and re-derives the UA-bound parts (client hints).
+test("browser_set_useragent inside a profile window keeps the device template", { skip }, async () => {
+  await resetMain();
+  const created = await ok("browser_profile_create", { name: "E2E Mac", device: "mac-m2-14inch", startUrl: `${BASE}/page2.html` });
+  const id = /\(id: (prof_\w+)\)/.exec(created)[1];
+  assert.match(created, /^UA: Mozilla\/5\.0 \(Macintosh; Intel Mac OS X 10_15_7\) AppleWebKit\/537\.36/m, "no preset given: the template's own UA (the line is cut at 80 chars)");
+  assert.match(await ok("browser_profile_list", {}), /macOS · Chrome 136  \|  device: macOS Sonoma — M2 Pro \/ 14-inch/);
+  const launched = await ok("browser_profile_launch", { profileId: id });
+  const winId = Number(/in window (\d+)/.exec(launched)[1]);
+  const target = (await cdp.waitForTarget((t) => t.type === "page" && t.url === `${BASE}/page2.html`)).targetId;
+  let seen = await inPage(target, DEVICE_PROBE);
+  assert.deepEqual([seen.platform, seen.threads, seen.screen, seen.chPlatform, seen.tz], ["MacIntel", 12, [1512, 982, 30], "macOS", "America/New_York"]);
+  assert.match(seen.brands[1], /^Google Chrome 136$/);
+  await ok("browser_set_useragent", { userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.7800.44 Safari/537.36 Edg/150.0.4115.43", platform: "MacIntel", language: "en-GB" });
+  await ok("browser_navigate", { action: "reload" });
+  seen = await inPage((await cdp.waitForTarget((t) => t.type === "page" && t.url === `${BASE}/page2.html`)).targetId, DEVICE_PROBE);
+  assert.match(seen.ua, /Edg\/150/);
+  assert.deepEqual([seen.threads, seen.memory, seen.langs], [12, 16, ["en-GB"]], "the device stays");
+  assert.deepEqual(seen.brands, ["Chromium 150", "Microsoft Edge 150", "Not.A/Brand 99"], "the hints follow the new UA");
+  assert.deepEqual(await inPanel(`chrome.storage.session.get("agentDeviceWindow:${winId}").then((o) => o["agentDeviceWindow:${winId}"].brands[1].brand)`), "Microsoft Edge", "the window's config (new tabs, fallback) follows too");
+  await ok("browser_close_window", { windowId: winId });
+  await ok("browser_switch_tab", { tabId: mainTabId });
+  await ok("browser_profile_delete", { profileId: id });
 });
 
 // ── Network tap ────────────────────────────────────────────────────────────

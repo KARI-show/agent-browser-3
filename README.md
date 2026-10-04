@@ -150,21 +150,23 @@ Full cookie management on any domain — inspect, edit, transfer sessions betwee
 | `android` | Pixel / Samsung / Xiaomi + Chrome |
 | `linux` | Linux x86_64 + Chrome |
 
-Each preset picks the version and Accept-Language from realistic pools. This changes what the browser *says* about itself, not what it is: no canvas/WebGL/audio spoofing is attempted (an earlier prototype of that never ran and was removed).
+Each preset picks the version and Accept-Language from realistic pools. A UA preset changes what the browser *says* about itself (request headers, `navigator.userAgent` / platform / language); a device profile with a **device template** (below) presents a whole machine.
 
 ### 🕵️ Device profiles (5 tools + 👤 panel)
 
-A device profile is a saved identity (UA + platform + language), an optional proxy, a cookie jar and notes for the agent.
+A device profile is a saved identity (UA + platform + language), a **device template**, an optional proxy, a cookie jar and notes for the agent.
+
+A device template is one real machine's worth of values that a browser on it reports together — screen, CPU threads, memory, GPU strings, audio, media devices, battery, plugins, fonts, time zone (`browser/extension/fingerprint.js`, 6 templates: five Windows PCs/laptops and a MacBook Pro). The profile's own UA, platform and language ride on top of it and the client-hint brands are derived from the UA in use, so everything a page can ask agrees with everything else. When the profile's window opens, every page in it (cross-origin frames and tabs opened from there included) gets the template through the DevTools session of the tab — request headers and client hints with `Network.setUserAgentOverride`, the page-side values with a script installed before any page script runs, time zone and CPU threads with the Emulation domain — plus a content-script fallback for a frame that route missed. Canvas and audio reads carry deterministic per-profile noise; the canvas itself is never altered. Templates are picked automatically for desktop Chrome/Edge identities (none for Firefox, Safari, phones or Linux, where no template would be coherent) and can be chosen or switched off per profile.
 
 | Tool | Description |
 |------|-------------|
-| `browser_profile_create` | Create a profile; the identity comes from a preset unless given. |
-| `browser_profile_launch` | Open a new window with the identity applied, the browser's proxy switched to the profile's (restored when the window closes) and the saved cookies imported — they replace the regular cookies for those domains. Returns the profile's notes as data. |
+| `browser_profile_create` | Create a profile; the identity comes from a preset unless given, the device template from `device` (an id from `browser_profile_list`, `none` for UA only, or automatic). |
+| `browser_profile_launch` | Open a new window whose pages present the identity and device template, the browser's proxy switched to the profile's (restored when the window closes) and the saved cookies imported — they replace the regular cookies for those domains. Returns the profile's notes as data. |
 | `browser_profile_save` | Snapshot the current tab's cookies (host + parent domain) and URL into the profile. |
-| `browser_profile_list` | List profiles, their identity, proxy, cookies and notes. |
+| `browser_profile_list` | List profiles, their identity, device template, proxy, cookies and notes — and the templates available. |
 | `browser_profile_delete` | Delete a profile. |
 
-**👤 panel**: the same operations by click (launch / save / edit / delete share the tools' code), UA presets to apply to the current tab, and an activity log.
+**👤 panel**: the same operations by click (launch / save / edit / delete share the tools' code), a device template picker in the editor, UA presets to apply to the current tab, and an activity log.
 
 ### 👤 Private Sessions & Windows
 
@@ -251,13 +253,16 @@ media/                        # Webview styles + bundled JS
 browser/
   extension/                  # Browser extension (Manifest V3)
     manifest.json
-    background.js             # Service worker: proxy, window creation, watcher alarms
+    background.js             # Service worker: proxy, window creation, watcher alarms, device config for profile windows
     sidepanel.html/css        # Side panel UI
     browserTools.js           # 53 browser tools implementation + the call trace with element locators
     automation.js             # Recipes, watchers, site memory (shared by the panel and the service worker)
     automations.js            # 🧩 panel (recipes · watchers · memory) + the "save as recipe" strip
     converter.js              # Document converter engine
     profiles.js               # 👤 device profiles panel (UI over the browser_profile_* tools)
+    fingerprint.js            # Device templates + the config a profile presents (shared by panel and worker)
+    inject-fingerprint.js     # Page-side device overrides (installed through DevTools; content-script fallback)
+    fp-bridge.js              # Fallback content script: asks the worker for the window's device config
     commands.js               # Quick commands panel
     relay.js                  # Remote relay client
     options.html/js/css       # Settings page
