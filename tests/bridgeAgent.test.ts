@@ -9,11 +9,15 @@ import { ASK_TOOL, Mode, ToolDef, ToolOutput, TurnCallbacks } from "../browser/s
 // ---- a mock trial gateway: scripted SSE; a tool_call waits for its POSTed result, like the real one ----
 
 type Ev = { event: string; data: Record<string, unknown> } | "drop";
+/** An error answer to the POST before the scripted stream (a busy gateway). */
+type Failure = { status: number; headers?: Record<string, string>; message?: string };
 
-async function mockBridge(script: Ev[]) {
+async function mockBridge(script: Ev[], failures: Failure[] = []) {
   const posted: { key: unknown; session_id: string; results: { id: string; content: unknown; is_error: boolean }[] }[] = [];
   const waiting = new Map<string, () => void>();
   const sockets = new Set<net.Socket>();
+  const pending = [...failures];
+  let hits = 0;
   const server = http.createServer((req, res) => {
     let body = "";
     req.on("data", (d) => (body += d));
@@ -24,6 +28,12 @@ async function mockBridge(script: Ev[]) {
         for (const r of b.results) waiting.get(r.id)?.();
         res.writeHead(200, { "content-type": "application/json" });
         return void res.end('{"ok":true}');
+      }
+      hits++;
+      const f = pending.shift();
+      if (f) {
+        res.writeHead(f.status, { "content-type": "application/json", ...f.headers });
+        return void res.end(JSON.stringify({ type: "error", error: { type: f.status === 429 ? "rate_limit_error" : "api_error", message: f.message ?? `mock ${f.status}` } }));
       }
       res.writeHead(200, { "content-type": "text/event-stream" });
       for (const e of script) {
@@ -42,6 +52,9 @@ async function mockBridge(script: Ev[]) {
   return {
     url: `http://127.0.0.1:${(server.address() as net.AddressInfo).port}`,
     posted,
+    get hits() {
+      return hits;
+    },
     close: () => {
       for (const s of sockets) s.destroy();
       server.close();
@@ -187,5 +200,77 @@ test("trial bridge: Stop during a slow tool returns at once as stopped; the tool
     assert.equal(gw.posted.length, 1, "the gateway's waiting loop is still told");
   } finally {
     gw.close();
+  }
+});
+
+test("trial bridge: a busy gateway (5xx/429) is tried again after its Retry-After, and the user is told", async () => {
+  const gw = await mockBridge(
+    [{ event: "session", data: { id: "bs_5" } }, { event: "text", data: { text: "Done." } }, { event: "done", data: { stop_reason: "end_turn" } }],
+    [{ status: 503, headers: { "retry-after": "0" }, message: "The free trial is busy right now." }, { status: 429, headers: { "retry-after": "0" } }]
+  );
+  try {
+    const messages: Anthropic.MessageParam[] = [{ role: "user", content: "x" }];
+    const { cb, log } = callbacks();
+    const r = await bridgeTurn(gw, messages, cb);
+    assert.equal(r.stopReason, "end_turn");
+    assert.equal(gw.hits, 3);
+    assert.deepEqual(log.filter((l) => l.startsWith("info:")), ["info:⟳ The free trial is busy right now. Retrying in 0 s…", "info:⟳ mock 429 Retrying in 0 s…"]);
+    assert.deepEqual(messages[1], { role: "assistant", content: [{ type: "text", text: "Done." }] });
+  } finally {
+    gw.close();
+  }
+});
+
+test("trial bridge: three attempts at most, no retry when the gateway says so or wants us back much later", async () => {
+  const cases: Array<[Failure[], number, (e: unknown) => boolean]> = [
+    [Array(3).fill({ status: 503, headers: { "retry-after": "0" } }), 3, (e) => e instanceof Anthropic.InternalServerError],
+    [[{ status: 429, headers: { "retry-after": "3600" }, message: "Today's free-trial allowance is used up." }], 1, (e) => e instanceof Anthropic.RateLimitError && /allowance/.test(String((e as Error).message))],
+    [[{ status: 503, headers: { "x-should-retry": "false" } }], 1, (e) => e instanceof Anthropic.InternalServerError],
+    [[{ status: 400, message: "messages: bad" }], 1, (e) => e instanceof Anthropic.BadRequestError],
+  ];
+  for (const [failures, hits, check] of cases) {
+    const gw = await mockBridge([{ event: "done", data: { stop_reason: "end_turn" } }], failures);
+    try {
+      await assert.rejects(bridgeTurn(gw, [{ role: "user", content: "x" }], callbacks().cb), check);
+      assert.equal(gw.hits, hits, JSON.stringify(failures));
+    } finally {
+      gw.close();
+    }
+  }
+});
+
+test("trial bridge: Stop during the retry wait ends the turn at once, with no further request", async () => {
+  const gw = await mockBridge([{ event: "done", data: { stop_reason: "end_turn" } }], [{ status: 502 }]);
+  try {
+    const ctrl = new AbortController();
+    const { cb, log } = callbacks();
+    const messages: Anthropic.MessageParam[] = [{ role: "user", content: "x" }];
+    const run = bridgeTurn(gw, messages, cb, { signal: ctrl.signal });
+    while (!log.some((l) => l.startsWith("info:"))) await tick(10);
+    assert.match(log[0], /Retrying in 1 s/, "no Retry-After: the default backoff");
+    ctrl.abort();
+    const r = await run;
+    assert.equal(r.aborted, true);
+    await tick(100);
+    assert.equal(gw.hits, 1);
+    assert.equal(messages.length, 1);
+  } finally {
+    gw.close();
+  }
+});
+
+test("trial bridge: a tool call without an id or name is a protocol error — nothing runs, the turn fails", async () => {
+  for (const call of [{ id: "", name: "browser_click", input: {} }, { id: "tc1", input: {} }]) {
+    const gw = await mockBridge([{ event: "session", data: { id: "bs_6" } }, { event: "text", data: { text: "Let me" } }, { event: "tool_call", data: call }, { event: "done", data: { stop_reason: "end_turn" } }]);
+    try {
+      const ran: string[] = [];
+      const messages: Anthropic.MessageParam[] = [{ role: "user", content: "x" }];
+      await assert.rejects(bridgeTurn(gw, messages, callbacks().cb, { runTool: async (name) => (ran.push(name), okText("clicked")) }), /without an id or name/);
+      assert.deepEqual(ran, []);
+      assert.deepEqual(messages.slice(1), [{ role: "assistant", content: [{ type: "text", text: "Let me" }] }], "the text shown stays; no half tool_use in the history");
+      assert.equal(gw.posted.length, 0);
+    } finally {
+      gw.close();
+    }
   }
 });

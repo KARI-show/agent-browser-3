@@ -30,39 +30,73 @@ export interface BridgeTurnOptions {
   maxTokens?: number;
 }
 
+// Statuses worth another try (busy or hiccuping gateway), how often, and how long Retry-After may ask us to wait before
+// it is really a "not now" (the daily allowance resets at midnight, not in a minute).
+const RETRY_STATUSES = new Set([429, 500, 502, 503, 504, 529]);
+const MAX_ATTEMPTS = 3;
+const MAX_RETRY_WAIT_MS = 30_000;
+
+/** How long to wait before POSTing again, or null when another attempt isn't worth it. */
+function retryDelayMs(res: Response, attempt: number): number | null {
+  if (attempt >= MAX_ATTEMPTS - 1 || !RETRY_STATUSES.has(res.status) || res.headers.get("x-should-retry") === "false") return null;
+  const h = res.headers.get("retry-after")?.trim();
+  const secs = !h ? NaN : /^\d+$/.test(h) ? Number(h) : (Date.parse(h) - Date.now()) / 1000;
+  const ms = Number.isFinite(secs) ? Math.max(0, secs) * 1000 : 1000 * 2 ** attempt;
+  return ms <= MAX_RETRY_WAIT_MS ? ms : null;
+}
+
+/** Resolves true after `ms`, or false at once when the user presses Stop meanwhile. */
+function wait(ms: number, signal: AbortSignal): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve(false);
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve(true);
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export async function runTurnBridge(o: BridgeTurnOptions): Promise<TurnResult> {
   const { cb, signal } = o;
   const aborted: TurnResult = { stopReason: null, aborted: true };
+  const body = JSON.stringify({
+    model: o.model,
+    max_tokens: o.maxTokens || 8192,
+    system: o.system,
+    tools: o.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.input_schema })),
+    messages: o.messages,
+    stream: true,
+  });
 
   let res: Response;
-  try {
-    res = await fetch(`${o.baseUrl}/v1/agent`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-api-key": o.apiKey },
-      body: JSON.stringify({
-        model: o.model,
-        max_tokens: o.maxTokens || 8192,
-        system: o.system,
-        tools: o.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.input_schema })),
-        messages: o.messages,
-        stream: true,
-      }),
-      signal,
-    });
-  } catch (e) {
-    if (signal.aborted) return aborted;
-    throw new Anthropic.APIConnectionError({ cause: e as Error });
-  }
-
-  if (!res.ok) {
-    // A typed error, like the SDK throws: describeError() then spots a rejected trial token (401/403) so it is
-    // forgotten and re-registered, and localHost drops a message the gateway refused (400/413) from the history.
-    const text = await res.text().catch(() => "");
-    let body: { error?: { message?: string } } | undefined;
+  for (let attempt = 0; ; attempt++) {
     try {
-      body = JSON.parse(text);
+      res = await fetch(`${o.baseUrl}/v1/agent`, { method: "POST", headers: { "content-type": "application/json", "x-api-key": o.apiKey }, body, signal });
+    } catch (e) {
+      if (signal.aborted) return aborted;
+      throw new Anthropic.APIConnectionError({ cause: e as Error });
+    }
+    if (res.ok) break;
+
+    const text = await res.text().catch(() => "");
+    let err: { error?: { message?: string } } | undefined;
+    try {
+      err = JSON.parse(text);
     } catch {}
-    throw Anthropic.APIError.generate(res.status, body, body?.error?.message || text.slice(0, 300) || undefined, res.headers);
+    const message = err?.error?.message || text.slice(0, 300) || undefined;
+    const delay = retryDelayMs(res, attempt);
+    if (delay === null) {
+      // A typed error, like the SDK throws: describeError() then spots a rejected trial token (401/403) so it is
+      // forgotten and re-registered, and localHost drops a message the gateway refused (400/413) from the history.
+      throw Anthropic.APIError.generate(res.status, err, message, res.headers);
+    }
+    cb.info(`⟳ ${message || `The trial service answered ${res.status}.`} Retrying in ${Math.ceil(delay / 1000)} s…`);
+    if (!(await wait(delay, signal))) return aborted;
   }
   if (!res.body) throw new Anthropic.APIConnectionError({ message: "The trial service sent an empty reply." });
 
@@ -142,8 +176,11 @@ export async function runTurnBridge(o: BridgeTurnOptions): Promise<TurnResult> {
             break;
           case "tool_call": {
             flushText();
-            const id = String(ev.id || "");
-            const name = String(ev.name || "");
+            const id = typeof ev.id === "string" ? ev.id : "";
+            const name = typeof ev.name === "string" ? ev.name : "";
+            // Without an id the result can't be matched to the call (here or on the server); without a name there
+            // is nothing to run. That is the gateway breaking its own protocol, not a tool error to report back.
+            if (!id || !name) throw new Error("The trial service sent a tool call without an id or name — the reply was abandoned.");
             const input = ev.input ?? {};
             turn.push({ type: "tool_use", id, name, input });
             const r = await callTool(o, id, name, input);

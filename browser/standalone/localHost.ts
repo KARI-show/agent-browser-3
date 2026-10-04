@@ -78,6 +78,10 @@ const MAX_INLINE_TEXT_CHARS = 100_000;
 const TOOL_RESULT_CLIP = 4000;
 const SAVE_DEBOUNCE_MS = 800;
 const FLUSH_MS = 40;
+// A prompt waits this long at most for the model list, and a failed or empty list isn't asked for again for a while.
+const MODELS_WAIT_MS = 4000;
+const MODELS_RETRY_MS = 5 * 60_000;
+const COMPACT_MARK = "🗜 Context compacted";
 
 interface Attachment {
   name: string;
@@ -118,12 +122,34 @@ export function stripThinking(messages: Anthropic.MessageParam[]): void {
   }
 }
 
+/**
+ * The API refused the request's content (an oversized image, a bad block) rather than the key, model, billing or
+ * context size: only then is the just-sent message at fault and worth taking back out of the history.
+ */
+export function rejectedContent(e: unknown): boolean {
+  if (!(e instanceof Anthropic.APIError)) return false;
+  if (e.status === 413 || e.status === 422) return true;
+  const body = (e.error as { error?: { type?: string; message?: string } } | undefined)?.error;
+  return e.status === 400 && body?.type === "invalid_request_error" && /^messages\b/.test(body.message ?? "");
+}
+
+/** A prompt from the user, as opposed to the tool results a turn hands back under the same role. */
+function isPrompt(m: Anthropic.MessageParam): boolean {
+  return m.role === "user" && !(Array.isArray(m.content) && m.content.some((b) => b.type === "tool_result"));
+}
+
+/** The user's words without the "📎 files" label the transcript shows under them. */
+function promptText(m: ConvMsg): string {
+  return m.text.split("\n📎")[0];
+}
+
 export class LocalHost {
   private store: ConvStore;
   private current?: StoredConversation;
   private runs = new Map<string, AbortController>();
   private approvals = new Map<string, { resolve: (ok: boolean) => void; convId: string; card: unknown }>();
   private questions = new Map<string, { resolve: (answer: string) => void; convId: string; card: unknown }>();
+  private confirms = new Map<string, { resolve: (value: string | undefined) => void; convId: string; card: unknown }>();
   /** Chats being started (between the click and the run being registered): closes the async gap a double-send slips through. */
   private starting = new Set<string>();
   /** Chats deleted while running — their final save must not bring them back. */
@@ -134,6 +160,9 @@ export class LocalHost {
   private running = new Map<string, StoredConversation>();
   private attachments = new Map<string, Attachment>();
   private models: Anthropic.ModelInfo[] = [];
+  private modelsPending?: Promise<void>;
+  /** When the Models API last failed or listed nothing; a gateway without /v1/models isn't asked again on every prompt. */
+  private modelsFailedAt = 0;
   private prefs: { model: string; mode: Mode; activeId?: string } = { model: DEFAULT_MODEL, mode: "agent" };
   private seq = 0;
   private ready: Promise<void>;
@@ -181,8 +210,21 @@ export class LocalHost {
         return this.onPrompt(String(msg.text ?? ""), Array.isArray(msg.attachments) ? msg.attachments.map(String) : []);
       case "compact":
         return this.compact();
+      case "regenerate":
+        return this.regenerate();
+      case "rewind":
+        return Number.isInteger(msg.userIndex) && msg.userIndex >= 0 ? this.rewind(msg.userIndex) : undefined;
       case "interrupt":
         return this.interrupt();
+      case "confirmResponse": {
+        const p = this.confirms.get(msg.id);
+        if (p) {
+          this.confirms.delete(msg.id);
+          p.resolve(typeof msg.value === "string" ? msg.value : undefined);
+          this.post({ type: "confirmResolved", id: msg.id });
+        }
+        return;
+      }
       case "approvalResponse": {
         const p = this.approvals.get(msg.id);
         if (p) {
@@ -257,6 +299,7 @@ export class LocalHost {
       case "login":
         return this.d.openSettings();
       case "recheckAuth":
+        this.modelsFailedAt = 0; // the settings may have changed: the next prompt asks the endpoint again
         return this.postAuth();
       // Editor-only messages (diffs, git, remote…) have no controls in the panel.
     }
@@ -305,7 +348,7 @@ export class LocalHost {
     this.post({ type: "slashCommands", items: ["compact"] });
     this.postConversations();
     if (this.current) {
-      this.post({ type: "loadConversation", convId: this.current.id, title: this.current.title, messages: this.current.messages });
+      this.post(this.loadMsg(this.current));
     }
     this.post({ type: "contextUsage", info: this.current?.context ?? null });
     for (const id of this.runs.keys()) this.post({ type: "runState", convId: id, running: true });
@@ -325,6 +368,12 @@ export class LocalHost {
     this.post({ type: "model", model: this.current?.model || this.prefs.model, options: this.modelOptions() });
   }
 
+  /** The transcript for the panel — a snapshot: the panel renders it over several frames while a run may still be appending to it. */
+  private loadMsg(conv: StoredConversation, draft?: string) {
+    // convId lets the relay mirror route it: it's posted before "conversations" updates activeId.
+    return { type: "loadConversation", convId: conv.id, title: conv.title, messages: conv.messages.slice(), draft };
+  }
+
   private postMode() {
     this.post({ type: "mode", mode: this.current?.mode || this.prefs.mode, options: MODE_OPTIONS });
   }
@@ -338,7 +387,14 @@ export class LocalHost {
     void this.savePrefs();
   }
 
-  private async refreshModels() {
+  /** One Models API request at a time, and none for a while after one failed or came back empty. */
+  private refreshModels(): Promise<void> {
+    if (this.modelsPending) return this.modelsPending;
+    if (this.modelsFailedAt && Date.now() - this.modelsFailedAt < MODELS_RETRY_MS) return Promise.resolve();
+    return (this.modelsPending = this.fetchModels().finally(() => (this.modelsPending = undefined)));
+  }
+
+  private async fetchModels() {
     try {
       const { s: st } = await this.safeSettings();
       if (!st?.apiKey) return;
@@ -348,6 +404,7 @@ export class LocalHost {
         if (/^claude-/.test(m.id)) found.push(m);
         if (found.length >= 40) break;
       }
+      this.modelsFailedAt = found.length ? 0 : Date.now();
       if (found.length) {
         this.models = found;
         // The endpoint may offer fewer models than the default (the free trial does): move to one it has.
@@ -357,9 +414,17 @@ export class LocalHost {
         this.postModel();
       }
     } catch (e) {
+      this.modelsFailedAt = Date.now();
       // Not fatal: the fallback list works. A rejected key is reported on the first run.
       if (e instanceof Anthropic.AuthenticationError) this.post({ type: "auth", ok: false, text: "⚠ The API key was rejected. Check it in the settings:", loginLabel: "Open settings", recheckLabel: "I've fixed it" });
     }
+  }
+
+  /** Before a run: the model list, unless it is known, was recently found missing, or takes too long (then it counts as missing). */
+  private async awaitModels() {
+    if (this.models.length) return;
+    const done = await Promise.race([this.refreshModels().then(() => true), new Promise<boolean>((r) => setTimeout(() => r(false), MODELS_WAIT_MS))]);
+    if (!done) this.modelsFailedAt = Date.now();
   }
 
   /** A model the current endpoint actually offers (only known once its list has loaded). */
@@ -381,8 +446,7 @@ export class LocalHost {
     if (!conv) return;
     this.current = conv;
     this.settleStaleTools(conv);
-    // convId lets the relay mirror route it: it's posted before "conversations" updates activeId.
-    this.post({ type: "loadConversation", convId: conv.id, title: conv.title, messages: conv.messages });
+    this.post(this.loadMsg(conv));
     this.postModel();
     this.postMode();
     this.post({ type: "contextUsage", info: conv.context ?? null });
@@ -394,6 +458,7 @@ export class LocalHost {
       for (const p of this.approvals.values()) if (p.convId === id) this.post(p.card);
       for (const p of this.questions.values()) if (p.convId === id) this.post(p.card);
     }
+    for (const p of this.confirms.values()) if (p.convId === id) this.post(p.card);
   }
 
   // ---- attachments ---------------------------------------------------------
@@ -463,6 +528,23 @@ export class LocalHost {
         this.post({ type: "questionResolved", id, answer: "(cancelled)" });
       }
     }
+    for (const [id, p] of this.confirms) {
+      if (p.convId === convId) {
+        this.confirms.delete(id);
+        p.resolve(undefined);
+        this.post({ type: "confirmResolved", id });
+      }
+    }
+  }
+
+  /** Ask the user to choose, in the chat itself (the shared UI's confirm card); undefined when cancelled. */
+  private askConfirm(conv: StoredConversation, title: string, options: Array<{ label: string; detail?: string; value: string }>): Promise<string | undefined> {
+    const id = `c${++this.seq}`;
+    const card = { type: "confirm", id, title, options };
+    return new Promise((resolve) => {
+      this.confirms.set(id, { resolve, convId: conv.id, card });
+      if (this.current === conv) this.post(card);
+    });
   }
 
   private interrupt() {
@@ -503,25 +585,8 @@ export class LocalHost {
   private async onPrompt(text: string, attachmentIds: string[]) {
     if (!text.trim() && !attachmentIds.length) return;
     if (text.trim() === "/compact") return this.compact();
-    // Checked and taken in one synchronous step: everything below awaits, and a second message
-    // (the UI's queue sends the next one the moment a run ends) must not slip into that gap and
-    // start a second run on the same history.
-    const gate = this.current?.id ?? "__new__";
-    if (this.starting.has(gate) || (this.current && this.runs.has(this.current.id))) {
-      this.post({ type: "notice", message: "This chat is already running — wait for the reply or press Stop." });
-      return;
-    }
-    this.starting.add(gate);
-    const unlock = () => this.starting.delete(gate);
-    const { s: settings, error } = await this.safeSettings();
-    if (!settings?.apiKey) {
-      unlock();
-      await this.postAuth();
-      this.post({ type: "error", message: error || "Choose how to run the agent in the settings first (🌐 button)." });
-      this.post({ type: "idle" });
-      return;
-    }
-    if (!this.models.length) await Promise.race([this.refreshModels(), new Promise((r) => setTimeout(r, 4000))]);
+    const run = await this.beginRun();
+    if (!run) return;
 
     if (!this.current) {
       this.current = {
@@ -537,12 +602,119 @@ export class LocalHost {
       this.postConversations();
     }
     const conv = this.current;
+    const apiMessages = this.prepareHistory(conv);
+    const { content, label } = this.userContent(text, attachmentIds);
+    apiMessages.push({ role: "user", content });
+    conv.messages.push({ kind: "user", text: text + label });
+    await this.runTurn(conv, run.settings, text, run.unlock);
+  }
+
+  /**
+   * Take the current chat (or the one about to be created) for a run: the gate is checked and taken in one synchronous
+   * step, because everything after it awaits and a second message (the UI's queue sends the next one the moment a run
+   * ends) must not slip into that gap and start a second run on the same history. Null when the chat is busy or the
+   * settings have no key — the user has been told.
+   */
+  private async beginRun(): Promise<{ settings: Settings; unlock: () => void } | null> {
+    const gate = this.current?.id ?? "__new__";
+    if (this.starting.has(gate) || (this.current && this.runs.has(this.current.id))) {
+      this.post({ type: "notice", message: "This chat is already running — wait for the reply or press Stop." });
+      return null;
+    }
+    this.starting.add(gate);
+    const unlock = () => this.starting.delete(gate);
+    const { s: settings, error } = await this.safeSettings();
+    if (!settings?.apiKey) {
+      unlock();
+      await this.postAuth();
+      this.post({ type: "error", message: error || "Choose how to run the agent in the settings first (🌐 button)." });
+      this.post({ type: "idle" });
+      return null;
+    }
+    await this.awaitModels();
+    return { settings, unlock };
+  }
+
+  /** The API history, made valid for the next request. */
+  private prepareHistory(conv: StoredConversation): Anthropic.MessageParam[] {
     const apiMessages = (conv.apiMessages ||= []) as Anthropic.MessageParam[];
     repairHistory(apiMessages);
-    // A chat saved by another build replays against a different tool set/system prompt; models that keep
-    // their reasoning across turns refuse thinking blocks whose prefix changed, so drop them once.
-    if (this.d.promptId && conv.promptId && conv.promptId !== this.d.promptId) stripThinking(apiMessages);
+    // A chat saved by another build (or before builds were stamped) replays against a different tool set/system
+    // prompt; models that keep their reasoning across turns refuse thinking blocks whose prefix changed, so drop them once.
+    if (conv.promptId !== this.d.promptId && apiMessages.length) stripThinking(apiMessages);
     conv.promptId = this.d.promptId;
+    return apiMessages;
+  }
+
+  /** The transcript position of the n-th user message, or -1. */
+  private userMessageAt(conv: StoredConversation, n: number): number {
+    let seen = -1;
+    return conv.messages.findIndex((m) => m.kind === "user" && ++seen === n);
+  }
+
+  /**
+   * The API message behind the user bubble at `cut`. Both histories hold the same prompts after the last compaction
+   * (the summary stands in for everything before it), so the n-th prompt from the end is the same one on both sides.
+   * -1 when the point lies behind a compaction, or the two sides disagree.
+   */
+  private apiIndexOf(conv: StoredConversation, apiMessages: Anthropic.MessageParam[], cut: number): number {
+    if (conv.messages.slice(cut).some((m) => m.kind === "status" && m.text === COMPACT_MARK)) return -1;
+    let n = conv.messages.slice(cut + 1).filter((m) => m.kind === "user").length;
+    for (let i = apiMessages.length - 1; i >= 0; i--) if (isPrompt(apiMessages[i]) && n-- === 0) return i;
+    return -1;
+  }
+
+  /** "↻ Retry" under an answer: drop everything after the last user message and run it again. */
+  private async regenerate() {
+    const conv = this.current;
+    if (!conv) return;
+    if (this.runs.has(conv.id) || this.starting.has(conv.id)) return void this.post({ type: "notice", message: "This chat is running — wait for it to finish first." });
+    let cut = -1;
+    conv.messages.forEach((m, i) => m.kind === "user" && (cut = i));
+    if (cut < 0) return void this.post({ type: "notice", message: "Nothing to retry yet." });
+    const apiMessages = (conv.apiMessages ||= []) as Anthropic.MessageParam[];
+    const apiCut = this.apiIndexOf(conv, apiMessages, cut);
+    if (apiCut < 0) return void this.post({ type: "notice", message: "The chat was compacted after this message, so it can't be run again — send it anew." });
+    const run = await this.beginRun();
+    if (!run) return;
+    conv.messages.length = cut + 1;
+    apiMessages.length = apiCut + 1;
+    this.prepareHistory(conv);
+    this.post(this.loadMsg(conv));
+    await this.runTurn(conv, run.settings, promptText(conv.messages[cut]), run.unlock);
+  }
+
+  /** "↩" on a user message: roll the chat back to before it and put its words back in the composer. */
+  private async rewind(userIndex: number) {
+    const conv = this.current;
+    if (!conv) return;
+    const busy = () => this.runs.has(conv.id) || this.starting.has(conv.id);
+    if (busy()) return void this.post({ type: "notice", message: "This chat is running — wait for it to finish first." });
+    const cut = this.userMessageAt(conv, userIndex);
+    if (cut < 0) return;
+    const apiMessages = (conv.apiMessages ||= []) as Anthropic.MessageParam[];
+    const apiCut = this.apiIndexOf(conv, apiMessages, cut);
+    if (apiCut < 0) return void this.post({ type: "notice", message: "The chat was compacted after this point — what came before it is gone. Start a new chat instead." });
+    const choice = await this.askConfirm(conv, "Roll the conversation back to this point?", [{ label: "↩ Rewind to here", detail: "Roll the conversation back to before this message", value: "keep" }]);
+    if (!choice) return;
+    if (busy()) return void this.post({ type: "notice", message: "This chat started running meanwhile — nothing was rolled back." });
+    const draft = promptText(conv.messages[cut]);
+    conv.messages.length = cut;
+    apiMessages.length = apiCut;
+    conv.context = undefined;
+    conv.time = Date.now();
+    await this.saveNow(conv);
+    if (this.current === conv) {
+      this.post(this.loadMsg(conv, draft));
+      this.post({ type: "contextUsage", info: null });
+      this.post({ type: "info", text: "↩ Rolled back — reformulate and send" });
+    }
+    this.postConversations();
+  }
+
+  /** One turn for the user message already at the end of both histories; `text` goes back to the composer if the API refuses it. */
+  private async runTurn(conv: StoredConversation, settings: Settings, text: string, unlock: () => void) {
+    const apiMessages = conv.apiMessages as Anthropic.MessageParam[];
     conv.model = this.resolveModel(conv.model || this.prefs.model);
     const mode: Mode = MODE_OPTIONS.some((o) => o.value === conv.mode) ? (conv.mode as Mode) : this.prefs.mode;
     // The shared Conversation type predates "careful"; the value round-trips fine.
@@ -550,11 +722,9 @@ export class LocalHost {
     conv.time = Date.now();
     const model = conv.model;
     const traits = this.traitsFor(model);
-
-    const { content, label } = this.userContent(text, attachmentIds);
-    const historyBefore = apiMessages.length;
-    apiMessages.push({ role: "user", content });
-    conv.messages.push({ kind: "user", text: text + label });
+    const historyBefore = apiMessages.length - 1;
+    const bubbleAt = conv.messages.length - 1;
+    let draft: string | undefined;
 
     const ctrl = new AbortController();
     this.runs.set(conv.id, ctrl);
@@ -706,11 +876,17 @@ export class LocalHost {
         live({ type: "result", usage: lastUsage });
       }
     } catch (e) {
-      // The API refused this very message (oversized image, bad content…) before answering: take it back out of
-      // the history, or the same 400 would come back on every later turn and the chat would be dead.
-      if (e instanceof Anthropic.APIError && [400, 413, 422].includes(e.status ?? 0) && apiMessages.length === historyBefore + 1) apiMessages.length = historyBefore;
+      // The API refused this very message (oversized image, bad content…) before answering: take it back out of both
+      // histories, or the same 400 would come back on every later turn and the chat would be dead. The words go back
+      // to the composer (or, when the user is looking at another chat, into the error) rather than vanishing.
+      const rolledBack = rejectedContent(e) && apiMessages.length === historyBefore + 1;
+      if (rolledBack) {
+        apiMessages.length = historyBefore;
+        if (conv.messages[bubbleAt]?.kind === "user") conv.messages.splice(bubbleAt, 1);
+        draft = text;
+      }
       const d = describeError(e);
-      fail(d.message);
+      fail(rolledBack ? `${d.message}\n\nThe message was taken out of the chat${this.current === conv ? " and put back in the composer." : `: ${text}`}` : d.message);
       if (d.authFailed) {
         if (settings.trial) await this.d.forgetTrialToken?.(); // the next message asks the user to sign in again
         else this.post({ type: "auth", ok: false, text: "⚠ The API key was rejected. Check it in the settings:", loginLabel: "Open settings", recheckLabel: "I've fixed it" });
@@ -724,8 +900,9 @@ export class LocalHost {
       this.post({ type: "runState", convId: conv.id, running: false });
       const deleted = this.deleted.has(conv.id);
       if (this.current === conv && !deleted) {
-        // Switched away and back mid-run: the cards were rebuilt from storage without live ids, so show the finished chat afresh.
-        if (this.reopened.delete(conv.id)) this.post({ type: "loadConversation", convId: conv.id, title: conv.title, messages: conv.messages });
+        // Switched away and back mid-run: the cards were rebuilt from storage without live ids, so show the finished chat
+        // afresh. A refused message is reloaded too: its bubble is gone and its text goes to the composer.
+        if (this.reopened.delete(conv.id) || draft !== undefined) this.post(this.loadMsg(conv, draft));
         this.post({ type: "idle" });
       }
       this.reopened.delete(conv.id);
@@ -795,7 +972,7 @@ export class LocalHost {
         { role: "assistant", content: "Understood — I have the context and will continue from here." }
       );
       conv.context = undefined;
-      conv.messages.push({ kind: "status", text: "🗜 Context compacted" });
+      conv.messages.push({ kind: "status", text: COMPACT_MARK });
       live({ type: "system", subtype: "compact_boundary", data: {} });
       live({ type: "contextUsage", info: null });
       if (!this.deleted.has(conv.id)) await this.saveNow(conv);
