@@ -153,7 +153,9 @@ test("buildRecipe: observe tools and failed steps dropped, start URL from the fi
   ];
   const r = A.buildRecipe(steps, { name: "Buy lamp", params: [{ name: "query", value: "lamp" }] });
   assert.equal(r.startUrl, "https://shop.example/search?q={{query}}");
-  assert.deepEqual(r.steps.map((s) => s.tool), ["browser_type", "browser_type", "browser_fill_form", "browser_click", "browser_extract_table"]);
+  assert.deepEqual(r.steps.map((s) => s.tool), ["browser_type", "browser_type", "browser_fill_form", "browser_click", "browser_switch_tab", "browser_extract_table"]);
+  assert.deepEqual(plain(r.steps[4]), { tool: "browser_switch_tab", args: {}, tabUrl: "https://shop.example/" }, "a tab switch keeps the address, not the id");
+  assert.equal(A.stepLabel(r.steps[4]), "switch to the tab at https://shop.example/");
   assert.equal(r.steps[0].args.text, "{{query}}");
   assert.deepEqual(plain(r.steps[0].loc), { kind: "input:text", text: "Search", id: "q" });
   assert.equal(r.steps[1].args.text, "{{password}}", "a password is never stored");
@@ -199,6 +201,28 @@ test("runRecipe: finds elements by locator on the fresh page, fills params, coll
   assert.match(res.outputs[0].text, /lamp \| 20/);
   assert.equal(res.url, "https://shop.example/cart");
   assert.match(A.formatRun(recipe, res), /completed in .* s\.\n  ✓ 1\. type "chair" into input:text "Search" and press Enter/);
+});
+
+test("runRecipe: a recorded tab switch finds the tab by its address (exact, then same origin and path); none open → fails honestly", async () => {
+  const { A, T } = load();
+  const recipe = A.buildRecipe(
+    [
+      step("browser_switch_tab", { tabId: 77 }, { url: "https://shop.example/orders?page=1" }),
+      step("browser_click", { ref: 4 }, { loc: btn("Export") }),
+    ],
+    { name: "Export orders", startUrl: "" }
+  );
+  T.pageRefs = [{ ref: 2, loc: btn("Export") }];
+  T.outputs.browser_tabs = "  5  Shop — https://shop.example/\n* 6  Cart — https://shop.example/cart\n  8  Orders — https://shop.example/orders?page=3";
+  let res = await A.runRecipe(recipe, {}, {});
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.deepEqual(T.calls.filter((c) => c.name === "browser_switch_tab").map((c) => c.args), [{ tabId: 8 }], "same origin + path wins over nothing; the query may differ");
+  T.calls.length = 0;
+  T.outputs.browser_tabs = "* 6  Cart — https://shop.example/cart";
+  res = await A.runRecipe(recipe, {}, {});
+  assert.equal(res.ok, false);
+  assert.match(res.failed.error, /^No open tab at https:\/\/shop\.example\/orders\?page=1\.$/);
+  assert.deepEqual(T.calls.map((c) => c.name), ["browser_navigate", "browser_tabs", "browser_tabs"], "the start page, the lookup, the final position — nothing else ran");
 });
 
 test("runRecipe: a step whose element is gone fails there and leaves the rest unrun", async () => {
