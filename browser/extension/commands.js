@@ -78,8 +78,10 @@
       prompt: "List all tabs, take a screenshot of each one, and describe what's on them." },
     { group: "Automation", icon: "🤖", name: "Auto-login",
       prompt: "Read the page. If there's a login form, tell me what fields it needs. Do NOT fill passwords — I'll do that myself." },
-    { group: "Automation", icon: "📈", name: "Monitor for changes",
-      prompt: "Watch this page for any changes in the next 30 seconds and report what changed." },
+    { group: "Automation", icon: "👁", name: "Watch this page for changes",
+      prompt: "Watch this page for changes with browser_watch_create — pick the part that matters (a CSS selector for the price/status/list, not the whole page) and check it every 30 minutes. Tell me what you are watching." },
+    { group: "Automation", icon: "🧩", name: "Save this chat as a recipe",
+      prompt: "Save what you did in this chat as a recipe with browser_recipe_save, named after the task; make the values that will change next time parameters." },
 
     // ── Data & Research ────────────────────────────────
     { group: "Data & Research", icon: "📊", name: "Summarize page",
@@ -90,6 +92,8 @@
       prompt: "List my tabs, read the current one and the next one, and compare their content." },
     { group: "Data & Research", icon: "💾", name: "Save page text",
       prompt: "Read this entire page with maxChars=40000 and show me the full text." },
+    { group: "Data & Research", icon: "📡", name: "Read the page's API",
+      prompt: "Start a network capture (browser_network_capture action=start), reload the page or trigger the data to load, then read the captured JSON responses and show me the structured data behind this page." },
 
     // ── Document Converter ──────────────────────────────
     { group: "Converter", icon: "📄", name: "Page → PDF",

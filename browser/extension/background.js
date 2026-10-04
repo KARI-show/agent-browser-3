@@ -2,6 +2,34 @@
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(console.error);
 
 // ---------------------------------------------------------------------------
+// Watchers run here, on chrome.alarms, with the panel closed: the same tool
+// runtime the panel uses (browserTools.js has no DOM dependency) plus the
+// automation module that knows how to check a page and report a change.
+importScripts("converter.js", "browserTools.js", "automation.js");
+
+chrome.alarms.onAlarm.addListener(function (alarm) {
+  if (alarm.name.indexOf(AgentAutomation.ALARM_PREFIX) !== 0) return;
+  AgentAutomation.runWatcherById(alarm.name.slice(AgentAutomation.ALARM_PREFIX.length)).catch(function (e) {
+    console.warn("[watch]", alarm.name, e);
+  });
+});
+
+// A notification names the watcher: clicking it opens the watched page.
+chrome.notifications.onClicked.addListener(function (id) {
+  var m = /^watch:(\w+):/.exec(id);
+  chrome.notifications.clear(id);
+  if (!m) return;
+  AgentAutomation.loadWatchers().then(function (all) {
+    var w = all[m[1]];
+    if (w) chrome.tabs.create({ url: w.url });
+  });
+});
+
+// Alarms don't survive an update of the extension, storage does.
+chrome.runtime.onInstalled.addListener(function () { AgentAutomation.syncAlarms().catch(console.warn); });
+chrome.runtime.onStartup.addListener(function () { AgentAutomation.syncAlarms().catch(console.warn); });
+
+// ---------------------------------------------------------------------------
 // Proxy for this browser profile (set up on the options page).
 //
 // The setting is applied with chrome.proxy, so it covers everything in the
@@ -215,6 +243,13 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       sendResponse({ ok: false, error: String(e && e.message || e) });
     });
     return true; // async sendResponse
+  }
+  // "Check now" from the panel or a tool: the watcher runs here, where it runs on schedule too.
+  if (msg && msg.type === "runWatcher" && typeof msg.id === "string") {
+    AgentAutomation.runWatcherById(msg.id, { quiet: !!msg.quiet }).then(sendResponse, function (e) {
+      sendResponse({ ok: false, error: String(e && e.message || e) });
+    });
+    return true;
   }
 });
 

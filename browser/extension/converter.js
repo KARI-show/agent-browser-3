@@ -6,11 +6,11 @@
 //   Markdown / HTML → PDF: the document is prepared here and rendered by
 //   browserTools.js through the DevTools protocol (no print dialog).
 //
-// Entry: window.AgentConverter.convert(opts)
+// Entry: AgentConverter.convert(opts) (a global — the side panel and the service worker both load this file)
 //          → { blob, filename, mimeType, rows?, size?, text? }   a file to save
 //          → { html, filename, mimeType }                        a document to render to PDF
 //          → { error }
-//        window.AgentConverter.download(blob, filename) → { ok, filename, size } | { ok: false, error }
+//        AgentConverter.download(blob, filename) → { ok, filename, size } | { ok: false, error }
 (function () {
 
   // ── CSV parser/generator ───────────────────────────────────────────────
@@ -167,31 +167,49 @@
   // Saves to the downloads folder and waits for the file to be complete. It is
   // never opened: chrome.downloads.open needs a user gesture a tool call lacks.
 
+  // A service worker (background.js, running a recipe for a watcher) has no URL.createObjectURL:
+  // the file goes as a data: URL instead.
+  function blobUrl(blob) {
+    if (typeof URL.createObjectURL === "function") return Promise.resolve(URL.createObjectURL(blob));
+    return new Promise(function (resolve, reject) {
+      var r = new FileReader();
+      r.onload = function () { resolve(r.result); };
+      r.onerror = reject;
+      r.readAsDataURL(blob);
+    });
+  }
+  function revoke(url) {
+    if (url.indexOf("blob:") === 0) URL.revokeObjectURL(url);
+  }
+
   function download(blob, filename) {
-    var url = URL.createObjectURL(blob);
+    return blobUrl(blob).then(function (url) { return downloadUrl(url, filename); });
+  }
+
+  function downloadUrl(url, filename) {
     return new Promise(function (resolve) {
       chrome.downloads.download({ url: url, filename: filename, conflictAction: "uniquify" }, function (id) {
         if (chrome.runtime.lastError) {
-          URL.revokeObjectURL(url);
+          revoke(url);
           resolve({ ok: false, error: chrome.runtime.lastError.message });
           return;
         }
         var checks = 0;
         var timer = setInterval(function () {
           chrome.downloads.search({ id: id }, function (items) {
-            if (!items || !items.length) { clearInterval(timer); URL.revokeObjectURL(url); resolve({ ok: false, error: "the download disappeared" }); return; }
+            if (!items || !items.length) { clearInterval(timer); revoke(url); resolve({ ok: false, error: "the download disappeared" }); return; }
             var item = items[0];
             if (item.state === "complete") {
               clearInterval(timer);
-              URL.revokeObjectURL(url);
+              revoke(url);
               resolve({ ok: true, filename: item.filename, size: item.fileSize });
             } else if (item.state === "interrupted") {
               clearInterval(timer);
-              URL.revokeObjectURL(url);
+              revoke(url);
               resolve({ ok: false, error: item.error || "interrupted" });
             } else if (++checks > 60) {
               clearInterval(timer);
-              URL.revokeObjectURL(url);
+              revoke(url);
               resolve({ ok: false, error: "the download did not finish within 30 s" });
             }
           });
@@ -310,7 +328,7 @@
 
   // ── Expose ─────────────────────────────────────────────────────────────
 
-  window.AgentConverter = {
+  globalThis.AgentConverter = {
     convert: convert,
     download: download,
     parseCSV: parseCSV,
