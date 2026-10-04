@@ -19,6 +19,7 @@ import { Forwarder, Upstream, startForwarder, testProxy } from "./proxy";
 import { FileMemento } from "./memento";
 import { RemoteServices } from "./remote";
 import {
+  ALWAYS_ASK_TOOLS,
   BROWSER_SYSTEM_PROMPT,
   READ_ONLY_TOOLS,
   ToolContent,
@@ -367,14 +368,16 @@ class BrowserHost {
       const short = browserToolName(toolName);
       if (short) {
         const mode = currentMode();
-        if (READ_ONLY_TOOLS.has(short) || mode === "agent") return { behavior: "allow" as const };
+        if (READ_ONLY_TOOLS.has(short)) return { behavior: "allow" as const };
         if (mode === "ask") {
           return {
             behavior: "deny" as const,
             message: "Read-only (Ask) mode — you can read pages and take screenshots but not click, type or navigate.",
           };
         }
-        return undefined; // careful → approval card
+        // Agent mode runs actions freely, except the tools that reach session data: those ask in every mode.
+        if (mode === "agent" && !ALWAYS_ASK_TOOLS.has(short)) return { behavior: "allow" as const };
+        return undefined; // approval card
       }
       if (toolName === "Read") {
         const p = typeof input.file_path === "string" ? path.resolve(input.file_path) : "";

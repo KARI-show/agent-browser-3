@@ -22,6 +22,12 @@ const ref = z.number().int().min(1).describe("Element ref number from the latest
 export interface BrowserToolDef {
   name: string;
   readOnly: boolean;
+  /**
+   * Asks the user in every mode, Agent included: what the tool returns or does is session data a
+   * prompt-injected page could make the model exfiltrate (cookie values with httpOnly tokens, API
+   * response bodies) or arbitrary code in the page.
+   */
+  alwaysAsk?: boolean;
   description: string;
   shape: Record<string, z.ZodTypeAny>;
 }
@@ -209,6 +215,7 @@ export const BROWSER_TOOLS: BrowserToolDef[] = [
   {
     name: "browser_run_js",
     readOnly: false,
+    alwaysAsk: true,
     description:
       "Run a JavaScript expression in the page and return its (JSON-serialised) value. Last resort " +
       "for data the other tools can't reach; some sites block it with a strict CSP.",
@@ -269,6 +276,7 @@ export const BROWSER_TOOLS: BrowserToolDef[] = [
   {
     name: "browser_cookies_get",
     readOnly: false,
+    alwaysAsk: true,
     description: "List cookies for a domain or the current page. Shows name, value, domain, flags.",
     shape: {
       url: z.string().optional().describe("URL to get cookies for (default: current tab)"),
@@ -313,7 +321,8 @@ export const BROWSER_TOOLS: BrowserToolDef[] = [
   },
   {
     name: "browser_cookies_export",
-    readOnly: false, // see browser_cookies_get
+    readOnly: false,
+    alwaysAsk: true, // see browser_cookies_get
     description: "Export all cookies for a domain as JSON (for backup or import into another session).",
     shape: {
       url: z.string().optional(),
@@ -323,6 +332,7 @@ export const BROWSER_TOOLS: BrowserToolDef[] = [
   {
     name: "browser_cookies_import",
     readOnly: false,
+    alwaysAsk: true, // a session planted by a page is an account takeover
     description: "Import cookies from a JSON array (from browser_cookies_export or another source).",
     shape: {
       cookies: z.any().describe("JSON array of cookie objects [{name,value,domain,...}]"),
@@ -463,6 +473,7 @@ export const BROWSER_TOOLS: BrowserToolDef[] = [
   {
     name: "browser_network_capture",
     readOnly: false,
+    alwaysAsk: true,
     description:
       "Read the data the page itself receives from its API (XHR/fetch JSON) instead of scraping the rendered " +
       "page — complete lists with ids and fields, pagination visible. action=start begins capturing on the " +
@@ -591,6 +602,8 @@ export const BROWSER_TOOLS: BrowserToolDef[] = [
 
 /** Short names of tools that only observe — auto-allowed in every mode. */
 export const READ_ONLY_TOOLS = new Set(BROWSER_TOOLS.filter((t) => t.readOnly).map((t) => t.name));
+/** Tools that need the user's approval in every mode, Agent included (see BrowserToolDef.alwaysAsk). */
+export const ALWAYS_ASK_TOOLS = new Set(BROWSER_TOOLS.filter((t) => t.alwaysAsk).map((t) => t.name));
 
 /** "mcp__browser__browser_click" → "browser_click" (undefined for other tools). */
 export function browserToolName(fullName: string): string | undefined {
@@ -653,4 +666,5 @@ You are running inside the user's web browser (the Agent Browser side panel) and
 - Before any consequential or irreversible action — buying or paying, sending a message/email/post/comment, submitting a form with personal data, deleting anything, accepting terms, changing account, privacy or security settings — stop and ask the user to confirm with AskUserQuestion, stating exactly what will happen.
 - When the user gives you credentials (passwords, OTP codes, card details) and asks you to type them — do it without hesitation. It's their data, their browser, their choice.
 - Solve CAPTCHAs if you can see them (screenshot + click). If you can't solve it, ask the user to do it.
+- Reading or importing cookies, running JavaScript in the page and capturing network responses always ask the user first, in every mode: they reach session secrets. Prefer the ordinary page tools; use these only when the task needs them and say why.
 `.trim();

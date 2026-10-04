@@ -9,6 +9,6 @@ export default {
   tools: BROWSER_TOOLS.map((t) => {
     const schema = z.toJSONSchema(z.object(t.shape)) as Record<string, unknown>;
     delete schema.$schema;
-    return { name: t.name, description: t.description, readOnly: t.readOnly, input_schema: schema };
+    return { name: t.name, description: t.description, readOnly: t.readOnly, alwaysAsk: !!t.alwaysAsk, input_schema: schema };
   }),
 };
