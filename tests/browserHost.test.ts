@@ -3,6 +3,18 @@ import assert from "node:assert/strict";
 import { encodeFrames, MAX_FRAME } from "../browser/host/native";
 import { ALWAYS_ASK_TOOLS, BROWSER_TOOLS, READ_ONLY_TOOLS, browserToolName } from "../browser/host/tools";
 import { FileMemento } from "../browser/host/memento";
+import {
+  MAX_ATTACHMENT_BYTES,
+  MAX_DOCUMENT_BYTES,
+  MAX_IMAGE_BYTES,
+  ATTACHMENT_TTL_MS,
+  attachmentLimit,
+  expiredFiles,
+  isImageAttachment,
+  parseDataUrl,
+  pruneAttachments,
+  safeAttachmentName,
+} from "../browser/host/attachments";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -71,6 +83,68 @@ test("browser tool names and read-only set", () => {
   // …and asks the user even in Agent mode, like running page scripts and reading API bodies.
   assert.deepEqual([...ALWAYS_ASK_TOOLS].sort(), ["browser_cookies_export", "browser_cookies_get", "browser_cookies_import", "browser_network_capture", "browser_run_js"]);
   for (const t of ALWAYS_ASK_TOOLS) assert.ok(!READ_ONLY_TOOLS.has(t), `${t} can't be both read-only and always-ask`);
+});
+
+test("parseDataUrl accepts parameters and whitespace, rejects anything that is not base64", () => {
+  const png = Buffer.from("png-bytes").toString("base64");
+  assert.deepEqual(parseDataUrl(`data:image/png;base64,${png}`), { mime: "image/png", data: png });
+  // Parameters between the mime type and ;base64 (FileReader never adds them, other producers do).
+  assert.deepEqual(parseDataUrl(`data:image/png;name=a.png;base64,${png}`), { mime: "image/png", data: png });
+  assert.deepEqual(parseDataUrl(`data:text/plain;charset=utf-8;name=notes.txt;base64,${png}`), { mime: "text/plain", data: png });
+  // No mime → octet-stream; line breaks inside the payload are dropped.
+  assert.deepEqual(parseDataUrl(`data:;base64,${png.slice(0, 4)}\n${png.slice(4)}`), { mime: "application/octet-stream", data: png });
+  assert.equal(parseDataUrl("data:text/plain,hello"), null, "not base64");
+  assert.equal(parseDataUrl(`data:image/png;base64,${png}!`), null, "stray character");
+  assert.equal(parseDataUrl("javascript:alert(1)"), null);
+  assert.equal(parseDataUrl(undefined), null);
+  assert.equal(parseDataUrl(42), null);
+});
+
+test("attachment limits follow the kind of file (mime or extension)", () => {
+  assert.equal(attachmentLimit("image/png", "shot.png"), MAX_IMAGE_BYTES);
+  assert.equal(attachmentLimit("application/octet-stream", "photo.JPG"), MAX_IMAGE_BYTES, "image by extension");
+  assert.equal(attachmentLimit("application/pdf", "file"), MAX_DOCUMENT_BYTES);
+  assert.equal(attachmentLimit("application/octet-stream", "report.pdf"), MAX_DOCUMENT_BYTES, "pdf by extension");
+  assert.equal(attachmentLimit("text/plain", "notes.txt"), MAX_ATTACHMENT_BYTES);
+  assert.equal(attachmentLimit("application/zip", "bundle.zip"), MAX_ATTACHMENT_BYTES);
+  assert.ok(MAX_IMAGE_BYTES < MAX_DOCUMENT_BYTES && MAX_DOCUMENT_BYTES < MAX_ATTACHMENT_BYTES);
+  assert.ok(isImageAttachment("image/webp", "x") && isImageAttachment("", "a.gif") && !isImageAttachment("text/plain", "a.txt"));
+});
+
+test("attachment names lose directories, odd characters and excess length", () => {
+  assert.equal(safeAttachmentName("../../etc/passwd", "text/plain"), "passwd");
+  assert.equal(safeAttachmentName("my shot (1).png", "image/png"), "my_shot_1_.png");
+  assert.equal(safeAttachmentName(undefined, "image/png"), "pasted.png");
+  assert.equal(safeAttachmentName("", "application/pdf"), "file");
+  assert.equal(safeAttachmentName("..", "text/plain"), "file", "a bare dot-dot is not a name");
+  assert.equal(safeAttachmentName("a".repeat(300) + ".txt", "text/plain").length, 120);
+});
+
+test("expiredFiles keeps everything within the TTL", () => {
+  const now = 1_700_000_000_000;
+  const files = [
+    { name: "old.png", mtimeMs: now - ATTACHMENT_TTL_MS - 1 },
+    { name: "edge.png", mtimeMs: now - ATTACHMENT_TTL_MS },
+    { name: "fresh.png", mtimeMs: now - 60_000 },
+    { name: "future.png", mtimeMs: now + 60_000 },
+  ];
+  assert.deepEqual(expiredFiles(files, now), ["old.png"]);
+  assert.deepEqual(expiredFiles(files, now, 30_000), ["old.png", "edge.png", "fresh.png"]);
+});
+
+test("pruneAttachments deletes only files older than the TTL", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attachments-"));
+  const old = path.join(dir, "k1-old.png");
+  const fresh = path.join(dir, "k2-fresh.png");
+  fs.writeFileSync(old, "x");
+  fs.writeFileSync(fresh, "y");
+  fs.mkdirSync(path.join(dir, "subdir"));
+  const eightDaysAgo = (Date.now() - 8 * 24 * 3600 * 1000) / 1000;
+  fs.utimesSync(old, eightDaysAgo, eightDaysAgo);
+  assert.deepEqual(pruneAttachments(dir), ["k1-old.png"]);
+  assert.deepEqual(fs.readdirSync(dir).sort(), ["k2-fresh.png", "subdir"]);
+  // Idempotent: a second pass finds nothing.
+  assert.deepEqual(pruneAttachments(dir), []);
 });
 
 test("every declared browser tool is implemented in the panel", () => {
