@@ -26,7 +26,20 @@
   var gaveUp = false;
 
   function deliver(ev) {
+    // A file a phone uploaded through relay.js belongs in that phone's composer, not this one's.
+    if (ev && ev.type === "attached" && window.AgentRemote && window.AgentRemote.claimAttached && window.AgentRemote.claimAttached(ev)) return;
     window.dispatchEvent(new MessageEvent("message", { data: ev }));
+  }
+
+  // Words for what a tool call would act on (the element behind a ref), for approval cards.
+  function describeCall(name, input) {
+    var T = window.AgentBrowserTools;
+    if (!T || typeof T.describe !== "function") return "";
+    try {
+      return T.describe(String(name || "").replace(/^mcp__browser__/, ""), input) || "";
+    } catch (e) {
+      return "";
+    }
   }
 
   var SETUP_BANNER = {
@@ -94,6 +107,12 @@
       return;
     }
     if (m.type === "browserTool") return runTool(m);
+    if (m.type === "approval" && m.input && !m.input.element) {
+      // The host knows refs, not what they point at: "click [7]" tells the user (and the phone)
+      // nothing. Put the element's words on the card, as the built-in backend does itself.
+      var element = describeCall(m.toolName, m.input);
+      if (element) m = Object.assign({}, m, { input: Object.assign({}, m.input, { element: element }) });
+    }
     deliver(m);
   }
 
@@ -188,23 +207,40 @@
     });
   });
 
+  // Files dropped on the panel: the shared UI's drop handler only knows file:// paths from an
+  // editor, which a browser never hands over, so read the dropped files here and upload them the
+  // way the 📎 button does. Without preventDefault the browser would open the file in the panel.
+  document.addEventListener("dragover", function (e) {
+    var types = e.dataTransfer && e.dataTransfer.types;
+    if (types && Array.prototype.indexOf.call(types, "Files") !== -1) e.preventDefault();
+  });
+  document.addEventListener("drop", function (e) {
+    var files = e.dataTransfer && e.dataTransfer.files;
+    if (!files || !files.length) return;
+    e.preventDefault();
+    Array.prototype.forEach.call(files, function (f) {
+      var reader = new FileReader();
+      reader.onload = function () { postMessage({ type: "uploadAttachment", name: f.name, dataUrl: reader.result }); };
+      reader.readAsDataURL(f);
+    });
+  });
+
   // Decide the backend before the first message goes anywhere (main.js posts
-  // "ready" immediately; it waits in the outbox until then).
-  var keyCheck = window.AgentLocal ? window.AgentLocal.backend() : Promise.resolve("native");
-  keyCheck.then(
-    function (which) {
-      if (which === "local") {
-        backend = "local";
-        local = window.AgentLocal.create(deliver);
-        flush();
-      } else {
-        backend = "native";
-        connectNative();
-      }
-    },
-    function () {
-      backend = "native";
+  // "ready" immediately; it waits in the outbox until then). The body class
+  // lets sidepanel.css hide controls one backend has no answer for.
+  function useBackend(which) {
+    backend = which;
+    document.body.classList.add("backend-" + which);
+    if (which === "local") {
+      local = window.AgentLocal.create(deliver);
+      flush();
+    } else {
       connectNative();
     }
+  }
+  var keyCheck = window.AgentLocal ? window.AgentLocal.backend() : Promise.resolve("native");
+  keyCheck.then(
+    function (which) { useBackend(which === "local" ? "local" : "native"); },
+    function () { useBackend("native"); }
   );
 })();

@@ -46,13 +46,6 @@
       "Proxy is off";
   }
 
-  function problem(c) {
-    if (!c.enabled) return "";
-    if (!c.host) return "Enter the proxy host.";
-    if (!c.port || c.port < 1 || c.port > 65535) return "Enter a port between 1 and 65535.";
-    return "";
-  }
-
   function say(text, cls) {
     var r = $("testResult");
     r.textContent = text;
@@ -141,7 +134,7 @@
     if (!name) return sayPreset("Give it a name first.", "bad");
     var c = read();
     c.enabled = true;
-    var p = problem(c);
+    var p = AgentProxyConfig.validate(c);
     if (p) return sayPreset(p, "bad");
     loadPresets().then(function (list) {
       var existing = list.find(function (x) { return x.name.toLowerCase() === name.toLowerCase(); });
@@ -196,7 +189,7 @@
   $("form").addEventListener("submit", function (e) {
     e.preventDefault();
     var c = read();
-    var p = problem(c);
+    var p = AgentProxyConfig.validate(c);
     if (p) return say(p, "bad");
     chrome.storage.local.set({ [CONFIG_KEY]: c }).then(function () {
       say(c.enabled ? "Saved — applying…" : "Saved — proxy is off.", "ok");
@@ -206,7 +199,7 @@
   $("test").addEventListener("click", function () {
     var c = read();
     c.enabled = true;
-    var p = problem(c);
+    var p = AgentProxyConfig.validate(c);
     if (p) return say(p, "bad");
     if (c.type === "https") return say("Testing HTTPS-to-proxy connections isn't supported here; Save and browse to check.", "");
     $("test").disabled = true;
@@ -459,6 +452,7 @@
   var REMOTE_KEY = "agentRemote";
   var LEGACY_RELAY_KEY = "agentRelay";
   var REMOTE_STATUS_KEY = "agentRemoteStatus";
+  var REMOTE_ON_KEY = "agentRemoteOn"; // chrome.storage.session: on in this browser session (relay.js)
 
   function remoteMode() {
     var r = document.querySelector('input[name="remoteMode"]:checked');
@@ -469,14 +463,28 @@
     $("relayFields").classList.toggle("open", remoteMode() === "relay");
   }
 
+  var remoteOn = false;
   function paintRemote(s) {
     s = s || { state: "off" };
+    remoteOn = s.state === "on";
     $("remoteStatus").className = "status " + (s.state === "on" ? "active" : s.state === "error" ? "error" : "off");
     $("remoteStatusText").textContent =
       s.state === "on" ? "On — " + s.message :
       s.state === "error" ? s.message :
       s.message || "Off";
+    // The web-app link of the chat open in the panel (relay modes only); it carries the relay token.
+    $("remoteLinkRow").hidden = !s.link;
+    $("remoteLink").value = s.link || "";
   }
+
+  $("remoteLinkCopy").addEventListener("click", function () {
+    var v = $("remoteLink").value;
+    if (!v) return;
+    (navigator.clipboard ? navigator.clipboard.writeText(v) : Promise.reject()).then(
+      function () { sayTo("remoteResult", "Link copied.", "ok"); },
+      function () { $("remoteLink").select(); sayTo("remoteResult", "Press Ctrl+C to copy.", ""); }
+    );
+  });
 
   function badAddress(u, protocols) {
     try { return protocols.indexOf(new URL(u).protocol) === -1; } catch (_) { return true; }
@@ -487,13 +495,14 @@
   chrome.storage.local.get([REMOTE_KEY, LEGACY_RELAY_KEY]).then(function (o) {
     var c = o[REMOTE_KEY];
     var old = o[LEGACY_RELAY_KEY];
-    if (!c) c = old && old.url ? { mode: "relay", enabled: !!old.enabled, relayUrl: old.url, relayToken: old.token || "" } : { mode: "bot" };
+    if (!c) c = old && old.url ? { mode: "relay", autostart: !!old.enabled, relayUrl: old.url, relayToken: old.token || "" } : { mode: "bot" };
     $("tgToken").value = c.botToken || "";
     $("tgUser").value = c.userId || "";
     $("relayUrl").value = c.relayUrl || "";
     $("relayToken").value = c.relayToken || "";
     $("relayPublicUrl").value = c.publicUrl || "";
-    $("remoteEnabled").checked = !!c.enabled;
+    // `enabled` is the one flag of earlier versions (relay.js carries it over to autostart when a panel opens).
+    $("remoteAutostart").checked = c.autostart !== undefined ? !!c.autostart : !!c.enabled;
     var radio = document.querySelector('input[name="remoteMode"][value="' + (c.mode || "bot") + '"]');
     if (radio) radio.checked = true;
     showRemoteFields();
@@ -504,7 +513,7 @@
     e.preventDefault();
     var c = {
       mode: remoteMode(),
-      enabled: $("remoteEnabled").checked,
+      autostart: $("remoteAutostart").checked,
       botToken: $("tgToken").value.trim(),
       userId: $("tgUser").value.trim(),
       relayUrl: $("relayUrl").value.trim(),
@@ -526,7 +535,14 @@
       }
     }
     chrome.storage.local.set({ [REMOTE_KEY]: c }).then(function () {
-      sayTo("remoteResult", c.enabled ? "Saved — an open side panel starts it right away." : "Saved. Press 🛰 in the side panel to turn it on.", "ok");
+      // Turning autostart on also means "now": an open panel starts without a trip to 🛰. Turning it
+      // off leaves a running remote alone — 🛰 (or a browser restart) ends it.
+      if (c.autostart) return chrome.storage.session.set({ [REMOTE_ON_KEY]: true });
+    }).then(function () {
+      sayTo("remoteResult",
+        c.autostart ? "Saved — starts whenever the side panel is open (an open panel starts it right away)." :
+        remoteOn ? "Saved — remote stays on until you press 🛰 in the side panel or restart the browser." :
+        "Saved. Press 🛰 in the side panel to turn it on.", "ok");
     });
   });
 

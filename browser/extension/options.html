@@ -171,6 +171,12 @@
     </p>
 
     <div id="remoteStatus" class="status off"><span class="dot"></span><span id="remoteStatusText">Off</span></div>
+    <div class="actions" id="remoteLinkRow" hidden>
+      <label class="grow">Link for the phone <span class="hint">(the chat open in the panel; it contains the relay token — share it only with yourself)</span>
+        <input id="remoteLink" readonly spellcheck="false" />
+      </label>
+      <button type="button" id="remoteLinkCopy">Copy link</button>
+    </div>
 
     <form id="remoteForm" autocomplete="off">
       <div class="grid two">
@@ -207,7 +213,7 @@
         </label>
       </div>
 
-      <label class="switch"><input type="checkbox" id="remoteEnabled" /> On — start whenever the side panel is open</label>
+      <label class="switch"><input type="checkbox" id="remoteAutostart" /> Start whenever the side panel opens <span class="hint">(otherwise 🛰 in the panel turns it on, until the browser restarts)</span></label>
       <div class="actions">
         <button type="submit" class="primary">Save</button>
         <span id="remoteResult" class="result" role="status"></span>
@@ -231,6 +237,7 @@
     </p>
   </main>
   <script src="agentLocal.js"></script>
+  <script src="proxyConfig.js"></script>
   <script src="options.js"></script>
 </body>
 </html>
