@@ -26,13 +26,7 @@ import {
   browserToolName,
   createBrowserToolsServer,
 } from "./tools";
-import {
-  launchProfile,
-  stopProfile,
-  listRunning,
-  deleteProfileData,
-  listProfileDirs,
-} from "./profile-launcher";
+import { attachmentLimit, isImageAttachment, parseDataUrl, pruneAttachments, safeAttachmentName } from "./attachments";
 
 const DATA_DIR = process.env.AGENT_BROWSER_HOME || path.join(os.homedir(), ".agent-browser");
 const WORK_DIR = path.join(DATA_DIR, "work");
@@ -41,6 +35,12 @@ const UPLOAD_DIR = path.join(DATA_DIR, "attachments");
 process.env.AGENT_BROWSER_LOG = path.join(DATA_DIR, "host.log");
 fs.mkdirSync(WORK_DIR, { recursive: true });
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+// Nothing else ever deletes an upload; without this the directory grows forever.
+try {
+  pruneAttachments(UPLOAD_DIR);
+} catch (e) {
+  log.warn(`attachment clean-up failed: ${(e as Error).message}`);
+}
 
 // Fallback shown until the SDK returns the account's real list (onModels).
 const MODEL_OPTIONS = [
@@ -79,8 +79,15 @@ class BrowserHost {
   private runs = new Map<string, RunHandle>();
   /** Chats deleted while their run was still going (the run must not save them back). */
   private deleted = new Set<string>();
-  private pendingApprovals = new Map<string, { resolve: (ok: boolean) => void; convId: string }>();
-  private pendingQuestions = new Map<string, { resolve: (answer: string) => void; convId: string }>();
+  /** The live object of every chat that has a run: reopening it must attach to THIS object, not a stored copy. */
+  private running = new Map<string, Conversation>();
+  /** Chats being started (between the click and the run being registered): closes the async gap a double-send slips through. */
+  private starting = new Set<string>();
+  /** Chats the user switched away from and back to mid-run: their tool cards are rebuilt from history, so reload once at the end. */
+  private reopened = new Set<string>();
+  // `card` is the message that showed the gate, re-posted when the user comes back to the chat.
+  private pendingApprovals = new Map<string, { resolve: (ok: boolean) => void; convId: string; card: unknown }>();
+  private pendingQuestions = new Map<string, { resolve: (answer: string) => void; convId: string; card: unknown }>();
   private pendingTools = new Map<number, (r: ToolContent) => void>();
   private toolMsgs = new Map<string, ConvMsg>();
   private toolStartTimes = new Map<string, number>();
@@ -109,7 +116,7 @@ class BrowserHost {
         await this.onPrompt("/compact", []);
         break;
       case "interrupt":
-        if (this.current) this.runs.get(this.current.id)?.interrupt();
+        if (this.current) this.abort(this.current.id);
         break;
       case "browserToolResult": {
         const resolve = this.pendingTools.get(msg.id);
@@ -140,44 +147,11 @@ class BrowserHost {
         }
         break;
       }
-      // ── Native Profile Launcher ──────────────────────────────────────
-      // Extension sends these messages to launch/stop Chrome instances with
-      // separate --user-data-dir (real isolation, not just incognito).
-      case "nativeLaunchProfile": {
-        try {
-          const result = await launchProfile({
-            id: msg.profileId,
-            name: msg.name || msg.profileId,
-            proxy: msg.proxy,
-            startUrl: msg.startUrl,
-            extensionPath: msg.extensionPath,
-            extraArgs: msg.extraArgs,
-          });
-          this.post({ type: "nativeProfileLaunched", profileId: msg.profileId, ...result });
-        } catch (e) {
-          this.post({ type: "nativeProfileError", profileId: msg.profileId, error: String((e as Error)?.message || e) });
-        }
+      // The shared chat UI's Retry / ↩ buttons. The SDK session can't be truncated from here.
+      case "regenerate":
+      case "rewind":
+        this.post({ type: "notice", message: "Retry and rewind aren't available with the local helper yet — send a new message instead." });
         break;
-      }
-      case "nativeStopProfile": {
-        const stopped = stopProfile(msg.profileId);
-        this.post({ type: "nativeProfileStopped", profileId: msg.profileId, stopped });
-        break;
-      }
-      case "nativeListProfiles": {
-        this.post({
-          type: "nativeProfileList",
-          running: listRunning(),
-          saved: listProfileDirs(),
-        });
-        break;
-      }
-      case "nativeDeleteProfile": {
-        const deleted = deleteProfileData(msg.profileId);
-        this.post({ type: "nativeProfileDeleted", profileId: msg.profileId, deleted });
-        break;
-      }
-
       case "newChat":
         this.current = undefined;
         this.post({ type: "clear" });
@@ -196,7 +170,7 @@ class BrowserHost {
         const id = String(msg.id);
         // A running chat finishes after the removal and would save itself back — remember the deletion.
         if (this.runs.has(id)) this.deleted.add(id);
-        this.runs.get(id)?.interrupt();
+        this.abort(id);
         if (this.current?.id === id) {
           this.current = undefined;
           this.post({ type: "clear" });
@@ -208,15 +182,18 @@ class BrowserHost {
       case "renameConversation": {
         const title = String(msg.title ?? "");
         await this.conversations.patch(String(msg.id), { title, renamed: true });
-        const cur = this.current;
-        if (cur && cur.id === msg.id) cur.title = title;
+        const live = this.liveConversation(String(msg.id));
+        if (live) Object.assign(live, { title, renamed: true });
         this.postConversations();
         break;
       }
-      case "pinConversation":
+      case "pinConversation": {
         await this.conversations.patch(String(msg.id), { pinned: !!msg.pinned });
+        const live = this.liveConversation(String(msg.id));
+        if (live) live.pinned = !!msg.pinned;
         this.postConversations();
         break;
+      }
       case "setModel":
         this.modelChoice = String(msg.model);
         if (this.current) this.current.model = this.modelChoice;
@@ -313,8 +290,40 @@ class BrowserHost {
     void this.state.update("activeConversationId", this.current?.id);
   }
 
+  /**
+   * The in-memory copy a chat is saved from at the end of its run (or on its
+   * next run, for the open chat): a patch to the stored copy alone would be
+   * overwritten by that save.
+   */
+  private liveConversation(id: string): Conversation | undefined {
+    return this.running.get(id) ?? (this.current?.id === id ? this.current : undefined);
+  }
+
+  /**
+   * Stop a chat's run. A run parked on an approval or question would never see
+   * the interrupt, so its gates are closed first — and the panel is told, so
+   * the cards close too. The end of onPrompt still sweeps anything left over.
+   */
+  private abort(convId: string) {
+    for (const [id, p] of this.pendingApprovals) {
+      if (p.convId === convId) {
+        this.pendingApprovals.delete(id);
+        p.resolve(false);
+        this.post({ type: "approvalResolved", id, approved: false });
+      }
+    }
+    for (const [id, p] of this.pendingQuestions) {
+      if (p.convId === convId) {
+        this.pendingQuestions.delete(id);
+        p.resolve("(cancelled)");
+        this.post({ type: "questionResolved", id, answer: "(cancelled)" });
+      }
+    }
+    this.runs.get(convId)?.interrupt();
+  }
+
   private openConversation(id: string) {
-    const conv = this.conversations.get(id);
+    const conv = this.running.get(id) ?? this.conversations.get(id);
     if (!conv) return;
     this.current = conv;
     // convId lets the relay mirror route it: it's posted before "conversations" updates activeId.
@@ -323,8 +332,12 @@ class BrowserHost {
     this.postMode();
     this.post({ type: "contextUsage", info: conv.context ?? null });
     this.postConversations();
-    for (const [aid, p] of this.pendingApprovals) {
-      if (p.convId === id) this.post({ type: "notice", message: `Approval ${aid} is waiting in this chat.` });
+    // A run may be going on in this chat: show Stop, and bring back the approval/question it is waiting on.
+    if (this.runs.has(id)) {
+      this.reopened.add(id);
+      this.post({ type: "runState", convId: id, running: true });
+      for (const p of this.pendingApprovals.values()) if (p.convId === id) this.post(p.card);
+      for (const p of this.pendingQuestions.values()) if (p.convId === id) this.post(p.card);
     }
   }
 
@@ -392,11 +405,18 @@ class BrowserHost {
   private async onPrompt(text: string, attachments: string[]) {
     const atts = attachments.filter((p) => typeof p === "string" && path.resolve(p).startsWith(UPLOAD_DIR + path.sep));
     if (!text.trim() && !atts.length) return;
-    if (this.current && this.runs.has(this.current.id)) {
+    // Checked and taken in one synchronous step: everything below awaits, and a second message
+    // (the UI's queue sends the next one the moment a run ends) must not slip into that gap and
+    // start a second run on the same history.
+    const gate = this.current?.id ?? "__new__";
+    if (this.starting.has(gate) || (this.current && this.runs.has(this.current.id))) {
       this.post({ type: "notice", message: "This chat is already running — wait for the reply or press Stop." });
       return;
     }
+    this.starting.add(gate);
+    const unlock = () => this.starting.delete(gate);
     if (!hasClaudeCredentials()) {
+      unlock();
       this.post({ type: "auth", ok: false });
       this.post({ type: "error", message: "Not logged in to Claude. Click “Log in” above (runs claude login)." });
       return;
@@ -409,6 +429,13 @@ class BrowserHost {
         time: Date.now(),
         messages: [],
       };
+      // Listed now, so the user can switch away and back to it while this first turn runs.
+      try {
+        await this.conversations.save(this.current);
+      } catch (e) {
+        log.error("saving conversation failed", e);
+      }
+      this.postConversations();
     }
     const conv = this.current;
     conv.model ||= this.modelChoice;
@@ -439,6 +466,7 @@ class BrowserHost {
     try {
       sdk = await import("@anthropic-ai/claude-agent-sdk");
     } catch (e) {
+      unlock();
       log.error("Agent SDK failed to load", e);
       this.post({ type: "runState", convId: conv.id, running: false });
       this.post({ type: "error", message: "Agent SDK is missing — re-run the Agent Browser installer." });
@@ -552,24 +580,29 @@ class BrowserHost {
         prepareEdit: async () => false,
         requestApproval: (toolName, input) => {
           const id = `a${++this.seq}`;
+          const card = { type: "approval", id, toolName, input };
           return new Promise<boolean>((resolve) => {
-            this.pendingApprovals.set(id, { resolve, convId: conv.id });
-            live({ type: "approval", id, toolName, input });
+            this.pendingApprovals.set(id, { resolve, convId: conv.id, card });
+            live(card);
           });
         },
         askQuestion: (input) => {
           const id = `q${++this.seq}`;
+          const card = { type: "question", id, questions: (input as any).questions || [] };
           return new Promise<string>((resolve) => {
-            this.pendingQuestions.set(id, { resolve, convId: conv.id });
-            live({ type: "question", id, questions: (input as any).questions || [] });
+            this.pendingQuestions.set(id, { resolve, convId: conv.id, card });
+            live(card);
           });
         },
       }
     );
     this.runs.set(conv.id, handle);
+    this.running.set(conv.id, conv);
+    unlock();
 
     await handle.done;
     this.runs.delete(conv.id);
+    this.running.delete(conv.id);
     // An interrupted run leaves its gates open — close them so the chat frees.
     for (const [id, p] of this.pendingApprovals) {
       if (p.convId === conv.id) {
@@ -584,7 +617,12 @@ class BrowserHost {
       }
     }
     this.post({ type: "runState", convId: conv.id, running: false });
-    if (this.current === conv) this.post({ type: "idle" });
+    if (this.current === conv) {
+      // Switched away and back mid-run: the cards were rebuilt from history without live ids, so show the finished chat afresh.
+      if (this.reopened.delete(conv.id)) this.post({ type: "loadConversation", convId: conv.id, title: conv.title, messages: conv.messages });
+      this.post({ type: "idle" });
+    }
+    this.reopened.delete(conv.id);
     if (this.deleted.delete(conv.id)) return; // deleted while it ran: don't resurrect it
     try {
       await this.conversations.save(conv);
@@ -596,12 +634,18 @@ class BrowserHost {
 
   /** Store a pasted/uploaded file where the agent's Read tool may open it. */
   private saveAttachment(name: unknown, dataUrl: unknown) {
-    const m = /^data:([\w.+-]+\/[\w.+-]+)?;base64,(.+)$/s.exec(typeof dataUrl === "string" ? dataUrl : "");
-    if (!m) return;
-    const base = path.basename(typeof name === "string" && name ? name : "pasted.png").replace(/[^\w.\-]+/g, "_");
+    const parsed = parseDataUrl(dataUrl);
+    if (!parsed) return;
+    const base = safeAttachmentName(name, parsed.mime);
+    const bytes = Buffer.from(parsed.data, "base64");
+    const limit = attachmentLimit(parsed.mime, base);
+    if (bytes.length > limit) {
+      this.post({ type: "notice", message: `That file is too large for the model (${(bytes.length / 1048576).toFixed(1)} MB; the limit for this kind of file is ${(limit / 1048576).toFixed(1)} MB).` });
+      return;
+    }
     const file = path.join(UPLOAD_DIR, `${Date.now().toString(36)}-${base}`);
-    fs.writeFileSync(file, Buffer.from(m[2], "base64"));
-    const isImage = /^image\//.test(m[1] || "") || /\.(png|jpe?g|gif|webp|bmp)$/i.test(base);
+    fs.writeFileSync(file, bytes);
+    const isImage = isImageAttachment(parsed.mime, base);
     this.post({ type: "attached", path: file, name: base, isImage, src: isImage ? dataUrl : undefined });
   }
 
@@ -619,25 +663,41 @@ class BrowserHost {
       process.platform === "win32" ? "claude.exe" : "claude"
     );
     const claude = fs.existsSync(bundled) ? bundled : "claude";
+    let reported = false;
+    const fail = (why: unknown) => {
+      if (reported) return;
+      reported = true;
+      log.error("login terminal failed", why);
+      this.post({ type: "error", message: "Couldn't open a terminal — run `claude login` yourself, then click “I'm logged in”." });
+    };
     try {
+      let child;
       if (process.platform === "win32") {
         // A detached console process on Windows gets its own console window.
-        spawn(claude, ["login"], { detached: true, stdio: "ignore" }).unref();
+        child = spawn(claude, ["login"], { detached: true, stdio: "ignore" });
       } else if (process.platform === "darwin") {
         // Shell-quote the path, then escape that for the AppleScript string.
         const cmd = `'${claude.replace(/'/g, "'\\''")}' login`;
         const script = `tell application "Terminal" to do script "${cmd.replace(/(["\\])/g, "\\$1")}"`;
-        spawn("osascript", ["-e", script, "-e", 'tell application "Terminal" to activate'], {
+        child = spawn("osascript", ["-e", script, "-e", 'tell application "Terminal" to activate'], {
           detached: true,
           stdio: "ignore",
-        }).unref();
+        });
       } else {
-        spawn("x-terminal-emulator", ["-e", claude, "login"], { detached: true, stdio: "ignore" }).unref();
+        child = spawn("x-terminal-emulator", ["-e", claude, "login"], { detached: true, stdio: "ignore" });
       }
+      // A missing binary (no x-terminal-emulator, no `claude` on PATH) is not a
+      // throw: spawn reports it asynchronously, and a terminal that dies at once
+      // (no display, Terminal.app not scriptable) never showed the login either.
+      const started = Date.now();
+      child.on("error", fail);
+      child.on("exit", (code) => {
+        if (code && Date.now() - started < 5000) fail(`exited with code ${code}`);
+      });
+      child.unref();
       this.post({ type: "info", text: "Finish the login in the terminal window, then click “I'm logged in”." });
     } catch (e) {
-      log.error("login terminal failed", e);
-      this.post({ type: "error", message: "Couldn't open a terminal — run `claude login` yourself, then click “I'm logged in”." });
+      fail(e);
     }
   }
 
