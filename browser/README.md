@@ -74,6 +74,16 @@ nothing is retried once with a real mouse event through the DevTools protocol
 read back and, for editors that ignore programmatic input, redone with real key
 input. Extra tools: `wait_for`, `find`, `hover`, `drag`, `upload_file`.
 
+Chat state is the same with either backend: a running chat can be switched away
+from and back to (Stop and any pending approval or question card come back),
+renamed or pinned mid-run, a second message while it runs is refused rather than
+started on the same history, deleting a running chat keeps it deleted, and Stop
+closes an open approval card. Attachments are capped at what the model takes
+(images 3.5 MB, PDFs 10 MB, other files 20 MB — a notice says so); with the local
+helper they are stored in `~/.agent-browser/attachments` and pruned after 7 days.
+Retry and ↩ (rewind) work with the built-in agent only — the helper's session
+can't be truncated, so the panel hides them there.
+
 ## Proxy (per browser profile)
 
 The 🌐 button in the panel opens the proxy settings. It uses `chrome.proxy`, so

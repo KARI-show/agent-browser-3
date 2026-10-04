@@ -324,6 +324,20 @@ remote / panel UI / options), each rebased onto this branch and merged.
 - Recipes replay a recorded `browser_switch_tab` by the tab's address (exact, else same origin + path; honest failure).
 - manifest 0.3.0; `npm run package:browser` → dist-browser/agent-browser.zip (37 files); release checklist in browser/README.md.
   Note: `package:browser` leaves media/main.js minified — `npm run build` before committing (it bit once in this pass).
+
+### Done — native host (browser/host, parallel pass)
+- profile-launcher.ts and the four `native*Profile` host messages deleted (no sender existed; unchecked `rmSync` path and an
+  unauthenticated forwarder).
+- host.ts mirrors localHost's chat state: `running` (live objects → pin/rename on a running chat survive; FileMemento returns
+  clones, so even the open idle chat lost `pinned`), `starting` (synchronous double-send gate), `reopened` (pending approval /
+  question cards re-posted on chat switch, `loadConversation` re-sent at run end), one `deleted` set, `abort()` (Stop and
+  delete close open approval/question cards — before, Stop waited for the card).
+- A new chat is saved and listed when its first run starts (so the user can switch back to it mid-run).
+- Login terminal: spawn 'error' / early non-zero exit on every platform → a clear error instead of a terminal that never opened.
+- browser/host/attachments.ts (testable): data URLs with parameters, limits per kind (3.5 MB images / 10 MB PDFs / 20 MB
+  other → notice, nothing written), safe file names, 7-day pruning of ~/.agent-browser/attachments at start.
+- `regenerate` / `rewind` from the shared UI → a notice (the SDK session can't be truncated); the panel hides those buttons
+  for this backend. Tests: 5 new (browserHost.test.ts) → 147.
 __AGENT_SECTIONS__
 
 ### Open
