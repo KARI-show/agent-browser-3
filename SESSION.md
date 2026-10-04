@@ -229,7 +229,15 @@ Done in this pass (all on claude/cool-cerf-76p498):
 - cli-proxy/queue-manager: disallowedTools as the first-class SDK option (extraArgs worked by Array#toString luck).
 - Tests: tests/automation.test.mjs (10, vm + fakes, incl. the worker pipeline), e2e: network tap, recipes (replay on
   a page with shifted refs, honest failure, re-record), the 🧩 panel, watchers through the real service worker, memory.
-- Removed: fingerprint.js / fp-bridge.js / inject-fingerprint.js (restored by 695c5e0 but loaded by nothing).
+- fingerprint.js / fp-bridge.js / inject-fingerprint.js — RESTORED (see AGENTS.md: do NOT delete).
+
+### TODO: Fix the device config (fingerprint) stack
+The three fingerprint files exist but are broken. DO NOT DELETE THEM. Fix them instead:
+1. **fp-bridge.js** writes config to a DOM element `<div id="__agent_fp">`, but inject-fingerprint.js reads a different global → fix the bridge to use the same mechanism
+2. **Race condition**: inject-fingerprint.js runs BEFORE fp-bridge.js (both are content_scripts at document_start) → ensure bridge runs first, or have inject wait for the config
+3. **Profile launch** creates a fingerprint object in `browser_profile_create` but never passes it to inject-fingerprint.js → wire `agentActiveFingerprint` from chrome.storage into fp-bridge → inject
+4. Re-add the content_scripts entries in manifest.json (they were removed)
+5. Test: create a profile with full device config → launch → verify navigator/canvas/webgl overrides on the target page
 
 ### Open
 - Recipes replay in the panel's tab; a recipe that opens new tabs mid-way follows them (browser_click does) but a
