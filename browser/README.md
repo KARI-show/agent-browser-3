@@ -82,7 +82,14 @@ closes an open approval card. Attachments are capped at what the model takes
 (images 3.5 MB, PDFs 10 MB, other files 20 MB — a notice says so); with the local
 helper they are stored in `~/.agent-browser/attachments` and pruned after 7 days.
 Retry and ↩ (rewind) work with the built-in agent only — the helper's session
-can't be truncated, so the panel hides them there.
+can't be truncated, so the panel hides them there. Retry runs the last message
+again; rewind asks first, drops the chat from that message on and puts its text
+back into the composer; neither works while the chat runs or across a compaction.
+A message the API itself refuses (an oversized image, a block it won't take) is
+taken out of the chat and handed back to the composer; other API errors leave the
+chat as it is. On the free trial, transient gateway errors are retried up to
+three times with a visible "⟳ … retrying" line (Stop cancels the wait), and a
+gateway without a model list is probed once per five minutes, not per message.
 
 ## Proxy (per browser profile)
 

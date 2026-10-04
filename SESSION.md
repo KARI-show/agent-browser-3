@@ -338,6 +338,25 @@ remote / panel UI / options), each rebased onto this branch and merged.
   other → notice, nothing written), safe file names, 7-day pruning of ~/.agent-browser/attachments at start.
 - `regenerate` / `rewind` from the shared UI → a notice (the SDK session can't be truncated); the panel hides those buttons
   for this backend. Tests: 5 new (browserHost.test.ts) → 147.
+
+### Done — built-in engine (browser/standalone, parallel pass)
+- localHost: `/v1/models` probed once per 5 min (one in-flight request, failed/empty/timed-out attempt remembered; recheckAuth
+  re-probes) — no 4 s stall per prompt on a gateway without it.
+- 400 rollback only for request-content errors (`rejectedContent`: 413, 422, 400 invalid_request_error pointing into
+  `messages…`); the user bubble leaves the transcript too and the text goes back to the composer via `loadConversation.draft`
+  (the field the shared UI already handles); other API errors leave the message in place.
+- Chats saved before `promptId` existed (undefined) get their old thinking stripped once like any other prompt change.
+- bridgeAgent: 429/5xx on the initial POST retried ≤3× with Retry-After / 1–2 s backoff and a visible "⟳ … Retrying" line,
+  abortable; `x-should-retry: false` and a Retry-After over 30 s (the trial's daily allowance) are thrown at once; a
+  tool_call without id/name is a protocol error — nothing runs, the turn fails with a clear message.
+- `regenerate` / `rewind` for the built-in backend: onPrompt split into beginRun / prepareHistory / runTurn; regenerate cuts
+  after the last user message and re-runs it; rewind asks first (the shared UI's `confirm` card protocol), truncates both
+  histories (prompts counted from the end so the compaction summary doesn't shift the mapping; refused past a 🗜 marker),
+  saves, reloads with `draft`. `loadConversation` carries a copy of the messages (the UI renders over several frames while a
+  run appends — a real duplicate-bubble hazard the test exposed). entry.ts: `hasKey` / `SETTINGS_KEY` export removed.
+  Tests: 9 new (standalone 5, bridgeAgent 4) → 156; trialSignin e2e 3/3.
+- Known (shared UI, src/webview/main.ts): `userIndex` counts only rendered bubbles (HISTORY_TAIL 40 + "Earlier messages"),
+  so rewind on a chat over 40 entries is off by the hidden count — in VS Code too.
 __AGENT_SECTIONS__
 
 ### Open
