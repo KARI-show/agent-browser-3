@@ -145,7 +145,6 @@ function fnv(text: string): string {
 const PROMPT_ID = fnv(defs.system + JSON.stringify(defs.tools));
 
 (window as any).AgentLocal = {
-  SETTINGS_KEY,
   trialConfigured: !!TRIAL_URL,
 
   /** Which backend the panel should use: the built-in agent ("local") or the native host ("native"). */
@@ -155,11 +154,6 @@ const PROMPT_ID = fnv(defs.system + JSON.stringify(defs.tools));
     if (mode === "subscription") return "native";
     if (mode === "api" && !str(s.apiKey)) return "native"; // chose "own key" but hasn't added one: fall back to the host / setup banner
     return "local";
-  },
-
-  /** Kept for callers that only care whether a key is saved. */
-  async hasKey(): Promise<boolean> {
-    return !!str((await stored()).apiKey);
   },
 
   create(post: (msg: unknown) => void) {
