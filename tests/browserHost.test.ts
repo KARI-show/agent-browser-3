@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { encodeFrames, MAX_FRAME } from "../browser/host/native";
-import { BROWSER_TOOLS, READ_ONLY_TOOLS, browserToolName } from "../browser/host/tools";
+import { ALWAYS_ASK_TOOLS, BROWSER_TOOLS, READ_ONLY_TOOLS, browserToolName } from "../browser/host/tools";
 import { FileMemento } from "../browser/host/memento";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -68,6 +68,9 @@ test("browser tool names and read-only set", () => {
   for (const t of ["browser_cookies_get", "browser_cookies_export"]) {
     assert.ok(!READ_ONLY_TOOLS.has(t), `${t} leaks session secrets — must not be auto-allowed`);
   }
+  // …and asks the user even in Agent mode, like running page scripts and reading API bodies.
+  assert.deepEqual([...ALWAYS_ASK_TOOLS].sort(), ["browser_cookies_export", "browser_cookies_get", "browser_cookies_import", "browser_network_capture", "browser_run_js"]);
+  for (const t of ALWAYS_ASK_TOOLS) assert.ok(!READ_ONLY_TOOLS.has(t), `${t} can't be both read-only and always-ask`);
 });
 
 test("every declared browser tool is implemented in the panel", () => {

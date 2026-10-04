@@ -21,6 +21,8 @@ export interface ToolDef {
   description: string;
   input_schema: Record<string, unknown>;
   readOnly: boolean;
+  /** Needs the user's approval in every mode, Agent included (cookie values, page scripts, API bodies). */
+  alwaysAsk?: boolean;
 }
 
 export type ToolPart = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
@@ -239,7 +241,8 @@ export async function callTool(
   if (!def.readOnly) {
     const mode = typeof o.mode === "function" ? o.mode() : o.mode;
     if (mode === "ask") return say("Read-only (Ask) mode — you can read pages and take screenshots but not click, type or navigate.", true);
-    if (mode === "careful" && !(await cb.approve(name, input))) return say("The user denied this action.", true);
+    // Careful asks for every action; a tool that reaches session data asks in Agent mode too.
+    if ((mode === "careful" || def.alwaysAsk) && !(await cb.approve(name, input))) return say("The user denied this action.", true);
   }
 
   try {

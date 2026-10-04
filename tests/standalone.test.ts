@@ -103,6 +103,7 @@ async function mockApi(script: Scripted[], opts: { models?: string[] } = {}) {
 const TOOLS: ToolDef[] = [
   { name: "browser_read_page", readOnly: true, description: "read", input_schema: { type: "object", properties: {} } },
   { name: "browser_click", readOnly: false, description: "click", input_schema: { type: "object", properties: { ref: { type: "number" } }, required: ["ref"] } },
+  { name: "browser_cookies_get", readOnly: false, alwaysAsk: true, description: "cookies", input_schema: { type: "object", properties: {} } },
 ];
 
 const tick = (ms = 50) => new Promise<void>((r) => setTimeout(r, ms));
@@ -249,6 +250,50 @@ test("modes: ask denies actions but not reads; careful asks first; agent runs fr
     } finally {
       api.close();
     }
+  }
+});
+
+test("a tool that reaches session data asks in Agent mode too; Ask mode refuses it", async () => {
+  const actions = { ran: [] as string[] };
+  const script: Scripted[] = [
+    { blocks: [{ type: "tool_use", id: "t1", name: "browser_cookies_get", input: {} }, { type: "tool_use", id: "t2", name: "browser_click", input: { ref: 1 } }], stop: "tool_use" },
+    { blocks: [{ type: "text", text: "ok" }], stop: "end_turn" },
+  ];
+  const runTool = async (n: string) => (actions.ran.push(n), okText("ran"));
+
+  let api = await mockApi(script);
+  try {
+    const asked: string[] = [];
+    const { cb, log } = callbacks({ approve: async (n) => (asked.push(n), false) });
+    await turn(api, [{ role: "user", content: "go" }], cb, { mode: "agent", runTool });
+    assert.deepEqual(asked, ["browser_cookies_get"], "Agent mode asks for the cookie read and nothing else");
+    assert.deepEqual(actions.ran, ["browser_click"], "denied → not run; the click runs freely");
+    assert.ok(log.includes("result:ERR The user denied this action."));
+  } finally {
+    api.close();
+  }
+
+  actions.ran = [];
+  api = await mockApi(script);
+  try {
+    const { cb } = callbacks({ approve: async () => true });
+    await turn(api, [{ role: "user", content: "go" }], cb, { mode: "agent", runTool });
+    assert.deepEqual(actions.ran, ["browser_cookies_get", "browser_click"], "approved → runs");
+  } finally {
+    api.close();
+  }
+
+  actions.ran = [];
+  api = await mockApi(script);
+  try {
+    let asks = 0;
+    const { cb, log } = callbacks({ approve: async () => (asks++, true) });
+    await turn(api, [{ role: "user", content: "go" }], cb, { mode: "ask", runTool });
+    assert.deepEqual(actions.ran, [], "Ask mode: neither runs");
+    assert.equal(asks, 0, "and nothing is put to the user");
+    assert.ok(log.filter((l) => l.startsWith("result:ERR Read-only (Ask) mode")).length === 2);
+  } finally {
+    api.close();
   }
 });
 
