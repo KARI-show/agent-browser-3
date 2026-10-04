@@ -151,6 +151,13 @@ restores the proxy, forgets the config and unregisters the scripts.
 | Careful | every click / type / navigation needs **Allow** |
 | Ask | read-only — read page, screenshot, list tabs |
 
+In every mode, Agent included, five tools ask first because they reach session
+data a prompt-injected page could make the model leak or plant: reading and
+exporting cookies, importing cookies, running JavaScript in the page, and the
+network tap (API response bodies). The approval card names the tool and what it
+would act on; the system prompt tells the model to prefer the ordinary page
+tools and to say why it needs one of these.
+
 ## Remote (phone & Telegram)
 
 Work with the browser agent from a phone — independent of VS Code. Set it up
@@ -192,6 +199,31 @@ npm run package:browser      # production build + dist-browser/agent-browser.zip
 For the free trial add `AGENT_TRIAL_URL=https://your-gateway` to the build command. Release: upload `agent-browser.zip` to the
 [agent-ide-setup](https://github.com/KARI-show/agent-ide-setup) release — its
 `install-browser.ps1` downloads it from there.
+
+`package:browser` leaves `media/main.js` minified; run `npm run build` again before
+committing anything, or the development bundle in git gets replaced.
+
+### Release checklist
+
+What is automated: `npm run check` (typecheck, build, unit tests) and
+`npm run test:e2e` (every tool against a real Chromium, the remote node, the
+free-trial sign-in). Before a release:
+
+1. `npm run check && npm run test:e2e` green.
+2. Bump `version` in `browser/extension/manifest.json`.
+3. `npm run package:browser` (with `AGENT_TRIAL_URL` if the build has a trial)
+   → `dist-browser/agent-browser.zip`; load `dist-browser/extension` unpacked once
+   and walk `TESTING.md` — the sections marked "by hand" (model behaviour, 👤 / 🧩
+   panels, Remote with a real phone and Telegram, device templates on a live site).
+4. Store listing (the owner's): screenshots, the privacy policy text (what leaves
+   the browser: requests to the chosen API endpoint or gateway, Telegram when
+   configured, nothing else), the description, and the extension id. The
+   `key` in the manifest keeps the id stable for unpacked installs; the Web Store
+   assigns its own id to the uploaded package, so the first store upload must
+   be the one the id is then taken from.
+5. Every permission in the manifest is in use (watchers: alarms + notifications;
+   profiles: proxy, cookies, debugger, scripting; converter: downloads) — a
+   reviewer asks about each one.
 
 ## Install for development
 
