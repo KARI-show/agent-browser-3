@@ -2,7 +2,13 @@
 // browser/host/tools.ts). They run in the side panel page, which has the
 // chrome.tabs / chrome.scripting / chrome.debugger APIs, and act on one
 // "current" tab: the active tab of this panel's window unless the agent
-// switched or opened one.
+// switched or opened one. The same file is imported by the service worker
+// (background.js) so watchers can run with the panel closed — nothing here
+// may touch `window` or the panel's DOM (globalThis + chrome.* only).
+//
+// Every call through AgentBrowserTools.run() is traced: what ran, with which
+// arguments, on which element (a durable locator captured at snapshot time),
+// and how it went. Recipes (automation.js) are built from that trace.
 //
 // How it stays reliable:
 //  - read_page injects into EVERY frame (cross-origin iframes included) and
@@ -18,9 +24,16 @@
 // each must be self-contained (no closures over this file).
 (function () {
   var currentTabId = null;
-  var refTables = {}; // tabId -> { n: { documentId, local } } from the last snapshot
+  var refTables = {}; // tabId -> { n: { documentId, local, loc } } from the last snapshot
+  var lastTab = null; // { id, url, title } of the tab the last tool call worked on (for the trace)
 
   var STALE = "That element is gone — the page changed. Call browser_read_page again.";
+  var inWorker = typeof window === "undefined"; // background.js (service worker) vs the side panel
+
+  function auto() {
+    if (!globalThis.AgentAutomation) throw new Error("The automation module (recipes, watchers, memory) didn't load.");
+    return globalThis.AgentAutomation;
+  }
 
   function sleep(ms) {
     return new Promise(function (r) { setTimeout(r, ms); });
@@ -61,6 +74,7 @@
       currentTabId = null; // don't stay pinned to a page we refuse to operate
       throw new Error("That is the extension's own page — the agent doesn't operate it. Switch to a website tab (browser_tabs, browser_switch_tab).");
     }
+    lastTab = { id: tab.id, url: tab.url || "", title: tab.title || "" };
     return tab;
   }
 
@@ -478,12 +492,33 @@
         if (href && !/^javascript:/i.test(href)) extra.push("→ " + clean(href, 70));
       }
       if (!f.inView && !f.hidden) extra.push("(off-screen)");
+      // What still identifies this element after the page re-renders (recipes replay by it, not by ref).
+      // Generated ids (React/Ember/Radix, hashes, counters) are left out — they change on every load.
+      var id = el.id && /^[A-Za-z][\w-]{0,40}$/.test(el.id) && !/\d{3,}|^(ember|react|radix|headlessui|mui|yui|ext|__)/i.test(el.id) ? el.id : "";
+      var href = "";
+      if (tag === "a") {
+        var raw = el.getAttribute("href") || "";
+        if (raw && !/^(javascript:|#|mailto:|tel:)/i.test(raw)) {
+          try { var u = new URL(raw, location.href); href = (u.pathname + u.search).slice(0, 120); } catch (_) { href = raw.slice(0, 120); }
+        }
+      }
+      var formy = tag === "input" || tag === "textarea" || tag === "select" || tag === "button";
+      var loc = {
+        kind: kind,
+        text: label,
+        id: id,
+        test: el.getAttribute("data-testid") || el.getAttribute("data-test") || el.getAttribute("data-cy") || el.getAttribute("data-qa") || "",
+        name: formy ? el.getAttribute("name") || "" : "",
+        ph: tag === "input" || tag === "textarea" ? clean(el.placeholder, 60) : "",
+        href: href,
+      };
       return {
         kind: kind,
         label: label,
         extra: extra.join(" "),
         inModal: inModal(el),
         local: refs.length,
+        loc: loc,
       };
     });
 
@@ -850,7 +885,7 @@
   // Re-apply an override on every load of a tab. One watcher per tab, shared by the UA tools: a new one replaces
   // the old (no stacked listeners); what each wanted done when the tab closes still runs.
   function watchTabLoads(tabId, onLoading, onClose) {
-    var all = (window.__agentUaListeners = window.__agentUaListeners || {});
+    var all = (globalThis.__agentUaListeners = globalThis.__agentUaListeners || {});
     var prev = all[tabId];
     if (prev) {
       chrome.tabs.onUpdated.removeListener(prev.updated);
@@ -967,6 +1002,56 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Network capture (browser_network_capture): per tab, the JSON/text responses seen since start.
+
+  var captures = {}; // tabId -> { filter, entries: [{ requestId, method, url, status, mime, size, body }], pending }
+  var CAPTURE_MIMES = /json|javascript|text\/plain|xml|graphql|csv/i;
+  var BODY_CAP = 300000;
+
+  chrome.debugger.onEvent.addListener(function (source, method, params) {
+    var c = captures[source.tabId];
+    if (!c || !params) return;
+    if (method === "Network.requestWillBeSent") {
+      var req = params.request || {};
+      if (c.filter && String(req.url || "").indexOf(c.filter) === -1) return;
+      if (params.type && !/^(XHR|Fetch|Document|Other)$/.test(params.type)) return;
+      c.pending[params.requestId] = { method: req.method || "GET", url: req.url || "", type: params.type };
+    } else if (method === "Network.responseReceived") {
+      var p = c.pending[params.requestId];
+      if (!p) return;
+      var res = params.response || {};
+      p.status = res.status;
+      p.mime = res.mimeType || "";
+      if (!CAPTURE_MIMES.test(p.mime) && !(params.type === "XHR" || params.type === "Fetch")) delete c.pending[params.requestId];
+    } else if (method === "Network.loadingFinished") {
+      var done = c.pending[params.requestId];
+      if (!done) return;
+      delete c.pending[params.requestId];
+      done.requestId = params.requestId;
+      done.size = params.encodedDataLength || 0;
+      done.body = null; // fetched lazily; CDP keeps bodies while the session lives
+      c.entries.push(done);
+      if (c.entries.length > c.max) c.entries.shift();
+    } else if (method === "Network.loadingFailed") {
+      delete c.pending[params.requestId];
+    }
+  });
+
+  async function fetchBody(tabId, entry) {
+    try {
+      var r = await cdp(tabId, "Network.getResponseBody", { requestId: entry.requestId });
+      var body = r.base64Encoded ? "(binary, " + Math.round((r.body.length * 3) / 4) + " bytes)" : String(r.body || "");
+      if (/json/i.test(entry.mime) || /^[\[{]/.test(body.trim())) {
+        try { body = JSON.stringify(JSON.parse(body), null, 1); } catch (_) {}
+      }
+      entry.body = body.length > BODY_CAP ? body.slice(0, BODY_CAP) + "\n… (body truncated at 300 KB)" : body;
+    } catch (e) {
+      entry.body = "(body no longer available: " + String((e && e.message) || e) + ")";
+    }
+    return entry.body;
+  }
+
+  // ---------------------------------------------------------------------------
   // Snapshot assembly (all frames).
 
   var refLabels = {}; // tabId -> { n: "[n] kind \"label\"…" } from the last snapshot (for approval cards)
@@ -1002,10 +1087,15 @@
         .concat(entries.filter(function (x) { return !inDialog(x); }).map(function (x) { x.behind = true; return x; }));
     }
     var listed = entries.slice(0, budget);
+    var seenKeys = {}; // kind|text|frame -> count, so a repeated label ("Delete" in every row) keeps its ordinal
     listed.forEach(function (x) {
       n++;
-      table[n] = { documentId: x.f.documentId, local: x.e.local };
-      var where = x.fi === 0 ? "" : " ⧉ frame " + frameHost(x.f.result.url);
+      var frame = x.fi === 0 ? "" : frameHost(x.f.result.url);
+      var loc = Object.assign({}, x.e.loc || { kind: x.e.kind, text: x.e.label }, { frame: frame });
+      var key = loc.kind + "|" + loc.text + "|" + frame;
+      loc.nth = seenKeys[key] = (seenKeys[key] || 0) + 1;
+      table[n] = { documentId: x.f.documentId, local: x.e.local, loc: loc };
+      var where = frame ? " ⧉ frame " + frame : "";
       lines.push("[" + n + "] " + x.e.kind + (x.e.label ? ' "' + x.e.label + '"' : "") + (x.e.extra ? " " + x.e.extra : "") + where + (x.behind ? " (behind dialog)" : ""));
     });
     refTables[tab.id] = table;
@@ -1163,7 +1253,13 @@
     browser_read_page: async function (a) {
       var s = await snapshot(a.maxChars || 8000);
       // The page text is budgeted inside the snapshot; this is only a safety net for pathological pages.
-      return text(s.text.length > 120000 ? s.text.slice(0, 120000) + "\n… (output truncated)" : s.text);
+      var out = s.text.length > 120000 ? s.text.slice(0, 120000) + "\n… (output truncated)" : s.text;
+      // Site memory: what was learnt about this site earlier rides along with the first look at it.
+      if (globalThis.AgentAutomation) {
+        var notes = await globalThis.AgentAutomation.memoryBlock(s.top.url).catch(function () { return ""; });
+        if (notes) out += "\n\n" + notes;
+      }
+      return text(out);
     },
 
     browser_find: async function (a) {
@@ -1458,13 +1554,63 @@
     },
 
     // =========================================================================
+    // Network tap — the responses the page itself receives (its JSON API), through the DevTools
+    // protocol. Far more robust than scraping a rendered list: pagination, ids and fields come as data.
+    // =========================================================================
+
+    browser_network_capture: async function (a) {
+      var tab = await currentTab();
+      var action = a.action || "read";
+      if (action === "start") {
+        var filter = String(a.urlFilter || "").trim();
+        var cap = { filter: filter, entries: [], pending: {}, max: 60 };
+        captures[tab.id] = cap;
+        pinned[tab.id] = true;
+        clearTimeout(detachTimers[tab.id]);
+        await cdp(tab.id, "Network.enable", { maxResourceBufferSize: 20 * 1024 * 1024, maxTotalBufferSize: 50 * 1024 * 1024 });
+        return text("Capturing network responses on this tab" + (filter ? ' (URLs containing "' + filter + '")' : "") +
+          ". Now do what loads the data (scroll, click, search, reload), then call browser_network_capture with action=read. " +
+          "Chrome shows its debugging bar on the tab while the capture is on; action=stop ends it.");
+      }
+      var c = captures[tab.id];
+      if (action === "stop") {
+        if (c) {
+          delete captures[tab.id];
+          delete pinned[tab.id];
+          await cdp(tab.id, "Network.disable", {}).catch(function () {});
+        }
+        return text(c ? "Capture stopped (" + c.entries.length + " responses were recorded; they are discarded)." : "No capture was running on this tab.");
+      }
+      if (!c) throw new Error("No capture is running on this tab — call browser_network_capture with action=start first, then trigger the request.");
+      if (a.index !== undefined && a.index !== null) {
+        var e = c.entries[Number(a.index)];
+        if (!e) throw new Error("No captured response #" + a.index + " (there are " + c.entries.length + ").");
+        var body = e.body == null ? await fetchBody(tab.id, e) : e.body;
+        var limit = Math.min(200000, Math.max(1000, Number(a.maxChars) || 30000));
+        return text("#" + a.index + " " + e.method + " " + e.url + " → " + e.status + " " + e.mime + " (" + body.length + " chars)\n\n" +
+          (body.length > limit ? body.slice(0, limit) + "\n… (truncated — pass maxChars for more, or narrow with urlFilter)" : body));
+      }
+      var filt = String(a.urlFilter || "").toLowerCase();
+      var rows = [];
+      for (var i = 0; i < c.entries.length; i++) {
+        var en = c.entries[i];
+        if (filt && en.url.toLowerCase().indexOf(filt) === -1) continue;
+        var preview = en.body == null ? await fetchBody(tab.id, en).catch(function () { return ""; }) : en.body;
+        rows.push("#" + i + " " + en.method + " " + en.url.slice(0, 160) + " → " + en.status + " " + en.mime + " " + (en.size ? en.size + " B" : "") +
+          (preview ? "\n    " + preview.replace(/\s+/g, " ").slice(0, 220) : ""));
+      }
+      if (!rows.length) return text(c.entries.length ? "No captured responses match that filter (" + c.entries.length + " captured)." : "Nothing captured yet — trigger the request (scroll, click, reload) and read again.");
+      return text("Captured responses (" + rows.length + (filt ? " matching" : "") + "; action=read with index=N gives a full body):\n" + rows.join("\n"));
+    },
+
+    // =========================================================================
     // Document Converter
     // =========================================================================
 
     browser_convert: async function (a) {
-      if (!window.AgentConverter) throw new Error("Converter not loaded");
+      if (!globalThis.AgentConverter) throw new Error("Converter not loaded");
       var cur = await currentTab().catch(function () { return null; });
-      var result = await window.AgentConverter.convert({
+      var result = await globalThis.AgentConverter.convert({
         from: a.from, to: a.to, data: a.data || "",
         filename: a.filename, title: a.title,
         quality: a.quality, maxWidth: a.maxWidth, maxHeight: a.maxHeight,
@@ -1477,7 +1623,7 @@
         result.blob = await htmlToPdf(result.html);
       }
       if (result.blob && a.save !== false) {
-        var dl = await window.AgentConverter.download(result.blob, result.filename);
+        var dl = await globalThis.AgentConverter.download(result.blob, result.filename);
         if (!dl.ok) return text("Conversion done but save failed: " + dl.error);
         return text("Converted and saved: " + dl.filename + " (" + (dl.size || result.blob.size) + " bytes)" + (result.rows ? " — " + result.rows + " rows" : ""));
       }
@@ -1486,7 +1632,7 @@
     },
 
     browser_page_to_pdf: async function () {
-      if (!window.AgentConverter) throw new Error("Converter not loaded");
+      if (!globalThis.AgentConverter) throw new Error("Converter not loaded");
       var tab = await currentTab();
       // Render the actual page (styles, images and layout intact) to PDF via the
       // DevTools protocol, so it's the tab the agent is on — not the side panel —
@@ -1494,7 +1640,7 @@
       var pdf = await cdp(tab.id, "Page.printToPDF", { printBackground: true });
       var blob = pdfBlob(pdf.data);
       var name = (tab.title || "page").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 50) + ".pdf";
-      var dl = await window.AgentConverter.download(blob, name);
+      var dl = await globalThis.AgentConverter.download(blob, name);
       if (!dl.ok) return text("Rendered the page to PDF but saving failed: " + dl.error);
       return text("Saved the page as PDF: " + dl.filename + " (" + (dl.size || blob.size) + " bytes)");
     },
@@ -1521,22 +1667,22 @@
         mime = "text/html";
       }
       var blob = new Blob([content], { type: mime });
-      var dl = await window.AgentConverter.download(blob, filename);
+      var dl = await globalThis.AgentConverter.download(blob, filename);
       if (!dl.ok) throw new Error("Saving failed: " + dl.error);
       return text("Saved: " + dl.filename + " (" + (dl.size || blob.size) + " bytes)");
     },
 
     browser_screenshot_save: async function (a) {
-      if (!window.AgentConverter) throw new Error("Converter not loaded");
+      if (!globalThis.AgentConverter) throw new Error("Converter not loaded");
       var format = (a.format || "png").toLowerCase();
       var tab = await currentTab(); // the tab the agent works in, whichever window it is in
       if (!tab.active) {
         await chrome.tabs.update(tab.id, { active: true });
         await sleep(300);
       }
-      var result = await window.AgentConverter.convert({ from: "screenshot", to: format, quality: a.quality, filename: a.filename, windowId: tab.windowId });
+      var result = await globalThis.AgentConverter.convert({ from: "screenshot", to: format, quality: a.quality, filename: a.filename, windowId: tab.windowId });
       if (result.error) throw new Error(result.error);
-      var dl = await window.AgentConverter.download(result.blob, result.filename);
+      var dl = await globalThis.AgentConverter.download(result.blob, result.filename);
       if (!dl.ok) throw new Error("Saving failed: " + dl.error);
       return text("Screenshot saved: " + dl.filename + " (" + (dl.size || result.size) + " bytes)");
     },
@@ -1834,10 +1980,16 @@
 
       var url = a.url || p.startUrl || "about:blank";
 
-      // 1. Open a new window via background (side panel can't call chrome.windows.create in Edge)
-      var winRes = await chrome.runtime.sendMessage({ type: "createWindow", options: { url: "about:blank", focused: true } });
-      if (!winRes || !winRes.ok || !winRes.win || !winRes.win.id) throw new Error("Failed to create window — background returned: " + JSON.stringify(winRes));
-      var winId = winRes.win.id;
+      // 1. Open a new window via background (side panel can't call chrome.windows.create in Edge);
+      //    the service worker is that background and creates it directly.
+      var winId;
+      if (inWorker) {
+        winId = (await chrome.windows.create({ url: "about:blank", focused: true })).id;
+      } else {
+        var winRes = await chrome.runtime.sendMessage({ type: "createWindow", options: { url: "about:blank", focused: true } });
+        if (!winRes || !winRes.ok || !winRes.win || !winRes.win.id) throw new Error("Failed to create window — background returned: " + JSON.stringify(winRes));
+        winId = winRes.win.id;
+      }
       var tabs = await chrome.tabs.query({ windowId: winId });
       var tab = tabs[0];
       if (!tab) throw new Error("No tab in new window — try again");
@@ -1988,9 +2140,87 @@
       await endProfile(a.profileId);
       return text("Deleted profile '" + name + "'.");
     },
+
+    // =========================================================================
+    // Recipes, watchers, site memory — implemented in automation.js (shared with the service worker);
+    // declared here so every tool the model can call has one dispatch table.
+    // =========================================================================
+
+    browser_recipe_save: async function (a) { return text(await auto().recipeSave(a)); },
+    browser_recipe_run: async function (a) { return text(await auto().recipeRunTool(a)); },
+    browser_recipe_list: async function (a) { return text(await auto().recipeList(a)); },
+    browser_recipe_delete: async function (a) { return text(await auto().recipeDelete(a)); },
+    browser_watch_create: async function (a) { return text(await auto().watchCreate(a, lastTab)); },
+    browser_watch_list: async function (a) { return text(await auto().watchList(a)); },
+    browser_watch_delete: async function (a) { return text(await auto().watchDelete(a)); },
+    browser_memory_save: async function (a) { return text(await auto().memorySave(a, lastTab)); },
+    browser_memory_list: async function (a) { return text(await auto().memoryList(a, lastTab)); },
+    browser_memory_delete: async function (a) { return text(await auto().memoryDelete(a, lastTab)); },
   };
 
-  window.AgentBrowserTools = {
+  // ---------------------------------------------------------------------------
+  // Trace: every run() call, with the locator of the element it acted on, for recipes.
+
+  var trace = [];
+  var stepListeners = [];
+  var turnInfo = null; // set by the panel: which chat/turn the steps belong to
+  var TRACE_MAX = 500;
+  var SECRET_ARGS = { browser_cookies_set: 1, browser_cookies_import: 1, browser_profile_create: 1 };
+
+  function refLoc(ref) {
+    var e = (refTables[currentTabId] || {})[ref];
+    return e && e.loc ? Object.assign({}, e.loc) : null;
+  }
+
+  // Arguments as they may be stored: no file bytes, no cookie values, no passwords.
+  function traceArgs(name, args) {
+    var a = {};
+    Object.keys(args).forEach(function (k) {
+      var v = args[k];
+      if (name === "browser_upload_file" && k === "data") return;
+      if (SECRET_ARGS[name] && k !== "name" && k !== "domain" && k !== "url" && k !== "deviceType") return;
+      a[k] = v;
+    });
+    return a;
+  }
+
+  function beginStep(name, args) {
+    var step = { t: Date.now(), name: name, args: traceArgs(name, args), urlBefore: lastTab ? lastTab.url : "" };
+    if (turnInfo) step.turn = turnInfo;
+    if (args.ref !== undefined) step.loc = refLoc(args.ref);
+    if (args.fromRef !== undefined) step.loc = refLoc(args.fromRef);
+    if (args.toRef !== undefined) step.toLoc = refLoc(args.toRef);
+    if (name === "browser_fill_form" && args.fields) {
+      var fields = Array.isArray(args.fields) ? args.fields : Object.entries(args.fields).map(function (e) { return { ref: Number(e[0]), value: e[1] }; });
+      step.args.fields = fields.map(function (f) {
+        var loc = refLoc(f.ref);
+        var secret = !!(loc && /password/.test(loc.kind));
+        return { ref: f.ref, value: secret ? "{{password}}" : f.value, loc: loc, secret: secret };
+      });
+    }
+    if (name === "browser_type" && step.loc && /password/.test(step.loc.kind)) {
+      step.args.text = "{{password}}";
+      step.secret = true;
+    }
+    return step;
+  }
+
+  function outText(out) {
+    return (out || []).filter(function (p) { return p.type === "text"; }).map(function (p) { return p.text; }).join("\n");
+  }
+
+  function endStep(step, out, err) {
+    step.ms = Date.now() - step.t;
+    step.ok = !err;
+    if (err) step.error = String((err && err.message) || err).slice(0, 300);
+    else step.out = outText(out).slice(0, 300);
+    step.url = lastTab ? lastTab.url : step.urlBefore;
+    trace.push(step);
+    if (trace.length > TRACE_MAX) trace.splice(0, trace.length - TRACE_MAX);
+    stepListeners.forEach(function (fn) { try { fn(step); } catch (_) {} });
+  }
+
+  globalThis.AgentBrowserTools = {
     /** Words for what a call would act on — the element behind a ref, or the address — for approval cards. */
     describe: function (name, args) {
       args = args || {};
@@ -2003,11 +2233,39 @@
       if (args.toText) parts.push("onto \"" + args.toText + "\"");
       return parts.length ? parts.join(" ") : undefined;
     },
-    run: function (name, args) {
+    /** Run a tool; the call lands in the trace (replay=true marks a recipe's own steps). */
+    run: function (name, args, replay) {
       var fn = TOOLS[name];
       if (!fn) return Promise.reject(new Error("Unknown browser tool: " + name));
-      return fn(args);
+      args = args || {};
+      var step = beginStep(name, args);
+      if (replay) step.replay = true;
+      // Where the tab ended up is part of the record (the next step's "page before").
+      var after = function () {
+        if (currentTabId === null) return Promise.resolve();
+        return chrome.tabs.get(currentTabId).then(function (t) { lastTab = { id: t.id, url: t.url || "", title: t.title || "" }; }, function () {});
+      };
+      return fn(args).then(
+        function (out) { return after().then(function () { endStep(step, out, null); return out; }); },
+        function (err) { return after().then(function () { endStep(step, null, err); throw err; }); }
+      );
     },
+    names: Object.keys(TOOLS),
+    /** The recorded steps (a copy), oldest first. */
+    trace: function () { return trace.slice(); },
+    clearTrace: function () { trace.length = 0; },
+    onStep: function (fn) { stepListeners.push(fn); return function () { stepListeners = stepListeners.filter(function (f) { return f !== fn; }); }; },
+    /** The panel tells which chat/turn the next steps belong to ({ convId, turn }). */
+    setTurn: function (info) { turnInfo = info || null; },
+    /** Fresh refs of the current page with their locators: [{ ref, loc }] — recipes match against these. */
+    refs: async function () {
+      await snapshot(500);
+      var table = refTables[currentTabId] || {};
+      return Object.keys(table).map(function (n) { return { ref: Number(n), loc: table[n].loc }; });
+    },
+    /** Work on this tab from now on (watchers run in a tab of their own). */
+    setCurrentTab: function (tabId) { currentTabId = tabId; },
+    currentTabId: function () { return currentTabId; },
     /** User-Agent presets for the 👤 panel: the same generator the tools use. */
     uaPreset: uaPreset,
     uaPresetNames: Object.keys(UA_PRESETS),

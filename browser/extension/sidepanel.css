@@ -97,6 +97,104 @@ body.browser.remote #remoteBtn { display: inline-flex; }
   color: var(--vscode-descriptionForeground, #888);
 }
 
+/* ── Automations panel (recipes · watchers · memory) ──────────────── */
+#automations-panel {
+  position: absolute;
+  top: 36px;
+  left: 0; right: 0; bottom: 0;
+  background: var(--vscode-editor-background, #1e1e1e);
+  z-index: 102;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+#automations-panel.hidden { display: none; }
+#autoBtn { position: relative; }
+.auto-badge {
+  position: absolute;
+  top: 3px; right: 3px;
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--vscode-focusBorder, #4aa3ff);
+  box-shadow: 0 0 0 2px var(--vscode-sideBar-background, #1b1b1f);
+}
+.auto-badge.hidden { display: none; }
+.prof-status.good { color: var(--vscode-testing-iconPassed, #3fb950); }
+.prof-status.bad { color: var(--vscode-errorForeground, #f85149); }
+.cmd-desc.bad { color: var(--vscode-errorForeground, #f85149); }
+.cmd-item.paused { opacity: 0.6; }
+.cmd-name.note { font-weight: 400; white-space: pre-wrap; }
+.steps { margin: 4px 0; }
+.step-line {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 3px 0;
+  font-size: 12px;
+  color: var(--vscode-foreground, #ddd);
+  border-bottom: 1px solid var(--vscode-panel-border, #333);
+}
+.step-n {
+  flex-shrink: 0;
+  min-width: 18px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--vscode-descriptionForeground, #888);
+}
+.step-line.running .step-n::after { content: " …"; }
+.step-line.running { color: var(--vscode-focusBorder, #4aa3ff); }
+.step-line.ok { color: var(--vscode-descriptionForeground, #9d9d9d); }
+.step-line.ok .step-n { color: var(--vscode-testing-iconPassed, #3fb950); }
+.step-line.failed { color: var(--vscode-errorForeground, #f85149); }
+.param-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 12px; }
+.param-row label { flex: 1; min-width: 0; color: var(--vscode-foreground, #ddd); }
+.param-row code { font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; }
+.param-row .param-name {
+  width: 110px;
+  padding: 3px 6px;
+  font-size: 11px;
+  background: var(--vscode-input-background, #2a2a2e);
+  color: var(--vscode-input-foreground, #ddd);
+  border: 1px solid var(--vscode-input-border, #444);
+  border-radius: 4px;
+}
+.auto-pre {
+  margin: 4px 0;
+  padding: 8px;
+  max-height: 220px;
+  overflow: auto;
+  font-size: 11px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  background: var(--vscode-terminal-background, #0d1117);
+  color: var(--vscode-terminal-foreground, #d4d4d4);
+  border: 1px solid var(--vscode-panel-border, #333);
+  border-radius: 6px;
+  white-space: pre-wrap;
+}
+.diff { margin-top: 4px; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; }
+.diff-add { color: var(--vscode-testing-iconPassed, #3fb950); white-space: pre-wrap; }
+.diff-del { color: var(--vscode-errorForeground, #f85149); white-space: pre-wrap; opacity: 0.85; }
+.cmd-item.event { cursor: default; }
+.cmd-item.event .prof-actions { margin-top: 6px; }
+.prof-btn.small { padding: 4px 10px; font-size: 12px; }
+
+/* "Save as recipe" strip above the composer, after a task finished. */
+#recipe-offer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 10px 6px;
+  padding: 6px 8px 6px 10px;
+  font-size: 12px;
+  color: var(--vscode-foreground, #ddd);
+  background: var(--vscode-editorWidget-background, #252526);
+  border: 1px solid var(--vscode-panel-border, #333);
+  border-radius: 8px;
+}
+#recipe-offer.hidden { display: none; }
+#recipe-offer .offer-text { flex: 1; min-width: 0; color: var(--vscode-descriptionForeground, #9d9d9d); }
+#recipe-offer .offer-icon { font-size: 14px; }
+
 /* ── Profiles panel ────────────────────────────────────────────────── */
 #profiles-panel {
   position: absolute;
