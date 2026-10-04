@@ -18,6 +18,8 @@ export interface RemoteInfo {
   tunnelError?: string;
   /** Whether the relay's Telegram bot (navigation + Mini App) is running. */
   bot: boolean;
+  /** Why it isn't although a token was given (rejected token, no network…); relay and tunnel are unaffected. */
+  botError?: string;
 }
 
 /**
@@ -59,6 +61,7 @@ export class RemoteServices {
     const botToken = (opts.botToken || "").trim();
     const userId = (opts.userId || "").trim();
     let bot = false;
+    let botError: string | undefined;
     if (botToken && userId) {
       this.bot = this.spawnNode("bot", path.join(RELAY_DIR, "bot.mjs"), {
         BOT_TOKEN: botToken,
@@ -69,10 +72,40 @@ export class RemoteServices {
         BOT_APP_NAME: "Agent Browser",
         BOT_EMPTY_HINT: "Nothing online yet — keep the Agent Browser side panel open, then tap Refresh.",
       });
-      bot = true;
+      botError = await this.botVerdict(this.bot);
+      bot = !botError;
+      if (botError) {
+        log.warn(`remote: the Telegram bot isn't running — ${botError}`);
+        this.bot = undefined;
+      }
     }
     log.info(`remote: relay ${relayUrl}, public ${publicUrl || "—"}, bot ${bot ? "on" : "off"}`);
-    return { relayUrl, token: this.token, publicUrl, tunnelError, bot };
+    return { relayUrl, token: this.token, publicUrl, tunnelError, bot, botError };
+  }
+
+  /**
+   * How the bot's start went: undefined once it reports itself online, else why it quit (bot.mjs
+   * exits with the reason on stderr when Telegram rejects the token or can't be reached). A bot
+   * that is still trying after a while is left to it — a slow network is not a failure.
+   */
+  private botVerdict(cp: ChildProcess): Promise<string | undefined> {
+    return new Promise((resolve) => {
+      let lastErr = "";
+      const timer = setTimeout(() => resolve(undefined), 10_000);
+      const done = (why?: string) => {
+        clearTimeout(timer);
+        resolve(why);
+      };
+      cp.stdout?.on("data", (d) => {
+        if (/ online;/.test(String(d))) done();
+      });
+      cp.stderr?.on("data", (d) => {
+        const lines = String(d).trim().split("\n").filter(Boolean);
+        if (lines.length) lastErr = lines[lines.length - 1].replace(/^bot: /, "");
+      });
+      cp.on("exit", (code) => done(lastErr || `the bot exited right after starting (code ${code})`));
+      cp.on("error", (e) => done(e.message));
+    });
   }
 
   stop() {

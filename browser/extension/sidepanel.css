@@ -15,6 +15,11 @@ body.browser #changes-bar {
    this browser's own remote switch (relay.js), so bring it back. */
 body.browser.remote #remoteBtn { display: inline-flex; }
 
+/* The native host can't re-run or roll back a turn (the built-in agent can): no ↻ Retry (last
+   .msg-act of an answer) and no ↩ rewind (last .rewind-btn of a user message) on that backend. */
+body.backend-native .msg-actions .msg-act:last-child,
+body.backend-native .user-tools .rewind-btn:last-child { display: none !important; }
+
 /* Proxy status on the 🌐 button: green ring when on, red when broken. */
 #proxyBtn[data-state="active"] { box-shadow: inset 0 0 0 1.5px var(--vscode-testing-iconPassed); }
 #proxyBtn[data-state="error"] { box-shadow: inset 0 0 0 1.5px var(--vscode-errorForeground); }
