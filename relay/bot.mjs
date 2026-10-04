@@ -5,7 +5,8 @@
 // nothing in the bot. Only the whitelisted Telegram user id is served.
 //
 // env: BOT_TOKEN, TG_USER_ID, RELAY_URL (ws://127.0.0.1:8790), RELAY_TOKEN,
-//      PUBLIC_URL (https://xxxx.trycloudflare.com)
+//      PUBLIC_URL (https://xxxx.trycloudflare.com),
+//      TELEGRAM_API (tests only: a stand-in for https://api.telegram.org)
 import { WebSocket } from "ws";
 
 const BOT_TOKEN = process.env.BOT_TOKEN || "";
@@ -20,7 +21,7 @@ if (!BOT_TOKEN || !TG_USER_ID) {
   console.error("bot: need BOT_TOKEN and TG_USER_ID");
   process.exit(1);
 }
-const API = `https://api.telegram.org/bot${BOT_TOKEN}`;
+const API = `${(process.env.TELEGRAM_API || "https://api.telegram.org").replace(/\/+$/, "")}/bot${BOT_TOKEN}`;
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), "bot", ...a);
 
 // ── relay client: keep a live view of nodes/folders/chats ──
@@ -95,8 +96,14 @@ async function poll() {
   await tg("deleteWebhook", { drop_pending_updates: false });
   const me = await tg("getMe");
   if (!me?.ok) {
-    log("getMe failed — check BOT_TOKEN:", JSON.stringify(me));
-    return;
+    // Nothing would ever work from here. Quit with the reason, so whoever started the bot (the
+    // browser helper, a shell) sees it — not a process that stays up and never answers.
+    console.error(
+      me
+        ? `bot: Telegram rejected the bot token (${me.description || `error ${me.error_code}`}) — check BOT_TOKEN`
+        : "bot: can't reach api.telegram.org — check the network"
+    );
+    process.exit(1);
   }
   log(`@${me.result.username} online; whitelist id ${TG_USER_ID}`);
   // Greet the owner so it's obvious the bot is alive (works only after the user

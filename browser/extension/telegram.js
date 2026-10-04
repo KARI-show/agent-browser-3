@@ -15,7 +15,7 @@
   var bot = null; // { token, userId, ctrl, offset, username }
   var turn = null; // the task started from Telegram that is running now
   var approvals = {}; // approval id → Telegram message id
-  var question = null; // { id, questions, msgId } waiting for an answer
+  var question = null; // { id, questions } waiting for an answer
 
   function R() { return window.AgentRemote; }
   function noop() {}
@@ -337,11 +337,8 @@
           return [{ text: String(o.label).slice(0, 60), callback_data: "q:" + j + ":" + d.id }];
         }) }
       : undefined;
-    question = { id: d.id, questions: qs, msgId: null };
-    var q = question;
-    say("❓ " + lines.join("\n\n") + "\n\n" + (buttons ? "Tap an option or reply with your own answer." : "Reply with your answer."), markup)
-      .then(function (msg) { q.msgId = msg.message_id; })
-      .catch(noop);
+    question = { id: d.id, questions: qs };
+    say("❓ " + lines.join("\n\n") + "\n\n" + (buttons ? "Tap an option or reply with your own answer." : "Reply with your answer."), markup).catch(noop);
   }
 
   function answerQuestion(text) {

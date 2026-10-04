@@ -40,6 +40,8 @@ chrome.runtime.onStartup.addListener(function () { AgentAutomation.syncAlarms().
 // loopback forwarder in the native host does the SOCKS login and Chrome is
 // pointed at it (host port stays open while the proxy is active).
 
+importScripts("proxyConfig.js"); // the same validation the options page runs before saving
+
 var CONFIG_KEY = "agentProxy";
 var STATUS_KEY = "agentProxyStatus";
 var HOST = "com.kari.agent_browser";
@@ -59,15 +61,6 @@ function setStatus(state, message) {
   chrome.action.setBadgeBackgroundColor({ color: state === "error" ? "#cf222e" : "#1a7f37" }).catch(function () {});
   chrome.action.setBadgeText({ text: state === "off" ? "" : state === "error" ? "!" : "P" }).catch(function () {});
   chrome.action.setTitle({ title: "Agent Browser" + (state === "active" ? " — proxy on" : state === "error" ? " — proxy problem" : "") }).catch(function () {});
-}
-
-function validate(c) {
-  if (!c || !c.enabled) return null;
-  var port = Number(c.port);
-  if (!c.host || !String(c.host).trim()) return "Proxy host is empty.";
-  if (!Number.isInteger(port) || port < 1 || port > 65535) return "Proxy port must be 1–65535.";
-  if (["http", "https", "socks5"].indexOf(c.type) === -1) return "Unknown proxy type.";
-  return null;
 }
 
 function randomToken() {
@@ -171,7 +164,7 @@ async function doApply() {
   authTried = {};
   var cfg = await getConfig();
   closeHost();
-  var problem = validate(cfg);
+  var problem = AgentProxyConfig.validate(cfg);
   if (!cfg || !cfg.enabled) {
     await chrome.proxy.settings.clear({ scope: "regular" });
     await applyPrivacy(cfg || {}, false);

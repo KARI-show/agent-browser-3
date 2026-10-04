@@ -72,7 +72,9 @@ function portOpen(port) {
 }
 
 const inPanel = (expr) => cdp.evaluate(panel, expr);
-const setRemote = (cfg) => inPanel(`chrome.storage.local.set({ agentRemote: ${JSON.stringify(cfg)} }).then(() => true)`);
+// The settings (chrome.storage.local) plus the "on in this browser session" flag 🛰 toggles (chrome.storage.session).
+const setRemote = (cfg, on) =>
+  inPanel(`chrome.storage.local.set({ agentRemote: ${JSON.stringify(cfg)} }).then(() => chrome.storage.session.set({ agentRemoteOn: ${!!on} })).then(() => true)`);
 const logText = () => inPanel(`document.getElementById("log").innerText`);
 const remoteStatus = () => inPanel(`chrome.storage.session.get("agentRemoteStatus").then((o) => o.agentRemoteStatus || {})`);
 
@@ -208,10 +210,31 @@ test("🛰 is visible in the side panel", { skip }, async () => {
   assert.notEqual(await inPanel(`getComputedStyle(document.getElementById("remoteBtn")).display`), "none");
 });
 
+// Not remote as such, but the same panel: shim.js turns dropped files into uploads (the shared UI
+// only knows file:// paths from an editor) and marks the backend on <body> for the stylesheet.
+test("panel: a dropped file becomes an attachment; the backend is marked on the body", { skip, timeout: 30000 }, async () => {
+  assert.equal(await inPanel(`document.body.classList.contains("backend-local")`), true, "the seeded API key selects the built-in backend");
+  assert.notEqual(await inPanel(`getComputedStyle(document.querySelector(".msg-actions .msg-act:last-child")).display`), "none", "Retry stays on the built-in backend");
+  await inPanel(`(() => {
+    const dt = new DataTransfer();
+    dt.items.add(new File(["hello"], "notes.txt", { type: "text/plain" }));
+    document.getElementById("log").dispatchEvent(new DragEvent("drop", { dataTransfer: dt, bubbles: true, cancelable: true }));
+    return true;
+  })()`);
+  const chips = await waitUntil(async () => {
+    const t = await inPanel(`document.getElementById("attachments").innerText`);
+    return /notes\.txt/.test(t) ? t : false;
+  }, 10000, "the attachment chip");
+  assert.match(chips, /notes\.txt/);
+  // Leave the composer as the other tests expect it.
+  await inPanel(`document.querySelectorAll("#attachments .attach-x").forEach((x) => x.click()), true`);
+});
+
 test("relay mode: the phone sees the chats, opens one and runs a prompt that streams back", { skip, timeout: 60000 }, async () => {
   const token = "relay-e2e-token-0123456789";
   const hub = await startHub(token);
-  await setRemote({ enabled: true, mode: "relay", relayUrl: `ws://127.0.0.1:${hub.port}`, relayToken: token });
+  const cfg = { mode: "relay", autostart: false, relayUrl: `ws://127.0.0.1:${hub.port}`, relayToken: token };
+  await setRemote(cfg, true);
   const ws = await phone(`ws://127.0.0.1:${hub.port}/?token=${token}&role=client&id=phone1`);
   try {
     let node = browserNode(ws);
@@ -240,8 +263,34 @@ test("relay mode: the phone sees the chats, opens one and runs a prompt that str
     await waitUntil(() => ws.msgs.find((m) => m.t === "fromNode" && m.msg.type === "error" && /isn't open/.test(m.msg.message)), 5000, "refusal");
     assert.ok(!(await logText()).includes("wrong chat"));
 
-    assert.equal((await remoteStatus()).state, "on");
-    await setRemote({ enabled: false, mode: "relay", relayUrl: `ws://127.0.0.1:${hub.port}`, relayToken: token });
+    // Opening a chat that no longer exists (a stale link) gets an answer, not silence.
+    sendJ(ws, { t: "toNode", nodeId: node.nodeId, msg: { type: "ready", chatId: "deleted-chat" } });
+    await waitUntil(() => ws.msgs.find((m) => m.t === "fromNode" && m.msg.type === "error" && /no longer exists/.test(m.msg.message)), 5000, "missing-chat answer");
+
+    // "+" on the phone: a fresh chat in the panel, and the phone's view is cleared too. Its next message
+    // creates a chat whose channel it never subscribed to, so the node streams that chat to it directly.
+    sendJ(ws, { t: "toNode", nodeId: node.nodeId, msg: { type: "newChat", chatId: CHAT } });
+    await waitUntil(() => ws.msgs.find((m) => m.t === "fromNode" && m.msg.type === "clear"), 5000, "clear for the phone");
+    await waitUntil(async () => !(await logText()).includes("an earlier answer"), 5000, "the panel to show a fresh chat");
+    const direct = (from) => ws.msgs.slice(from).filter((m) => m.t === "fromNode").map((m) => m.msg);
+    const sent = ws.msgs.length;
+    sendJ(ws, { t: "toNode", nodeId: node.nodeId, msg: { type: "prompt", chatId: CHAT, text: "first in a new chat" } });
+    await waitUntil(() => direct(sent).some((e) => e.type === "result" || e.type === "idle"), 30000, "the new chat's run to finish");
+    assert.equal(direct(sent).filter((e) => e.type === "text").map((e) => e.text).join(""), REPLY, "the fresh chat streams to the phone that started it");
+    const fresh = direct(sent).find((e) => e.type === "conversations" && e.activeId && e.activeId !== CHAT);
+    assert.ok(fresh, "the phone learns the new chat's id from the list");
+    assert.ok((await logText()).includes("first in a new chat"), "the panel shows the phone's prompt");
+    // Delete that chat from the phone (by id — any chat) and go back to the seeded one.
+    const ran = ws.msgs.length;
+    sendJ(ws, { t: "toNode", nodeId: node.nodeId, msg: { type: "deleteConversation", chatId: CHAT, id: fresh.activeId } });
+    await waitUntil(() => direct(ran).some((e) => e.type === "conversations" && Array.isArray(e.items) && !e.items.some((c) => c.id === fresh.activeId)), 5000, "the chat to be deleted");
+    sendJ(ws, { t: "toNode", nodeId: node.nodeId, msg: { type: "ready", chatId: CHAT } });
+    await waitUntil(async () => (await logText()).includes("an earlier answer"), 5000, "the chat to be back");
+
+    const status = await remoteStatus();
+    assert.equal(status.state, "on");
+    assert.match(status.link, new RegExp(`/app\\?token=${token}&node=${node.nodeId}&chat=${CHAT}$`), "the settings page gets the open chat's link");
+    await setRemote(cfg, false);
     await waitUntil(() => ws.msgs.some((m) => m.t === "nodeGone" && m.nodeId === node.nodeId), 5000, "the node to leave");
   } finally {
     ws.terminate();
@@ -284,8 +333,9 @@ test("bot mode: a Telegram message from the owner runs in the panel and the repl
   };
 
   await cdp.send("Fetch.enable", { patterns: [{ urlPattern: "https://api.telegram.org/*" }] }, panel);
+  const cfg = { mode: "bot", autostart: false, botToken: "123456:" + "a".repeat(30), userId: OWNER };
   try {
-    await setRemote({ enabled: true, mode: "bot", botToken: "123456:" + "a".repeat(30), userId: OWNER });
+    await setRemote(cfg, true);
     await waitUntil(async () => (await remoteStatus()).state === "on", 15000, "the bot to come up");
     assert.match((await remoteStatus()).message, /@e2e_bot/);
 
@@ -307,21 +357,23 @@ test("bot mode: a Telegram message from the owner runs in the panel and the repl
     assert.deepEqual(list.body.reply_markup.inline_keyboard[0][0], { text: "• E2E chat", callback_data: `c:${CHAT}` });
   } finally {
     off();
-    await setRemote({ enabled: false, mode: "bot", botToken: "123456:" + "a".repeat(30), userId: OWNER });
+    await setRemote(cfg, false);
     await cdp.send("Fetch.disable", {}, panel).catch(() => {});
   }
 });
 
 test("helper mode: 🛰 starts the local relay through the native host; the phone joins with the posted link", { skip, timeout: 90000 }, async () => {
-  await setRemote({ enabled: false, mode: "helper" });
+  await setRemote({ mode: "helper", autostart: false }, false);
   await inPanel(`document.getElementById("remoteBtn").click(), true`);
   const text = await waitUntil(async () => {
     const t = await logText();
     return /\/app\?token=/.test(t) ? t : false;
   }, 60000, "the share link in the panel");
   assert.match(text, /public tunnel didn't come up/, "the missing tunnel is reported, the relay still works");
-  const [, port, token, nodeId, chat] = text.match(/http:\/\/127\.0\.0\.1:(\d+)\/app\?token=([0-9a-f]+)&node=([^&\s]+)&chat=(\S+)/);
+  const [link, port, token, nodeId, chat] = text.match(/http:\/\/127\.0\.0\.1:(\d+)\/app\?token=([0-9a-f]+)&node=([^&\s]+)&chat=(\S+)/);
   assert.equal(chat, CHAT);
+  assert.equal((await remoteStatus()).link, link, "the same link is kept for the settings page");
+  assert.equal(await inPanel(`chrome.storage.session.get("agentRemoteOn").then((o) => o.agentRemoteOn)`), true, "🛰 sets the session flag, not the settings");
 
   const page = await fetch(`http://127.0.0.1:${port}/app`).then((r) => r.text());
   assert.match(page, /Content-Security-Policy/, "the helper serves the web app");

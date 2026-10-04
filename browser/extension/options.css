@@ -5,8 +5,8 @@ h1 { font-size: 20px; margin: 0 0 8px; font-weight: 600; }
 .hint { color: var(--vscode-descriptionForeground); font-size: 12px; font-weight: 400; }
 form { display: flex; flex-direction: column; gap: 14px; }
 .grid { display: grid; grid-template-columns: 1fr 2fr 1fr; gap: 12px; }
-.grid label:nth-child(4), .grid label:nth-child(5) { grid-column: span 1; }
 label { display: flex; flex-direction: column; gap: 4px; font-weight: 500; }
+label.grow { flex: 1; min-width: 0; }
 label.switch { flex-direction: row; align-items: center; gap: 8px; }
 [hidden] { display: none !important; }
 input[type="text"], input:not([type]), input[type="number"], input[type="password"], input[type="email"], select {
