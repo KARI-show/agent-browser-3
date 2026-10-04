@@ -310,3 +310,24 @@ actually run for device profiles, without deleting anything. Baseline: `npm run 
   page that reached it: with the DevTools route working, nothing in headless Chromium misses it.
 - Workers/OffscreenCanvas keep the real values except what the Emulation overrides cover (threads, time zone).
 - Only desktop Windows/macOS Chrome templates exist; adding one = a DEVICES entry (fingerprint.js).
+
+## Release pass (2026-10-04, branch claude/admiring-newton-2qhpnu)
+Goal: the verified backlog of the product pass closed, the extension packaged and ready for a short manual pass
+(browser/README.md "Release checklist", browser/TESTING.md). Baseline: `npm run check` 140/140, e2e 54/54 + 7/7.
+Work split: shared pieces and docs here; three parallel passes on disjoint files (native host; built-in engine;
+remote / panel UI / options), each rebased onto this branch and merged.
+
+### Done — shared
+- **Backlog 1 (security)**: `alwaysAsk` on browser_cookies_get / export / import, browser_run_js, browser_network_capture
+  (tools.ts → gen-tooldefs → engine `callTool`, host `toolPolicy`): an approval card in Agent mode too, denial in Ask.
+  System prompt names the rule. Tests: tools set (browserHost.test.ts), engine behaviour (standalone.test.ts).
+- Recipes replay a recorded `browser_switch_tab` by the tab's address (exact, else same origin + path; honest failure).
+- manifest 0.3.0; `npm run package:browser` → dist-browser/agent-browser.zip (37 files); release checklist in browser/README.md.
+  Note: `package:browser` leaves media/main.js minified — `npm run build` before committing (it bit once in this pass).
+__AGENT_SECTIONS__
+
+### Open
+- src/tunnel.ts still downloads cloudflared "latest" unverified (backlog 8): pinning needs a release tag + checksums,
+  which this environment could not fetch (GitHub answers 403 through the proxy). Owner's call; also the relay token
+  rotation there.
+- Store listing itself (screenshots, privacy text, id) — owner's; see the checklist.
