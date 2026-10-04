@@ -45,6 +45,7 @@
 | 3.5 | `Export all cookies for this site as JSON` | JSON массив куков |
 | 3.6 | `Clear all cookies for this site` | "Cleared N cookies" |
 | 3.7 | `Import these cookies: [{"name":"imported","value":"yes","domain":".example.com","path":"/"}]` | "Imported 1 cookies" |
+| 3.8 | В режиме **Agent**: `Show all cookies for this site` / `Export cookies` / `Import …` / `Run this JS: document.title` / `Capture the page's API responses` | Карточка подтверждения появляется и в Agent-режиме (эти пять инструментов достают данные сессии); Deny → агент получает «The user denied this action» и не повторяет без причины; клики/ввод в Agent-режиме подтверждения не требуют |
 
 ## 4. User-Agent
 
@@ -164,6 +165,7 @@ service worker, network tap). Руками — живые сайты.
 | 12.10 | ⏸ / 🗑 вотчера | Алармы снимаются (`chrome.alarms.getAll()` пуст) |
 | 12.11 | Сказать агенту «запомни: на этом сайте экспорт в меню ⋯» | browser_memory_save; при следующем browser_read_page на сайте внизу блок «Saved notes about this site» |
 | 12.12 | Попросить вытащить список с бесконечной прокруткой | Агент использует browser_network_capture: start → скролл → read; данные из JSON, а не из DOM |
+| 12.13 | Записать рецепт, в котором агент переключался между двумя вкладками (browser_switch_tab) → ▶ при тех же открытых вкладках | Шаг «switch to the tab at …» находит вкладку по адресу (точный, иначе тот же origin+path); если такой вкладки нет — «No open tab at …», остальное не выполняется |
 
 ---
 

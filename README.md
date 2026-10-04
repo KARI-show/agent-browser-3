@@ -64,7 +64,7 @@ Every tool call the agent makes is traced, and every element it acts on is remem
 | Tool | Description |
 |------|-------------|
 | `browser_recipe_save` | Save this chat's actions (or only the last turn's) as a recipe: name, description, `params` (values → placeholders), `id` to re-record an existing one. |
-| `browser_recipe_run` | Replay a recipe on the current tab or a new one with `params`; returns the step-by-step result and the outputs of extraction steps. |
+| `browser_recipe_run` | Replay a recipe on the current tab or a new one with `params`; returns the step-by-step result and the outputs of extraction steps. A recorded tab switch is replayed by the tab's address. |
 | `browser_recipe_list` | Saved recipes: steps, start page, parameters, last run. |
 | `browser_recipe_delete` | Delete one. |
 
