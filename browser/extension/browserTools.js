@@ -542,6 +542,41 @@
     });
 
     var body = document.body ? document.body.innerText : "";
+    // Sanitize: strip text from elements hidden via CSS tricks (prompt injection defense).
+    // innerText respects display:none/visibility:hidden, but NOT opacity:0, position off-screen,
+    // font-size:0, clip-path, transform:scale(0), etc. Remove those manually.
+    if (document.body) {
+      var poisoned = document.body.querySelectorAll("[aria-hidden=true], [data-nosnippet]");
+      var hiddenTexts = new Set();
+      document.body.querySelectorAll("*").forEach(function (el) {
+        try {
+          var cs = getComputedStyle(el);
+          var dominated =
+            parseFloat(cs.opacity) === 0 ||
+            cs.clipPath === "inset(50%)" ||
+            cs.clip === "rect(0px, 0px, 0px, 0px)" ||
+            parseFloat(cs.fontSize) < 2 ||
+            (cs.position === "absolute" && (parseInt(cs.left) < -5000 || parseInt(cs.top) < -5000)) ||
+            (cs.position === "fixed" && (parseInt(cs.left) < -5000 || parseInt(cs.top) < -5000)) ||
+            (cs.overflow === "hidden" && el.offsetHeight < 2 && el.offsetWidth < 2) ||
+            cs.transform === "matrix(0, 0, 0, 0, 0, 0)"; // scale(0)
+          if (dominated) {
+            var t = (el.innerText || "").trim();
+            if (t) hiddenTexts.add(t);
+          }
+        } catch (_) {}
+      });
+      poisoned.forEach(function (el) {
+        var t = (el.innerText || "").trim();
+        if (t) hiddenTexts.add(t);
+      });
+      if (hiddenTexts.size) {
+        hiddenTexts.forEach(function (ht) {
+          body = body.replace(ht, "");
+        });
+        body = body.replace(/\n{3,}/g, "\n\n").trim();
+      }
+    }
     body = body.replace(/\n{3,}/g, "\n\n").trim();
     var shadow = shadowTexts.join("\n").slice(0, 1500);
     var docH = document.documentElement.scrollHeight;
