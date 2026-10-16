@@ -4,223 +4,271 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Agent Browser — AI browser automation</title>
-  <meta name="description" content="Claude AI agent in your browser's side panel. It reads pages, clicks, types, fills forms, manages cookies, runs recipes and watches pages for changes." />
+  <meta name="description" content="AI agent in your browser's side panel. Reads pages, clicks, types, fills forms, manages cookies, automates with recipes and watches pages for changes." />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>" />
   <style>
-    :root { --bg: #0f0f17; --fg: #c8ccd4; --accent: #7aa2f7; --card: #181a24; --border: #282a36; --dim: #565b6e; --green: #9ece6a; }
+    :root { --bg: #0b0b12; --fg: #c8ccd4; --accent: #7aa2f7; --card: #14141e; --border: #1e2030; --dim: #565b6e; --green: #9ece6a; --hero-bg: linear-gradient(180deg, #0f1019 0%, #0b0b12 100%); }
     * { box-sizing: border-box; margin: 0; }
-    body { background: var(--bg); color: var(--fg); font: 16px/1.7 -apple-system, "Segoe UI", Roboto, Helvetica, sans-serif; }
-    a { color: var(--accent); }
-    .wrap { max-width: 740px; margin: 0 auto; padding: 0 24px; }
+    body { background: var(--bg); color: var(--fg); font: 16px/1.7 -apple-system, "Segoe UI", Roboto, Helvetica, sans-serif; -webkit-font-smoothing: antialiased; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .wrap { max-width: 760px; margin: 0 auto; padding: 0 24px; }
+
+    /* Nav */
+    nav { display: flex; align-items: center; justify-content: space-between; padding: 20px 24px; max-width: 760px; margin: 0 auto; }
+    nav .logo { font-weight: 700; font-size: 16px; color: #e2e6ee; }
+    nav .links { display: flex; gap: 24px; font-size: 14px; }
+    nav .links a { color: var(--dim); }
+    nav .links a:hover { color: var(--fg); text-decoration: none; }
 
     /* Hero */
-    .hero { padding: 80px 0 48px; text-align: center; }
-    .hero h1 { font-size: 36px; color: #e2e6ee; margin-bottom: 12px; }
+    .hero { padding: 60px 0 48px; text-align: center; background: var(--hero-bg); }
+    .hero h1 { font-size: 42px; color: #e2e6ee; margin-bottom: 16px; letter-spacing: -0.5px; }
     .hero h1 span { color: var(--accent); }
-    .hero p { color: var(--dim); font-size: 18px; max-width: 520px; margin: 0 auto 28px; }
-    .cta { display: inline-block; background: var(--accent); color: var(--bg); padding: 12px 28px; border-radius: 8px; font-weight: 600; text-decoration: none; font-size: 15px; }
-    .cta:hover { opacity: 0.9; }
-    .badge { display: inline-block; background: var(--card); color: var(--dim); border: 1px solid var(--border); padding: 6px 14px; border-radius: 6px; font-size: 13px; margin-left: 12px; text-decoration: none; }
-
-    /* Features */
-    .features { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 32px 0 48px; }
-    @media (max-width: 600px) { .features { grid-template-columns: 1fr; } }
-    .feat { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px; }
-    .feat h3 { font-size: 15px; margin-bottom: 6px; color: #e2e6ee; }
-    .feat p { font-size: 14px; color: var(--dim); }
+    .hero .sub { color: var(--dim); font-size: 18px; max-width: 540px; margin: 0 auto 32px; line-height: 1.6; }
+    .buttons { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+    .cta { display: inline-flex; align-items: center; gap: 8px; background: var(--accent); color: #0b0b12; padding: 12px 28px; border-radius: 8px; font-weight: 600; text-decoration: none; font-size: 15px; transition: opacity .15s; }
+    .cta:hover { opacity: 0.9; text-decoration: none; }
+    .btn-ghost { display: inline-flex; align-items: center; gap: 8px; background: transparent; color: var(--fg); border: 1px solid var(--border); padding: 11px 24px; border-radius: 8px; font-size: 14px; text-decoration: none; transition: border-color .15s; }
+    .btn-ghost:hover { border-color: var(--dim); text-decoration: none; }
 
     /* Stats */
-    .stats { display: flex; justify-content: center; gap: 48px; padding: 16px 0 48px; }
+    .stats { display: flex; justify-content: center; gap: 56px; padding: 48px 0; border-bottom: 1px solid var(--border); }
     .stat { text-align: center; }
-    .stat b { display: block; font-size: 28px; color: var(--green); }
-    .stat span { font-size: 13px; color: var(--dim); }
+    .stat b { display: block; font-size: 32px; color: var(--green); font-weight: 700; }
+    .stat span { font-size: 13px; color: var(--dim); letter-spacing: 0.5px; text-transform: uppercase; }
 
-    /* Permissions */
-    .perms { padding: 0 0 48px; }
-    .perms h2 { font-size: 20px; margin-bottom: 16px; color: #e2e6ee; }
-    .perms table { width: 100%; border-collapse: collapse; font-size: 14px; }
-    .perms th, .perms td { padding: 10px 14px; border: 1px solid var(--border); text-align: left; }
-    .perms th { background: var(--card); color: var(--accent); font-weight: 600; }
-    .perms td { color: var(--dim); }
-    .perms td code { background: #12121c; padding: 1px 5px; border-radius: 3px; font-size: 12px; color: var(--green); }
+    /* Section headers */
+    .section-title { font-size: 24px; color: #e2e6ee; margin-bottom: 8px; letter-spacing: -0.3px; }
+    .section-sub { color: var(--dim); font-size: 15px; margin-bottom: 28px; }
+
+    /* Features */
+    .features { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 48px 0; }
+    @media (max-width: 600px) { .features { grid-template-columns: 1fr; } }
+    .feat { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 22px 24px; transition: border-color .15s; }
+    .feat:hover { border-color: #2a2d42; }
+    .feat .icon { font-size: 22px; margin-bottom: 8px; }
+    .feat h3 { font-size: 15px; margin-bottom: 6px; color: #e2e6ee; font-weight: 600; }
+    .feat p { font-size: 13.5px; color: var(--dim); line-height: 1.55; }
+
+    /* How it works */
+    .how { padding: 48px 0; border-top: 1px solid var(--border); }
+    .flow { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-top: 28px; }
+    @media (max-width: 600px) { .flow { grid-template-columns: 1fr; } }
+    .flow-step { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; position: relative; }
+    .flow-step .num { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; background: var(--accent); color: #0b0b12; border-radius: 50%; font-weight: 700; font-size: 13px; margin-bottom: 10px; }
+    .flow-step h4 { font-size: 14px; color: #e2e6ee; margin-bottom: 4px; }
+    .flow-step p { font-size: 13px; color: var(--dim); }
 
     /* Modes */
-    .modes { padding: 0 0 48px; }
-    .modes h2 { font-size: 20px; margin-bottom: 16px; color: #e2e6ee; }
-    .mode-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+    .modes { padding: 48px 0; border-top: 1px solid var(--border); }
+    .mode-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
     @media (max-width: 600px) { .mode-grid { grid-template-columns: 1fr; } }
-    .mode-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; }
-    .mode-card h4 { font-size: 14px; color: #e2e6ee; margin-bottom: 4px; }
-    .mode-card p { font-size: 13px; color: var(--dim); }
+    .mode-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px 22px; }
+    .mode-card .tag { display: inline-block; background: #1a1d2e; color: var(--accent); padding: 2px 10px; border-radius: 4px; font-size: 11px; font-weight: 600; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .mode-card h4 { font-size: 15px; color: #e2e6ee; margin-bottom: 6px; }
+    .mode-card p { font-size: 13px; color: var(--dim); line-height: 1.55; }
+    .mode-card .data-note { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); font-size: 12px; color: var(--dim); }
+    .mode-card .data-note b { color: var(--green); font-weight: 600; }
+
+    /* Permissions */
+    .perms { padding: 48px 0; border-top: 1px solid var(--border); }
+    .perms table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+    .perms th, .perms td { padding: 10px 14px; border: 1px solid var(--border); text-align: left; }
+    .perms th { background: var(--card); color: var(--accent); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .perms td { color: var(--dim); }
+    .perms td:first-child { color: var(--fg); font-family: "SF Mono", "Cascadia Code", monospace; font-size: 12.5px; }
 
     /* Privacy */
     .privacy { padding: 48px 0 64px; border-top: 1px solid var(--border); }
-    .privacy h2 { font-size: 22px; margin-bottom: 20px; color: #e2e6ee; }
-    .privacy h3 { font-size: 16px; margin: 20px 0 8px; color: #c8ccd4; }
-    .privacy p, .privacy ul { font-size: 14px; color: var(--dim); margin-bottom: 12px; }
+    .privacy h2 { font-size: 24px; margin-bottom: 24px; color: #e2e6ee; }
+    .privacy h3 { font-size: 16px; margin: 24px 0 8px; color: #c8ccd4; }
+    .privacy p, .privacy ul { font-size: 14px; color: var(--dim); margin-bottom: 12px; line-height: 1.65; }
     .privacy ul { padding-left: 20px; }
-    .privacy li { margin-bottom: 4px; }
+    .privacy li { margin-bottom: 6px; }
+    .privacy .highlight { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; margin: 16px 0; }
+    .privacy .highlight p { margin-bottom: 0; }
 
-    footer { padding: 24px 0; text-align: center; color: var(--dim); font-size: 12px; border-top: 1px solid var(--border); }
+    footer { padding: 32px 0; text-align: center; color: var(--dim); font-size: 12px; border-top: 1px solid var(--border); }
+    footer .links { display: flex; gap: 20px; justify-content: center; margin-bottom: 12px; }
   </style>
 </head>
 <body>
 
+<nav>
+  <div class="logo">🤖 Agent Browser</div>
+  <div class="links">
+    <a href="#features">Features</a>
+    <a href="#modes">How it works</a>
+    <a href="#privacy">Privacy</a>
+    <a href="https://github.com/KARI-show/agent-browser-3">GitHub</a>
+  </div>
+</nav>
+
 <div class="wrap">
 
   <section class="hero">
-    <h1>🤖 Agent <span>Browser</span></h1>
-    <p>Claude AI agent in your browser's side panel. It reads pages, clicks, types, fills forms — and does it all in your real, logged-in browser.</p>
-    <a href="https://chromewebstore.google.com/detail/ppakaagcjnojicbdebhgkpjgikclbnlf" class="cta">Add to Chrome</a>
-    <a href="https://github.com/KARI-show/agent-browser" class="badge">GitHub</a>
+    <h1>Your browser,<br />on <span>autopilot</span></h1>
+    <p class="sub">An AI agent that lives in your browser's side panel. It sees what you see, clicks what you'd click — and does it 10× faster.</p>
+    <div class="buttons">
+      <a href="https://chromewebstore.google.com/detail/ppakaagcjnojicbdebhgkpjgikclbnlf" class="cta">Add to Chrome — Free</a>
+      <a href="https://github.com/KARI-show/agent-browser-3" class="btn-ghost">View source</a>
+    </div>
   </section>
 
   <section class="stats">
-    <div class="stat"><b>53</b><span>browser tools</span></div>
-    <div class="stat"><b>12+</b><span>Claude models</span></div>
-    <div class="stat"><b>0</b><span>data collected</span></div>
+    <div class="stat"><b>53</b><span>Tools</span></div>
+    <div class="stat"><b>12+</b><span>Models</span></div>
+    <div class="stat"><b>0</b><span>Data collected</span></div>
   </section>
 
-  <section class="features">
-    <div class="feat">
-      <h3>🌐 Full browser control</h3>
-      <p>Read pages, click, type, fill forms, select options, scroll, drag, switch tabs, take screenshots, upload files.</p>
-    </div>
-    <div class="feat">
-      <h3>🍪 Cookie & session management</h3>
-      <p>View, edit, export and import cookies. Snapshot a site's session into a device profile for later use.</p>
-    </div>
-    <div class="feat">
-      <h3>👤 Device profiles & fingerprint</h3>
-      <p>Saved identities with User-Agent, device template (screen, GPU, CPU, fonts), proxy and cookies. Launch a profile — the window presents that machine everywhere.</p>
-    </div>
-    <div class="feat">
-      <h3>🔄 Recipes — zero-token automation</h3>
-      <p>Record what the agent does, replay it without the model. Durable element locators survive page changes.</p>
-    </div>
-    <div class="feat">
-      <h3>👁 Watchers & alerts</h3>
-      <p>Monitor pages for changes in the background. Get notified via Telegram when something changes — even with the panel closed.</p>
-    </div>
-    <div class="feat">
-      <h3>📱 Remote via phone</h3>
-      <p>Control the browser from your phone through Telegram or a web app. No VS Code needed — the agent lives in the browser.</p>
-    </div>
-    <div class="feat">
-      <h3>📄 Document converter</h3>
-      <p>CSV ↔ JSON, Markdown → HTML/PDF, tables → CSV, page → PDF, image resize — all inside the chat.</p>
-    </div>
-    <div class="feat">
-      <h3>🔒 Privacy-first</h3>
-      <p>No analytics, no telemetry, no data leaves your browser except to the API you choose. API keys stored locally.</p>
+  <section class="features" id="features">
+    <div class="feat"><div class="icon">🌐</div><h3>Full browser control</h3><p>Read pages, click, type, fill forms, select options, scroll, drag &amp; drop, switch tabs, take screenshots, upload files.</p></div>
+    <div class="feat"><div class="icon">🍪</div><h3>Cookie &amp; session management</h3><p>View, edit, export and import cookies. Snapshot a site's login session into a profile to restore later.</p></div>
+    <div class="feat"><div class="icon">👤</div><h3>Device profiles</h3><p>Saved browser identities — User-Agent, screen, GPU, CPU, fonts, timezone, proxy and cookies. Launch one and every page sees that device.</p></div>
+    <div class="feat"><div class="icon">🔄</div><h3>Recipes</h3><p>Record the agent's actions, replay them without the model — zero tokens, instant. Locators survive page changes.</p></div>
+    <div class="feat"><div class="icon">👁</div><h3>Page watchers</h3><p>Monitor pages in the background. Get a notification or a Telegram alert when something changes — even with the browser closed.</p></div>
+    <div class="feat"><div class="icon">📱</div><h3>Remote control</h3><p>Run the agent from your phone through Telegram or a web app. The full chat UI, approvals, file attachments — from anywhere.</p></div>
+    <div class="feat"><div class="icon">📄</div><h3>Document tools</h3><p>CSV ↔ JSON, Markdown → HTML/PDF, table extraction, page → PDF, image resize. All inline in the chat.</p></div>
+    <div class="feat"><div class="icon">🔒</div><h3>Private by design</h3><p>No analytics, no telemetry. Nothing leaves your browser except to the AI service you choose. Keys stay on your machine.</p></div>
+  </section>
+
+  <section class="how" id="how">
+    <h2 class="section-title">How it works</h2>
+    <p class="section-sub">Open the side panel, type what you need. The agent reads the page and acts.</p>
+    <div class="flow">
+      <div class="flow-step"><div class="num">1</div><h4>You ask</h4><p>Type a task in the side panel — "fill this form", "export all cookies", "monitor this price".</p></div>
+      <div class="flow-step"><div class="num">2</div><h4>Agent reads</h4><p>It reads the page: elements, text, headings, forms. Builds a map of what's clickable.</p></div>
+      <div class="flow-step"><div class="num">3</div><h4>Agent acts</h4><p>Clicks, types, scrolls, navigates — then reports what happened. You approve risky steps.</p></div>
     </div>
   </section>
 
-  <section class="modes">
-    <h2>Three ways to run the agent</h2>
+  <section class="modes" id="modes">
+    <h2 class="section-title">Three ways to connect</h2>
+    <p class="section-sub">Pick one in the settings. You can switch any time — chats are kept.</p>
     <div class="mode-grid">
       <div class="mode-card">
+        <span class="tag">Easiest</span>
         <h4>Free trial</h4>
-        <p>Sign in with your email. Requests go through our gateway to Claude. Small daily allowance, nothing to install.</p>
+        <p>Sign in with your email. A small daily allowance, nothing to install or configure.</p>
+        <div class="data-note"><b>Data path:</b> your messages → our gateway (encrypted) → Claude AI → response back to you. We don't store conversations.</div>
       </div>
       <div class="mode-card">
-        <h4>My API key</h4>
-        <p>Use your own Anthropic API key. Billed to your account, runs directly from the extension.</p>
+        <span class="tag">Direct</span>
+        <h4>Your API key</h4>
+        <p>Enter your Anthropic API key. Billed to your account, no middleman.</p>
+        <div class="data-note"><b>Data path:</b> your messages → Anthropic API directly. The key never leaves your browser's local storage.</div>
       </div>
       <div class="mode-card">
+        <span class="tag">Zero cloud</span>
         <h4>Claude subscription</h4>
-        <p>Uses your signed-in Claude Code via a small local helper. This extension never sees your Claude login.</p>
+        <p>Uses your signed-in Claude Code via a local helper. This extension never sees your Claude login.</p>
+        <div class="data-note"><b>Data path:</b> your messages → local helper process → Claude (your own login). Nothing goes through our servers.</div>
       </div>
     </div>
   </section>
 
-  <section class="perms">
-    <h2>Permissions explained</h2>
+  <section class="perms" id="permissions">
+    <h2 class="section-title">Permissions explained</h2>
+    <p class="section-sub">Every permission has a reason. Here's what and why.</p>
     <table>
-      <tr><th>Permission</th><th>Why the agent needs it</th></tr>
-      <tr><td><code>sidePanel</code></td><td>The chat UI lives in the browser's side panel</td></tr>
-      <tr><td><code>tabs</code></td><td>Read page titles/URLs, switch tabs, open/close tabs</td></tr>
-      <tr><td><code>scripting</code></td><td>Read page content, find elements, execute agent actions on the page</td></tr>
-      <tr><td><code>debugger</code></td><td>Reliable clicks via Chrome DevTools Protocol, screenshots, device profile emulation (User-Agent, screen, CPU)</td></tr>
-      <tr><td><code>cookies</code></td><td>Cookie editor tools: view, set, delete, export, import site cookies</td></tr>
-      <tr><td><code>storage</code></td><td>Save chats, settings, profiles, recipes and watchers locally</td></tr>
-      <tr><td><code>proxy</code></td><td>Per-profile proxy configuration for device profiles</td></tr>
-      <tr><td><code>downloads</code></td><td>Save screenshots, exported cookies, converted documents</td></tr>
-      <tr><td><code>nativeMessaging</code></td><td>Optional: communicate with the local helper for Claude subscription mode and SOCKS5 auth</td></tr>
-      <tr><td><code>alarms</code></td><td>Background page watchers: check for changes on a schedule</td></tr>
-      <tr><td><code>notifications</code></td><td>Notify when a watched page changes</td></tr>
-      <tr><td><code>privacy</code></td><td>Restrict WebRTC while a proxy is active so it can't leak your real IP</td></tr>
-      <tr><td><code>&lt;all_urls&gt;</code></td><td>The agent needs to read and interact with any page you ask it to work on</td></tr>
+      <tr><th>Permission</th><th>Why</th></tr>
+      <tr><td>sidePanel</td><td>The chat UI lives in the browser's side panel</td></tr>
+      <tr><td>tabs</td><td>List, open, close and switch tabs — core navigation</td></tr>
+      <tr><td>scripting</td><td>Read page content, find elements, run agent actions on the page</td></tr>
+      <tr><td>debugger</td><td>Chrome DevTools Protocol — reliable clicks, screenshots, device profile emulation</td></tr>
+      <tr><td>cookies</td><td>Cookie tools: view, set, delete, export, import for the current site</td></tr>
+      <tr><td>storage</td><td>Save chats, settings, profiles, recipes and watchers locally</td></tr>
+      <tr><td>proxy</td><td>Per-profile proxy — device profiles can each have their own exit address</td></tr>
+      <tr><td>downloads</td><td>Save screenshots, exported files, converted documents</td></tr>
+      <tr><td>nativeMessaging</td><td>Optional: local helper for Claude subscription mode and SOCKS5 proxy auth</td></tr>
+      <tr><td>alarms</td><td>Page watchers: periodic background checks for changes</td></tr>
+      <tr><td>notifications</td><td>Alert when a watched page changes</td></tr>
+      <tr><td>privacy</td><td>Restrict WebRTC while a proxy is active — prevents real IP leaks</td></tr>
+      <tr><td>&lt;all_urls&gt;</td><td>The agent works on any page you point it at</td></tr>
     </table>
   </section>
 
   <section class="privacy" id="privacy">
     <h2>Privacy Policy</h2>
-    <p><em>Last updated: October 15, 2026</em></p>
+    <p><em>Effective: October 15, 2026</em></p>
 
-    <h3>What Agent Browser is</h3>
-    <p>Agent Browser is a Chrome/Edge extension that lets you interact with an AI assistant (Claude by Anthropic) through a side panel in your browser. The agent can read pages, click elements, fill forms and automate tasks — all within your local browser session.</p>
+    <h3>Overview</h3>
+    <p>Agent Browser is a browser extension that connects you to an AI assistant for browser automation. It runs locally in your browser. The only network traffic it generates is to the AI service <b>you</b> select in the settings.</p>
 
-    <h3>Data that leaves your browser</h3>
-    <p>The extension sends data <b>only</b> to the AI service you choose in the settings:</p>
+    <h3>What data leaves your browser</h3>
+    <p>The extension operates in one of three modes. Each mode has a different data path:</p>
+
+    <div class="highlight">
+      <p><b>Free trial</b> — Your messages and page content the agent reads are sent to our hosted gateway, which forwards them to the AI provider (Anthropic) for processing. The gateway enforces rate limits and authenticates your session. <b>We do not store or log conversation content.</b> We store your email address (for sign-in) and usage counters (for rate limiting). All traffic is encrypted in transit (TLS).</p>
+    </div>
+    <div class="highlight">
+      <p><b>Your API key</b> — Your messages go directly from the extension to the Anthropic API (or a custom endpoint you configure). No data passes through our servers. Your API key is stored in the browser's local extension storage and is only ever sent to the configured API address.</p>
+    </div>
+    <div class="highlight">
+      <p><b>Claude subscription</b> — Your messages are processed by a local helper application on your computer, which uses your own Claude Code sign-in. No data leaves your machine through our infrastructure. The extension never accesses or stores your Claude login credentials.</p>
+    </div>
+
+    <p>If you enable <b>Telegram remote control</b>, messages are also exchanged through the Telegram Bot API with a bot you create and control. The optional relay server is either local or self-hosted.</p>
+
+    <h3>What is stored locally</h3>
     <ul>
-      <li><b>Free trial mode:</b> your messages and page content the agent reads are sent to our gateway (<code>api.cloud-full.com</code>), which forwards them to the Anthropic API. We do not store conversation content. We store your email address (for sign-in) and usage counters (for rate limiting).</li>
-      <li><b>API key mode:</b> your messages go directly to <code>api.anthropic.com</code> (or the custom endpoint you configure). The extension communicates only with that endpoint. Your API key is stored locally in the browser's extension storage and is sent only to the configured API address.</li>
-      <li><b>Subscription mode:</b> your messages go through the local native helper, which uses your own signed-in Claude Code CLI. Nothing is sent to any third-party server.</li>
+      <li>Chat history and conversation state</li>
+      <li>Your settings: chosen mode, API key (protected by Chrome's extension storage encryption), proxy configuration, Telegram bot token</li>
+      <li>Device profiles: browser identity strings, device configurations, saved cookies, proxy credentials</li>
+      <li>Recipes: recorded automation steps with page element references</li>
+      <li>Watchers: URLs being monitored and detected change snapshots</li>
+      <li>Site memory: notes the agent saved about specific websites</li>
     </ul>
-    <p>If you enable <b>Telegram remote</b>, your messages are also sent through the Telegram Bot API to your personal bot. The relay (if used) is either local or one you host yourself.</p>
+    <p>All data is stored in your browser profile's local storage. Removing the extension deletes all of it.</p>
 
-    <h3>Data stored locally</h3>
+    <h3>What we do not collect</h3>
     <ul>
-      <li>Chat history (in <code>chrome.storage.local</code> and, for the native helper, <code>~/.agent-browser/state.json</code>)</li>
-      <li>Settings: chosen mode, API key (encrypted at rest by Chrome), proxy configuration, Telegram bot token</li>
-      <li>Device profiles: User-Agent strings, device templates, saved cookies, proxy credentials</li>
-      <li>Recipes: recorded automation steps with element locators</li>
-      <li>Watchers: monitored page URLs and change snapshots</li>
-      <li>Site memory: notes the agent saved about specific hosts</li>
-    </ul>
-    <p>All local data stays in your browser profile. Uninstalling the extension deletes it.</p>
-
-    <h3>Data we do NOT collect</h3>
-    <ul>
-      <li>No analytics or telemetry</li>
+      <li>No analytics, telemetry or usage tracking</li>
       <li>No browsing history</li>
-      <li>No page content beyond what the agent reads when you ask it to</li>
-      <li>No cookies or credentials beyond what you explicitly save in a device profile</li>
-      <li>No fingerprinting of your device</li>
-      <li>No advertising or tracking</li>
+      <li>No page content beyond what the agent reads at your request during a conversation</li>
+      <li>No cookies or credentials except those you explicitly save in a device profile</li>
+      <li>No device fingerprinting</li>
+      <li>No advertising identifiers or tracking pixels</li>
     </ul>
 
     <h3>Third-party services</h3>
+    <p>Depending on the mode you choose, the extension communicates with:</p>
     <ul>
-      <li><b>Anthropic API</b> (<code>api.anthropic.com</code>) — processes your prompts and page content when the agent runs. Subject to <a href="https://www.anthropic.com/privacy">Anthropic's privacy policy</a>.</li>
-      <li><b>Telegram Bot API</b> — only if you enable remote access via Telegram. Subject to <a href="https://telegram.org/privacy">Telegram's privacy policy</a>.</li>
+      <li><b>Anthropic</b> — the AI provider that processes prompts and generates responses. See <a href="https://www.anthropic.com/privacy">Anthropic's privacy policy</a>.</li>
+      <li><b>Telegram</b> — only if you enable remote control via Telegram. See <a href="https://telegram.org/privacy">Telegram's privacy policy</a>.</li>
+    </ul>
+    <p>No other third-party services receive data from the extension.</p>
+
+    <h3>Security measures</h3>
+    <ul>
+      <li>Strict Content Security Policy: no remote scripts, images, frames or form submissions from extension pages</li>
+      <li>Sensitive tools (cookie access, JavaScript execution, network capture) require explicit user approval in every mode, including fully automated Agent mode</li>
+      <li>The AI is instructed to treat page content as untrusted and to confirm before payments, account changes, data deletion or sending messages on your behalf</li>
+      <li>No shell or filesystem access — the agent can only use browser tools</li>
+      <li>WebRTC is restricted while a proxy is active to prevent IP address leaks</li>
     </ul>
 
-    <h3>Security</h3>
-    <ul>
-      <li>The extension's Content Security Policy blocks remote scripts, images, frames and form submissions from extension pages</li>
-      <li>Five tools that access session data (cookies, JavaScript execution, network capture) require explicit user approval, even in fully automated Agent mode</li>
-      <li>The system prompt instructs the model to treat page content as untrusted data and to ask before payments, account changes, sending messages or deleting data</li>
-      <li>The agent has no shell or filesystem access — built-in tools are limited to browser actions</li>
-      <li>WebRTC is restricted while a proxy is active to prevent IP leaks</li>
-    </ul>
+    <h3>Age restriction</h3>
+    <p>Agent Browser is not intended for users under 13 years of age. We do not knowingly collect personal information from children.</p>
 
-    <h3>Children</h3>
-    <p>Agent Browser is not directed at children under 13. We do not knowingly collect personal information from children.</p>
-
-    <h3>Changes to this policy</h3>
-    <p>If we change this policy, the updated version will be posted at this URL. The "last updated" date at the top will reflect the change.</p>
+    <h3>Policy changes</h3>
+    <p>Updates to this policy will be published at this URL. The effective date above reflects the most recent revision.</p>
 
     <h3>Contact</h3>
-    <p>Questions about privacy: <a href="mailto:support@cloud-full.com">support@cloud-full.com</a></p>
+    <p>Privacy questions: <a href="mailto:support@cloud-full.com">support@cloud-full.com</a></p>
   </section>
 
 </div>
 
 <footer>
   <div class="wrap">
-    © 2026 KARI · <a href="#privacy">Privacy Policy</a> · <a href="https://github.com/KARI-show/agent-browser">GitHub</a>
+    <div class="links">
+      <a href="#privacy">Privacy Policy</a>
+      <a href="#permissions">Permissions</a>
+      <a href="https://github.com/KARI-show/agent-browser-3">Source Code</a>
+    </div>
+    © 2026 KARI
   </div>
 </footer>
 
