@@ -340,7 +340,7 @@ export class LocalHost {
     if (hasKey && (await this.safeSettings()).s?.trial) {
       this.post({ type: "info", text: "Free trial: your requests go through the trial service to Claude, within a small daily allowance. Add your own API key in the settings (🌐) for unlimited use." });
     }
-    this.post({ type: "identity", name: "Kari" });
+    this.post({ type: "identity", name: "Tali" });
     this.postModel();
     this.postMode();
     this.post({ type: "settings", values: {} });

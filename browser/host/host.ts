@@ -248,7 +248,7 @@ class BrowserHost {
       if (last) this.current = last;
     }
     this.post({ type: "auth", ok: hasClaudeCredentials() });
-    this.post({ type: "identity", name: "Kari" });
+    this.post({ type: "identity", name: "Tali" });
     this.postModel();
     this.postMode();
     this.post({ type: "settings", values: {} });
