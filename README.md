@@ -7,7 +7,7 @@ Two runtimes, one codebase:
 | Runtime | Where | What it does |
 |---------|-------|-------------|
 | **VS Code / Cursor extension** | Editor side panel | Full coding agent — reads, edits, runs commands against your workspace. Parallel chats, live diffs, checkpoints, remote control from phone & Telegram. |
-| **Chrome / Edge extension** | Browser side panel | Browser automation agent — operates your real, logged-in browser with 53 tools. Recipes (record once, replay without the model), watchers (scheduled change detection → notification / Telegram), network tap, site memory, cookie editor, private windows, device profiles, UA override, document converter. |
+| **Tali — AI Browser Agent** (Chrome / Edge extension) | Browser side panel | Browser automation agent — operates your real, logged-in browser with 53 tools. Recipes (record once, replay without the model), watchers (scheduled change detection → notification / Telegram), network tap, site memory, cookie editor, private windows, device profiles, UA override, document converter. |
 
 ---
 
@@ -53,7 +53,9 @@ Two runtimes, one codebase:
 
 ---
 
-## 🌐 Browser Extension — 53 Tools
+## 🌐 Tali — AI Browser Agent — 53 Tools
+
+**Tali** is the Chrome/Edge extension: a stylized cyber-fox that lives in your browser's side panel and drives your real, logged-in browser. [Landing & Privacy Policy](https://kari-show.github.io/agent-browser-3/) · [Add to Chrome](https://chromewebstore.google.com/detail/ppakaagcjnojicbdebhgkpjgikclbnlf)
 
 The browser extension gives the AI agent full control over your real browser through a side panel. Every tool is declared in [`browser/host/tools.ts`](browser/host/tools.ts) and executed in the extension's side panel page (and, for watchers, in the service worker — with the panel closed).
 
@@ -293,13 +295,25 @@ cli-proxy/
 2. Reload Window → click the robot icon in the sidebar.
 3. Type a request → Send.
 
-### Browser Extension
+### Tali (Browser Extension)
 
-1. Go to `chrome://extensions` (or `edge://extensions`).
-2. Enable Developer Mode.
-3. Load Unpacked → select the `browser/extension/` folder.
-4. Open a website → click the extension icon → side panel opens.
-5. Enter your Anthropic API key in Settings (⚙).
+**From the Chrome Web Store:** [Add Tali — AI Browser Agent](https://chromewebstore.google.com/detail/ppakaagcjnojicbdebhgkpjgikclbnlf) _(link is a placeholder until the listing is published)_.
+
+**From source (unpacked):**
+
+1. Build it: `npm run build:browser` (outputs `dist-browser/extension/`).
+2. Go to `chrome://extensions` (or `edge://extensions`).
+3. Enable Developer Mode.
+4. Load Unpacked → select the `dist-browser/extension/` folder.
+5. Open a website → click the Tali icon → the side panel opens.
+6. Enter your Anthropic API key in Settings (⚙), or sign in with the free trial / Claude subscription.
+
+#### Screenshots
+
+<!-- TODO: replace placeholders with real Tali screenshots before publishing -->
+| Side panel | Recipes & watchers | Device profiles |
+|------------|--------------------|-----------------|
+| _(screenshot placeholder)_ | _(screenshot placeholder)_ | _(screenshot placeholder)_ |
 
 ### Relay (optional)
 

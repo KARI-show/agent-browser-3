@@ -1579,7 +1579,7 @@
       } catch (e) {
         throw new Error(
           "Couldn't open a private window (" + ((e && e.message) || e) + "). Turn on \"Allow in Incognito\" " +
-          "for Agent Browser at chrome://extensions, then try again."
+          "for Tali at chrome://extensions, then try again."
         );
       }
       var tab = win.tabs && win.tabs[0];

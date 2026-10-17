@@ -60,7 +60,7 @@ function setStatus(state, message) {
   chrome.storage.session.set({ [STATUS_KEY]: s }).catch(function () {});
   chrome.action.setBadgeBackgroundColor({ color: state === "error" ? "#cf222e" : "#1a7f37" }).catch(function () {});
   chrome.action.setBadgeText({ text: state === "off" ? "" : state === "error" ? "!" : "P" }).catch(function () {});
-  chrome.action.setTitle({ title: "Agent Browser" + (state === "active" ? " — proxy on" : state === "error" ? " — proxy problem" : "") }).catch(function () {});
+  chrome.action.setTitle({ title: "Tali" + (state === "active" ? " — proxy on" : state === "error" ? " — proxy problem" : "") }).catch(function () {});
 }
 
 function randomToken() {

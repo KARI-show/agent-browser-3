@@ -337,3 +337,18 @@ body.backend-native .user-tools .rewind-btn:last-child { display: none !importan
   box-sizing: border-box;
 }
 #edCtx:focus { border-color: var(--vscode-focusBorder, #007acc); outline: none; }
+
+/* -- Tali branding / a11y polish (appended; overrides only) ---------- */
+body.browser button:focus-visible,
+body.browser input:focus-visible,
+body.browser [tabindex]:focus-visible {
+  outline: 2px solid var(--tali-cyan, #25b6ff);
+  outline-offset: 1px;
+}
+.cmd-search input, .param-row .param-name { border-radius: 8px; }
+@media (prefers-reduced-motion: reduce) {
+  body.browser *, body.browser *::before, body.browser *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

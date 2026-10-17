@@ -5,10 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link href="theme.css" rel="stylesheet" />
   <link href="options.css" rel="stylesheet" />
-  <title>Agent Browser — settings</title>
+  <title>Tali — settings</title>
 </head>
 <body>
   <main>
+    <header class="brand-head">
+      <img class="brand-icon" src="icon.png" alt="" width="44" height="44" />
+      <div>
+        <p class="brand-name">Tali <span>&middot; AI Browser Agent</span></p>
+        <p class="brand-sub">Your AI agent in the browser &mdash; reads, clicks, types &amp; fills forms for you.</p>
+      </div>
+    </header>
     <h1>How the agent runs</h1>
     <p class="lead">Pick one. You can switch any time — chats are kept.</p>
 
@@ -100,7 +107,7 @@
     <h1>Proxy for this browser profile</h1>
     <p class="lead">
       Sends all traffic of <b>this browser profile</b> through your proxy. For a separate address for the agent,
-      create a dedicated Chrome/Edge profile, install Agent Browser there and set the proxy here.
+      create a dedicated Chrome/Edge profile, install Tali there and set the proxy here.
     </p>
 
     <div id="status" class="status off"><span class="dot"></span><span id="statusText">Proxy is off</span></div>
@@ -111,7 +118,7 @@
           <option value="">— pick a saved proxy —</option>
         </select>
       </label>
-      <div class="actions" style="align-self: end;">
+      <div class="actions end">
         <button type="button" id="presetLoad">Load</button>
         <button type="button" id="presetDelete">Delete</button>
       </div>
@@ -120,7 +127,7 @@
       <label>Save the fields below as
         <input id="presetName" placeholder="e.g. Home, Client A" spellcheck="false" />
       </label>
-      <div class="actions" style="align-self: end;">
+      <div class="actions end">
         <button type="button" id="presetSave">Save as new proxy</button>
       </div>
     </div>
@@ -232,7 +239,7 @@
     <div id="incognitoStatus" class="status off"><span class="dot"></span><span id="incognitoStatusText">Checking…</span></div>
     <p class="hint">
       Chrome keeps this off by default for every extension. Turn it on once at
-      <code>chrome://extensions</code> → Agent Browser → Details → "Allow in Incognito" — otherwise the
+      <code>chrome://extensions</code> → Tali → Details → "Allow in Incognito" — otherwise the
       private-window tool will fail and say so.
     </p>
   </main>

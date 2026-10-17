@@ -3,6 +3,12 @@
    style.css). Dark mirrors relay/build-app.mjs THEME; light follows the OS. */
 :root {
   color-scheme: dark;
+  /* Tali brand (matches media/icon-v*.png: browser cyan + spark green + action orange) */
+  --tali-cyan: #25b6ff;
+  --tali-green: #8bd450;
+  --tali-orange: #ff7a1a;
+  --tali-ink: #0a1628;
+  --tali-radius: 10px;
   --vscode-font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
   --vscode-font-size: 13px;
   --vscode-editor-font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
@@ -12,8 +18,8 @@
   --vscode-editor-background: #1e1e1e;
   --vscode-editorWidget-background: #252526;
   --vscode-panel-border: rgba(255, 255, 255, 0.12);
-  --vscode-focusBorder: #4aa3ff;
-  --vscode-textLink-foreground: #4aa3ff;
+  --vscode-focusBorder: #25b6ff;
+  --vscode-textLink-foreground: #25b6ff;
   --vscode-terminal-background: #0d1117;
   --vscode-terminal-foreground: #d4d4d4;
   --vscode-button-background: #0e639c;
@@ -71,3 +77,7 @@ body {
 body {
   margin: 0;
 }
+
+/* Tali: brand-tinted selection + slim scrollbars (side panel is narrow) */
+::selection { background: rgba(37, 182, 255, 0.35); }
+* { scrollbar-width: thin; scrollbar-color: rgba(127, 127, 127, 0.45) transparent; }

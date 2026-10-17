@@ -15,6 +15,7 @@ input[type="text"], input:not([type]), input[type="number"], input[type="passwor
 }
 input:focus, select:focus { outline: 1px solid var(--vscode-focusBorder); border-color: var(--vscode-focusBorder); }
 .actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.actions.end { align-self: end; }
 button { font: inherit; padding: 7px 14px; border-radius: 6px; border: 1px solid var(--vscode-input-border); background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); cursor: pointer; }
 button.primary { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border-color: transparent; }
 button:disabled { opacity: 0.6; cursor: default; }
@@ -40,3 +41,16 @@ label.mode.disabled { opacity: 0.55; cursor: default; }
 .fields.open { display: flex; }
 .hint.block { display: block; margin-top: 2px; }
 input[readonly] { color: var(--vscode-descriptionForeground); }
+
+/* Tali brand header */
+.brand-head { display: flex; gap: 12px; align-items: center; margin-bottom: 26px; }
+.brand-icon { border-radius: 11px; box-shadow: 0 2px 10px rgba(0,0,0,.28); flex: 0 0 auto; }
+.brand-name { margin: 0; font-size: 19px; font-weight: 700; letter-spacing: .01em; }
+.brand-name span { color: var(--vscode-descriptionForeground); font-weight: 500; }
+.brand-sub { margin: 2px 0 0; color: var(--vscode-descriptionForeground); font-size: 12.5px; line-height: 1.4; }
+label.mode { transition: border-color .15s ease, background .15s ease; }
+label.mode:hover { border-color: var(--vscode-focusBorder); background: var(--vscode-list-hoverBackground); }
+label.mode:focus-within { outline: 2px solid var(--vscode-focusBorder); outline-offset: 1px; }
+button { transition: background .15s ease, border-color .15s ease; }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 1px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }

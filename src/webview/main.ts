@@ -2718,11 +2718,18 @@ function renderWelcome() {
       ? `<img class="welcome-avatar" src="${AVATAR}" alt="${esc(assistantName)}" />`
       : `<div class="welcome-logo">✦</div>`) +
     `<div class="welcome-title">${esc(assistantName)}</div>` +
-    `<div class="welcome-sub">Works in your workspace — reads, edits, runs commands.</div>` +
+    `<div class="welcome-sub">${document.body.classList.contains("browser")
+      ? "Works in your browser — reads pages, clicks, types, fills forms, automates."
+      : "Works in your workspace — reads, edits, runs commands."}</div>` +
     `<div class="welcome-chips"></div>` +
     `<div class="welcome-tips">⏎ send · ⇧⏎ newline · <b>@</b> file · <b>/</b> commands · Ctrl+V image</div>`;
   const box = w.querySelector(".welcome-chips") as HTMLElement;
-  const chips = [
+  const chips = document.body.classList.contains("browser") ? [
+    "Read this page and summarize it",
+    "Fill out this form for me",
+    "Find and click the login button",
+    "Extract all the data from this table",
+  ] : [
     "Explain this project's structure",
     "Find and fix bugs in the current file",
     "Add tests for the current file",

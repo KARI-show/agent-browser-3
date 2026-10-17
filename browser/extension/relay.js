@@ -256,7 +256,7 @@
     var sock;
     try {
       sock = new WebSocket(url + "/?token=" + encodeURIComponent(t.token) +
-        "&role=node&id=" + encodeURIComponent(nid) + "&name=" + encodeURIComponent("Agent Browser"));
+        "&role=node&id=" + encodeURIComponent(nid) + "&name=" + encodeURIComponent("Tali"));
     } catch (e) {
       return fail("Bad relay address — fix it in the settings.");
     }
@@ -331,7 +331,7 @@
     var link = shareLink(activeChatId);
     var bot = target && target.bot ? "Your Telegram bot lists this browser's chats too." : "";
     if (!link) {
-      local({ type: "info", text: ["🛰 Remote ON — this browser's chats are on the relay as “Agent Browser”.", bot].filter(Boolean).join(" ") });
+      local({ type: "info", text: ["🛰 Remote ON — this browser's chats are on the relay as “Tali”.", bot].filter(Boolean).join(" ") });
       return;
     }
     var lines = ["🛰 Remote ON — open this chat on your phone:", link, bot];

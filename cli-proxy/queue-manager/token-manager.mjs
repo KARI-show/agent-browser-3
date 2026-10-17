@@ -90,23 +90,31 @@ function scheduleRefresh() {
   console.log(`[token] next refresh in ${Math.round(delay / 1000)}s`);
 }
 
-export function init() {
-  cached = loadFromDisk();
-  console.log(`[token] loaded, sub=${cached.subscriptionType}, expires=${new Date(cached.expiresAt).toISOString()}`);
-  // If expired or close to it, refresh now
-  if (cached.expiresAt - Date.now() < REFRESH_MARGIN_MS) {
-    console.log("[token] token expired or close to expiry, refreshing immediately...");
-    return doRefresh(cached.refreshToken).then((fresh) => {
-      cached.accessToken = fresh.accessToken;
-      cached.refreshToken = fresh.refreshToken;
-      cached.expiresAt = fresh.expiresAt;
-      saveToDisk(cached);
-      scheduleRefresh();
-      return cached;
-    });
+export async function init() {
+  try {
+    cached = loadFromDisk();
+    console.log(`[token] loaded, sub=${cached.subscriptionType}, expires=${new Date(cached.expiresAt).toISOString()}`);
+    if (cached.expiresAt - Date.now() < REFRESH_MARGIN_MS) {
+      console.log("[token] token expired or close to expiry, refreshing immediately...");
+      try {
+        const fresh = await doRefresh(cached.refreshToken);
+        cached.accessToken = fresh.accessToken;
+        cached.refreshToken = fresh.refreshToken;
+        cached.expiresAt = fresh.expiresAt;
+        saveToDisk(cached);
+      } catch (e) {
+        console.error("[token] refresh failed:", e.message);
+        console.warn("[token] server will start but API calls will fail until `claude login` is run");
+      }
+    }
+    scheduleRefresh();
+    return cached;
+  } catch (e) {
+    console.error("[token] init failed:", e.message);
+    console.warn("[token] server will start WITHOUT a valid token. Run `claude login` on this machine.");
+    cached = { accessToken: "", refreshToken: "", expiresAt: 0, scopes: [], subscriptionType: "none" };
+    return cached;
   }
-  scheduleRefresh();
-  return Promise.resolve(cached);
 }
 
 export function getAccessToken() {

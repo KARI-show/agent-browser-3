@@ -661,7 +661,7 @@
         await chrome.notifications.create("watch:" + w.id + ":" + Date.now(), {
           type: "basic",
           iconUrl: chrome.runtime.getURL("icon.png"),
-          title: "Agent Browser · " + w.name,
+          title: "Tali · " + w.name,
           message: (diff.added[0] || diff.removed[0] || "").slice(0, 150) || head,
           contextMessage: w.url.slice(0, 100),
           priority: 1,

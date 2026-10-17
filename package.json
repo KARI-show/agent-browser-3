@@ -140,7 +140,7 @@
       "properties": {
         "agentIde.assistantName": {
           "type": "string",
-          "default": "Kari",
+          "default": "Tali",
           "description": "Display name of the assistant in the chat (header + reply labels)."
         },
         "agentIde.autoCompact": {
