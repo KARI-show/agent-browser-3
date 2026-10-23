@@ -1,0 +1,588 @@
+/* Skin "glass" — dark frosted glass.
+   Translucent panels over a tinted gradient, backdrop blur, 16px radii, soft inner
+   highlights, a gradient header, a pill composer and bordered (not filled) bubbles;
+   the brand accent is used for focus glows. Dark only.
+   Loaded last: side panel rules under body.browser, settings page under body.options. */
+
+:root {
+  color-scheme: dark;
+  --brand-radius: 16px;
+  /* skin tokens (shared by both pages) */
+  --sk-bg: #0e1120;
+  --sk-glass: rgba(255, 255, 255, 0.045);
+  --sk-glass-2: rgba(255, 255, 255, 0.08);
+  --sk-line: rgba(255, 255, 255, 0.12);
+  --sk-line-2: rgba(255, 255, 255, 0.2);
+  --sk-hi: rgba(255, 255, 255, 0.12);
+  --sk-ink: color-mix(in srgb, var(--brand-ink, #0a1628) 90%, #000);
+  --sk-glow: color-mix(in srgb, var(--brand-accent) 35%, transparent);
+  --sk-ring: color-mix(in srgb, var(--brand-accent) 22%, transparent);
+  --sk-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  --sk-blur: blur(16px) saturate(1.3);
+
+  --vscode-font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+  --vscode-foreground: #e5e9f5;
+  --vscode-descriptionForeground: #9ba4bd;
+  --vscode-sideBar-background: var(--sk-bg);
+  --vscode-editor-background: #12162a;
+  --vscode-editorWidget-background: rgba(24, 28, 50, 0.78);
+  --vscode-panel-border: var(--sk-line);
+  --vscode-focusBorder: var(--brand-accent);
+  --vscode-textLink-foreground: var(--brand-accent);
+  --vscode-terminal-background: rgba(4, 6, 16, 0.55);
+  --vscode-terminal-foreground: #dde2f0;
+  --vscode-button-background: var(--brand-accent);
+  --vscode-button-foreground: var(--sk-ink);
+  --vscode-button-hoverBackground: color-mix(in srgb, var(--brand-accent) 85%, #fff);
+  --vscode-button-secondaryBackground: rgba(255, 255, 255, 0.1);
+  --vscode-button-secondaryForeground: #eef1fa;
+  --vscode-input-background: rgba(255, 255, 255, 0.06);
+  --vscode-input-foreground: #f1f4fb;
+  --vscode-input-border: var(--sk-line-2);
+  --vscode-list-hoverBackground: rgba(255, 255, 255, 0.07);
+  --vscode-toolbar-hoverBackground: rgba(255, 255, 255, 0.12);
+  --vscode-tab-activeBackground: rgba(255, 255, 255, 0.12);
+  --vscode-tab-inactiveForeground: #9ba4bd;
+  --vscode-tab-activeForeground: #ffffff;
+  --vscode-errorForeground: #ff7b7b;
+  --vscode-testing-iconPassed: #5ee3a0;
+
+  /* style.css tokens */
+  --r-sm: 10px;
+  --r-md: 14px;
+  --r-lg: 16px;
+  --radius: 24px;
+  --btn-radius: 999px;
+  --surface: var(--sk-glass);
+  --surface-2: var(--sk-glass-2);
+  --surface-top-hi: var(--sk-hi);
+  --hair: var(--sk-line);
+  --hair-strong: var(--sk-line-2);
+  --shadow-sm: var(--sk-shadow);
+  --shadow-md: 0 12px 32px rgba(0, 0, 0, 0.35);
+  --shadow-pop: 0 1px 0 var(--sk-hi) inset, 0 20px 50px rgba(0, 0, 0, 0.5);
+  --add-fg: #5ee3a0;
+  --del-fg: #ff7b7b;
+  --add-bg: rgba(94, 227, 160, 0.14);
+  --del-bg: rgba(255, 123, 123, 0.14);
+}
+::selection { background: color-mix(in srgb, var(--brand-accent) 40%, transparent); }
+
+/* ═══ side panel ═══════════════════════════════════════════════════════ */
+body.browser {
+  background:
+    radial-gradient(900px 520px at -10% -20%, color-mix(in srgb, var(--brand-accent) 30%, transparent), transparent 62%),
+    radial-gradient(700px 480px at 115% 110%, color-mix(in srgb, var(--brand-spark) 22%, transparent), transparent 60%),
+    radial-gradient(500px 400px at 60% 50%, color-mix(in srgb, var(--brand-action) 8%, transparent), transparent 70%),
+    var(--sk-bg);
+}
+
+/* header: gradient glass bar */
+body.browser #bar {
+  padding: 8px 10px;
+  gap: 4px;
+  border-bottom: 1px solid var(--sk-line);
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--brand-accent) 32%, rgba(22, 26, 48, 0.6)),
+    color-mix(in srgb, var(--brand-spark) 18%, rgba(22, 26, 48, 0.6)) 70%,
+    rgba(22, 26, 48, 0.6)
+  );
+  -webkit-backdrop-filter: var(--sk-blur);
+  backdrop-filter: var(--sk-blur);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2), 0 6px 24px rgba(0, 0, 0, 0.25);
+}
+body.browser .bar-title { opacity: 0.85; }
+body.browser .bar-avatar {
+  border-radius: 8px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25), 0 0 14px var(--sk-glow);
+}
+body.browser .icon-btn,
+body.browser #bar .toggle-btn {
+  border-radius: 10px;
+  border-color: transparent;
+}
+body.browser .icon-btn:hover,
+body.browser #bar .toggle-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+body.browser .toggle-btn.on {
+  background: color-mix(in srgb, var(--brand-accent) 22%, transparent);
+  border-color: color-mix(in srgb, var(--brand-accent) 50%, transparent);
+  box-shadow: 0 0 12px var(--sk-glow);
+}
+body.browser .ctx-pill {
+  border-radius: 999px;
+  background: var(--sk-glass);
+  border-color: var(--sk-line);
+}
+
+/* auth banner */
+body.browser #auth-banner {
+  background: rgba(230, 170, 0, 0.1);
+  border-bottom: 1px solid rgba(230, 170, 0, 0.3);
+  -webkit-backdrop-filter: var(--sk-blur);
+  backdrop-filter: var(--sk-blur);
+}
+body.browser .mini { border-radius: 999px; padding: 3px 11px; }
+
+/* chat tabs */
+body.browser #tabs {
+  border-bottom: 1px solid var(--sk-line);
+  background: rgba(10, 12, 26, 0.3);
+}
+body.browser .tab {
+  background: var(--sk-glass);
+  border: 1px solid var(--sk-line);
+  box-shadow: inset 0 1px 0 var(--sk-hi);
+}
+body.browser .tab:hover { background: var(--sk-glass-2); border-color: var(--sk-line-2); }
+body.browser .tab.active {
+  background: color-mix(in srgb, var(--brand-accent) 16%, rgba(255, 255, 255, 0.06));
+  border-color: color-mix(in srgb, var(--brand-accent) 55%, transparent);
+  box-shadow: inset 0 1px 0 var(--sk-hi), 0 0 14px var(--sk-glow);
+}
+
+/* chats popover */
+body.browser #chats,
+body.browser #checkpoints {
+  background: rgba(16, 19, 38, 0.7);
+  -webkit-backdrop-filter: var(--sk-blur);
+  backdrop-filter: var(--sk-blur);
+  border-bottom: 1px solid var(--sk-line);
+}
+body.browser .ck-row { border-radius: 12px; }
+body.browser .chat-search { border-radius: 999px; padding: 6px 12px; }
+
+/* log */
+body.browser #log { padding: 16px 14px; gap: 14px; }
+
+/* user bubble: bordered glass, not a fill */
+body.browser .msg.user {
+  background: var(--sk-glass-2);
+  color: var(--vscode-foreground);
+  border: 1px solid var(--sk-line-2);
+  border-radius: 18px 18px 6px 18px;
+  padding: 9px 14px;
+  -webkit-backdrop-filter: var(--sk-blur);
+  backdrop-filter: var(--sk-blur);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), var(--sk-shadow);
+}
+body.browser .rewind-btn { border-radius: 10px; }
+
+/* assistant */
+body.browser .role-avatar {
+  border-radius: 10px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.2), 0 0 14px var(--sk-glow);
+}
+body.browser .model-pill {
+  border-radius: 999px;
+  background: var(--sk-glass);
+  border-color: var(--sk-line);
+  color: var(--vscode-descriptionForeground);
+}
+body.browser .msg-body h1,
+body.browser .msg-body h2 { border-bottom-color: var(--sk-line); }
+body.browser .msg-body :not(pre) > code {
+  background: rgba(255, 255, 255, 0.1);
+  color: #ffd9a6;
+  border: 1px solid var(--sk-line);
+  border-radius: 7px;
+  padding: 1px 6px;
+}
+body.browser .msg-body pre,
+body.browser .tool-card pre.code,
+body.browser .thinking pre {
+  background: rgba(3, 5, 14, 0.45);
+  border: 1px solid var(--sk-line);
+  border-radius: 14px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+body.browser .msg-body th,
+body.browser .msg-body td { border-color: var(--sk-line); }
+body.browser .msg-body th { background: rgba(255, 255, 255, 0.08); }
+body.browser .msg-body tr:nth-child(even) td { background: rgba(255, 255, 255, 0.035); }
+body.browser .msg-body blockquote {
+  background: var(--sk-glass);
+  border-left: 3px solid var(--brand-accent);
+  border-radius: 0 14px 14px 0;
+  box-shadow: inset 0 1px 0 var(--sk-hi);
+}
+body.browser .msg-act { border-radius: 999px; background: var(--sk-glass); }
+
+/* cards: tools, thinking, questions, todos, typing, confirm */
+body.browser .tool-card,
+body.browser .thinking,
+body.browser .question-card,
+body.browser .todos,
+body.browser .typing,
+body.browser .confirm-card,
+body.browser .earlier-btn,
+body.browser .rules-note,
+body.browser #recipe-offer,
+body.browser .queue-chip {
+  background: var(--sk-glass);
+  border: 1px solid var(--sk-line);
+  -webkit-backdrop-filter: var(--sk-blur);
+  backdrop-filter: var(--sk-blur);
+  box-shadow: inset 0 1px 0 var(--sk-hi), var(--sk-shadow);
+}
+body.browser .tool-card,
+body.browser .todos,
+body.browser .confirm-card,
+body.browser #recipe-offer { border-radius: 16px; }
+body.browser .tool-card { border-left: 1px solid var(--sk-line); padding: 8px 14px; }
+body.browser .tool-card:hover { border-color: var(--sk-line-2); }
+body.browser .tool-card.tool-ok { border-color: color-mix(in srgb, var(--add-fg) 35%, var(--sk-line)); }
+body.browser .tool-card.tool-err { border-color: color-mix(in srgb, var(--del-fg) 40%, var(--sk-line)); }
+body.browser .tool-card.running {
+  border-color: color-mix(in srgb, var(--brand-accent) 45%, var(--sk-line));
+  box-shadow: inset 0 1px 0 var(--sk-hi), 0 0 0 1px var(--sk-ring), 0 0 22px var(--sk-glow);
+}
+body.browser .tool-card.await-approval,
+body.browser .approval-card.pending {
+  background: color-mix(in srgb, var(--brand-accent) 8%, var(--sk-glass));
+  border-color: color-mix(in srgb, var(--brand-accent) 55%, transparent);
+  box-shadow: inset 0 1px 0 var(--sk-hi), 0 0 0 3px var(--sk-ring), 0 0 28px var(--sk-glow);
+}
+body.browser .tool-card.tool-term {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+body.browser .tool-term .term {
+  border: 1px solid var(--sk-line);
+  border-radius: 16px;
+  background: rgba(3, 5, 14, 0.5);
+  -webkit-backdrop-filter: var(--sk-blur);
+  backdrop-filter: var(--sk-blur);
+  box-shadow: inset 0 1px 0 var(--sk-hi), var(--sk-shadow);
+}
+body.browser .term-bar { background: rgba(255, 255, 255, 0.05); border-bottom-color: var(--sk-line); }
+body.browser .term-out,
+body.browser .term-cmd { background: transparent; }
+body.browser .thinking {
+  border-radius: 18px 18px 18px 8px;
+  border-left: 1px solid var(--sk-line);
+}
+body.browser .thinking:not([open]) { border-radius: 999px; }
+body.browser .thinking.live {
+  border-color: color-mix(in srgb, var(--brand-accent) 45%, var(--sk-line));
+  background: color-mix(in srgb, var(--brand-accent) 6%, var(--sk-glass));
+  box-shadow: inset 0 1px 0 var(--sk-hi), 0 0 20px var(--sk-glow);
+}
+body.browser .typing { border-radius: 999px; }
+body.browser .question-card {
+  border-radius: 18px;
+  border-color: color-mix(in srgb, var(--brand-accent) 50%, var(--sk-line));
+  background: color-mix(in srgb, var(--brand-accent) 6%, var(--sk-glass));
+  box-shadow: inset 0 1px 0 var(--sk-hi), 0 0 0 3px var(--sk-ring), var(--sk-shadow);
+}
+body.browser .question-card.answered { background: var(--sk-glass); border-color: var(--sk-line); box-shadow: var(--sk-shadow); }
+body.browser .q-chip { border-radius: 999px; color: var(--sk-ink); }
+body.browser .q-opt {
+  background: var(--sk-glass);
+  border: 1px solid var(--sk-line);
+  border-radius: 14px;
+  box-shadow: inset 0 1px 0 var(--sk-hi);
+}
+body.browser .q-opt:hover { background: var(--sk-glass-2); border-color: color-mix(in srgb, var(--brand-accent) 60%, transparent); }
+body.browser .q-opt.sel {
+  background: color-mix(in srgb, var(--brand-accent) 16%, transparent);
+  box-shadow: inset 0 0 0 1px var(--brand-accent), 0 0 16px var(--sk-glow);
+}
+body.browser .q-other-input { border-radius: 999px; padding: 7px 14px; }
+body.browser .q-submit,
+body.browser .approval-actions button,
+body.browser .confirm-opt { border-radius: 999px; }
+body.browser .approval-actions button:not(.secondary),
+body.browser .q-submit { box-shadow: 0 4px 16px var(--sk-glow); }
+body.browser .status.error {
+  background: var(--del-bg);
+  border: 1px solid color-mix(in srgb, var(--del-fg) 40%, transparent);
+  border-radius: 14px;
+  -webkit-backdrop-filter: var(--sk-blur);
+  backdrop-filter: var(--sk-blur);
+}
+body.browser .todos-head { color: var(--brand-accent); }
+
+/* composer: pill of glass */
+body.browser #composer {
+  border-top: none;
+  padding: 6px 12px 14px;
+  background: linear-gradient(180deg, transparent, rgba(6, 8, 20, 0.45));
+}
+body.browser #input-card {
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--sk-line-2);
+  -webkit-backdrop-filter: blur(22px) saturate(1.4);
+  backdrop-filter: blur(22px) saturate(1.4);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 12px 36px rgba(0, 0, 0, 0.4);
+}
+body.browser #input-card:focus-within {
+  border-color: color-mix(in srgb, var(--brand-accent) 75%, #fff);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 0 0 3px var(--sk-ring), 0 0 32px var(--sk-glow), 0 12px 36px rgba(0, 0, 0, 0.4);
+}
+body.browser #input { padding: 12px 18px 4px; }
+body.browser #input::placeholder { color: var(--vscode-descriptionForeground); opacity: 0.8; }
+body.browser #toolbar { padding: 4px 10px 9px; gap: 6px; }
+body.browser #toolbar .mode-btn,
+body.browser #toolbar .icon-btn,
+body.browser #toolbar .toggle-btn,
+body.browser #toolbar .model-select {
+  border-radius: 999px;
+  background: var(--sk-glass);
+  border: 1px solid var(--sk-line);
+}
+body.browser #toolbar .mode-btn:hover,
+body.browser #toolbar .icon-btn:hover { background: var(--sk-glass-2); border-color: var(--sk-line-2); }
+body.browser #toolbar .mode-btn { padding: 0 11px; }
+body.browser #toolbar #send,
+body.browser #toolbar #stop {
+  height: 30px;
+  border-radius: 999px;
+  padding: 0 18px;
+}
+body.browser #send {
+  background: linear-gradient(135deg, var(--brand-accent), color-mix(in srgb, var(--brand-accent) 55%, var(--brand-spark)));
+  color: var(--sk-ink);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35), 0 6px 20px var(--sk-glow);
+}
+body.browser #send:hover {
+  background: linear-gradient(135deg, color-mix(in srgb, var(--brand-accent) 85%, #fff), color-mix(in srgb, var(--brand-accent) 50%, var(--brand-spark)));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4), 0 8px 26px color-mix(in srgb, var(--brand-accent) 50%, transparent);
+}
+body.browser #stop {
+  background: var(--sk-glass-2);
+  color: var(--vscode-foreground);
+  border: 1px solid var(--sk-line-2);
+}
+body.browser .ctxbar-track { background: rgba(255, 255, 255, 0.12); }
+body.browser .ctxbar-compact { border-radius: 999px; }
+body.browser .attach-chip { border-radius: 999px; background: var(--sk-glass-2); border: 1px solid var(--sk-line); }
+
+/* popovers / menus */
+body.browser #settings-menu,
+body.browser #ctx-menu,
+body.browser #mode-menu,
+body.browser #model-menu,
+body.browser #rules-menu,
+body.browser #changes-pop,
+body.browser #slash {
+  background: rgba(20, 24, 46, 0.9);
+  background-image: none;
+  border: 1px solid var(--sk-line-2);
+  border-radius: 16px;
+  -webkit-backdrop-filter: blur(26px) saturate(1.5);
+  backdrop-filter: blur(26px) saturate(1.5);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 20px 50px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+body.browser .menu-head { opacity: 0.7; color: var(--brand-accent); }
+body.browser .mode-item,
+body.browser .ctx-item,
+body.browser .slash-item { border-left: 0; }
+body.browser .mode-item.active { background: color-mix(in srgb, var(--brand-accent) 16%, transparent); }
+body.browser .switch { background: rgba(255, 255, 255, 0.18); }
+
+/* welcome */
+body.browser .welcome-avatar {
+  border-radius: 20px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.22), 0 0 48px var(--sk-glow), var(--shadow-md);
+}
+body.browser .welcome-title { font-size: 1.3em; }
+body.browser .welcome-chip {
+  background: var(--sk-glass);
+  border: 1px solid var(--sk-line);
+  border-radius: 14px;
+  -webkit-backdrop-filter: var(--sk-blur);
+  backdrop-filter: var(--sk-blur);
+  box-shadow: inset 0 1px 0 var(--sk-hi);
+}
+body.browser .welcome-chip:hover {
+  background: var(--sk-glass-2);
+  border-color: color-mix(in srgb, var(--brand-accent) 60%, transparent);
+  box-shadow: inset 0 1px 0 var(--sk-hi), 0 0 18px var(--sk-glow);
+}
+
+body.browser #scrollBtn {
+  background: rgba(20, 24, 46, 0.7);
+  border: 1px solid var(--sk-line-2);
+  -webkit-backdrop-filter: var(--sk-blur);
+  backdrop-filter: var(--sk-blur);
+  box-shadow: inset 0 1px 0 var(--sk-hi), var(--sk-shadow);
+}
+
+/* extension panels: commands / profiles / automations */
+body.browser #commands-panel,
+body.browser #profiles-panel,
+body.browser #automations-panel {
+  background: rgba(12, 14, 30, 0.82);
+  -webkit-backdrop-filter: blur(28px) saturate(1.4);
+  backdrop-filter: blur(28px) saturate(1.4);
+}
+body.browser .cmd-header { border-bottom-color: var(--sk-line); padding: 12px 14px 8px; }
+body.browser .cmd-search input {
+  border-radius: 999px;
+  padding: 7px 14px;
+  background: var(--sk-glass-2);
+  border-color: var(--sk-line-2);
+}
+body.browser .cmd-search input:focus { border-color: var(--brand-accent); box-shadow: 0 0 0 3px var(--sk-ring), 0 0 18px var(--sk-glow); }
+body.browser .cmd-group-title { color: var(--brand-accent); opacity: 0.8; }
+body.browser .cmd-item { border-radius: 12px; border: 1px solid transparent; }
+body.browser .cmd-item:hover { background: var(--sk-glass-2); border-color: var(--sk-line); }
+body.browser .cmd-item.active { outline: none; border-color: var(--brand-accent); box-shadow: 0 0 14px var(--sk-glow); }
+body.browser .prof-tabs { border-bottom-color: var(--sk-line); }
+body.browser .prof-tab.active { border-bottom-color: var(--brand-accent); color: #fff; }
+body.browser .prof-btn { border-radius: 10px; border-color: var(--sk-line-2); background: var(--sk-glass); }
+body.browser .prof-btn:hover { background: var(--sk-glass-2); }
+body.browser .prof-btn.primary { border-radius: 999px; background: var(--brand-accent); color: var(--sk-ink); box-shadow: 0 4px 16px var(--sk-glow); }
+body.browser .prof-status,
+body.browser .ed-section,
+body.browser .step-line { border-color: var(--sk-line); }
+body.browser .ed-label input,
+body.browser .ed-label textarea,
+body.browser .ed-label select,
+body.browser .param-row .param-name,
+body.browser #edCtx {
+  border-radius: 12px;
+  background: var(--sk-glass-2);
+  border-color: var(--sk-line-2);
+}
+body.browser .auto-pre { border-radius: 12px; border-color: var(--sk-line); background: rgba(3, 5, 14, 0.5); }
+body.browser .ed-icon { border-radius: 10px; }
+body.browser .ed-icon.active { background: color-mix(in srgb, var(--brand-accent) 20%, transparent); }
+
+/* focus glow */
+body.browser button:focus-visible,
+body.browser input:focus-visible,
+body.browser [tabindex]:focus-visible {
+  outline-color: color-mix(in srgb, var(--brand-accent) 80%, #fff);
+  box-shadow: 0 0 0 4px var(--sk-ring), 0 0 18px var(--sk-glow);
+}
+
+/* ═══ settings page ════════════════════════════════════════════════════ */
+body.options {
+  background:
+    radial-gradient(1100px 600px at -5% -10%, color-mix(in srgb, var(--brand-accent) 28%, transparent), transparent 62%),
+    radial-gradient(900px 600px at 110% 110%, color-mix(in srgb, var(--brand-spark) 22%, transparent), transparent 60%),
+    var(--sk-bg);
+  background-attachment: fixed;
+  color: var(--vscode-foreground);
+  min-height: 100vh;
+}
+body.options main {
+  max-width: 640px;
+  margin: 40px auto;
+  padding: 28px 30px 36px;
+  background: var(--sk-glass);
+  border: 1px solid var(--sk-line);
+  border-radius: 24px;
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
+  backdrop-filter: blur(24px) saturate(1.4);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 30px 80px rgba(0, 0, 0, 0.45);
+}
+body.options .brand-head {
+  padding: 16px 18px;
+  margin-bottom: 30px;
+  border-radius: 18px;
+  background: linear-gradient(
+    120deg,
+    color-mix(in srgb, var(--brand-accent) 30%, rgba(255, 255, 255, 0.04)),
+    color-mix(in srgb, var(--brand-spark) 16%, rgba(255, 255, 255, 0.04))
+  );
+  border: 1px solid var(--sk-line-2);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+body.options .brand-icon {
+  border-radius: 14px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25), 0 0 34px var(--sk-glow);
+}
+body.options .brand-name { font-size: 20px; }
+body.options .brand-name span { color: #d6dcf0; }
+body.options .brand-sub { color: #c3cadf; }
+body.options h1 { font-size: 21px; letter-spacing: -0.01em; }
+body.options .lead { color: var(--vscode-descriptionForeground); }
+body.options input[type="text"],
+body.options input:not([type]),
+body.options input[type="number"],
+body.options input[type="password"],
+body.options input[type="email"],
+body.options select {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--sk-line-2);
+  border-radius: 12px;
+  padding: 9px 13px;
+  color: var(--vscode-input-foreground);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+body.options input:focus,
+body.options select:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--brand-accent) 75%, #fff);
+  box-shadow: 0 0 0 3px var(--sk-ring), 0 0 22px var(--sk-glow);
+}
+body.options button {
+  border-radius: 999px;
+  padding: 8px 18px;
+  background: rgba(255, 255, 255, 0.09);
+  border: 1px solid var(--sk-line-2);
+  color: #eef1fa;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14);
+}
+body.options button:hover { background: rgba(255, 255, 255, 0.15); }
+body.options button.primary {
+  background: linear-gradient(135deg, var(--brand-accent), color-mix(in srgb, var(--brand-accent) 55%, var(--brand-spark)));
+  color: var(--sk-ink);
+  border-color: transparent;
+  font-weight: 600;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35), 0 6px 20px var(--sk-glow);
+}
+body.options button.primary:hover { filter: brightness(1.08); }
+body.options .status {
+  border-radius: 14px;
+  background: var(--sk-glass);
+  border: 1px solid var(--sk-line);
+  box-shadow: inset 0 1px 0 var(--sk-hi);
+}
+body.options .status .dot { width: 9px; height: 9px; }
+body.options .status.active .dot { box-shadow: 0 0 12px var(--vscode-testing-iconPassed); }
+body.options .status.error .dot { box-shadow: 0 0 12px var(--vscode-errorForeground); }
+body.options hr { border-top: 1px solid var(--sk-line); margin: 34px 0; }
+body.options label.mode {
+  border-radius: 16px;
+  background: var(--sk-glass);
+  border: 1px solid var(--sk-line);
+  box-shadow: inset 0 1px 0 var(--sk-hi);
+  padding: 12px 14px;
+}
+body.options label.mode:hover { background: var(--sk-glass-2); border-color: var(--sk-line-2); }
+body.options label.mode:has(input:checked) {
+  border-color: color-mix(in srgb, var(--brand-accent) 60%, transparent);
+  background: color-mix(in srgb, var(--brand-accent) 10%, var(--sk-glass));
+  box-shadow: inset 0 1px 0 var(--sk-hi), 0 0 0 3px var(--sk-ring), 0 0 24px var(--sk-glow);
+}
+body.options label.mode:focus-within { outline-color: color-mix(in srgb, var(--brand-accent) 80%, #fff); }
+body.options input[type="radio"],
+body.options input[type="checkbox"] { accent-color: var(--brand-accent); }
+body.options .fields { padding-left: 28px; }
+body.options code {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--sk-line);
+  border-radius: 7px;
+  padding: 1px 6px;
+  font-size: 0.92em;
+}
+body.options button:focus-visible,
+body.options input:focus-visible,
+body.options select:focus-visible { outline-color: color-mix(in srgb, var(--brand-accent) 80%, #fff); }
+
+@media (prefers-reduced-motion: reduce) {
+  body.browser *,
+  body.options * { transition-duration: 0.001ms !important; }
+}
