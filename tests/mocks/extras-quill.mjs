@@ -1,4 +1,4 @@
-// Fakes for unit-testing the Quill extras' runtime (tests/rewrite.test.mjs, tests/snippets.test.mjs) (browser/extras/<id>.js) in node: a chrome with
+// Fakes for unit-testing the Quill extras (tests/rewrite.test.mjs, tests/snippets.test.mjs) in node: a chrome with
 // storage.local / tabs / scripting (executeScript answers by the injected function's name), the
 // AgentBrowserTools registry with its helpers and run(), an AgentExtras registry, the brand flag,
 // and a tiny DOM stand-in for the 🧩 tab's ctx.el. Same approach as tests/automation.test.mjs.
