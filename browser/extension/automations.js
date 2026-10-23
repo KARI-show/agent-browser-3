@@ -420,7 +420,7 @@
     if (!ids.length) content.appendChild(el("div", { className: "cmd-empty" }, ["No watchers yet."]));
     ids.forEach(function (id) {
       var w = all[id];
-      var how = w.mode === "selector" ? "CSS " + w.selector : w.mode === "table" ? "table" : w.mode === "recipe" ? "recipe" : "page text";
+      var how = w.mode === "selector" ? "CSS " + w.selector : w.mode === "table" ? "table" : w.mode === "recipe" ? "recipe" : w.mode === "status" ? "HTTP status (expect " + (w.expect || 200) + ")" : "page text";
       var last = w.lastRun ? (w.lastRun.ok ? "checked " + ago(w.lastRun.at) : "⚠ " + (w.lastRun.error || "failed")) : "first check pending";
       var actions = el("div", { className: "prof-actions column" }, [
         el("button", { className: "prof-btn", title: "Check now", onclick: function (e) { e.stopPropagation(); checkNow(w); } }, ["▶"]),
