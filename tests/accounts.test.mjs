@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
-import { fakeChrome, fakeTools, fakeDom, fakeCtx, loadExtra } from "./mocks/extras.mjs";
+import { fakeChrome, fakeTools, fakeDom, fakeCtx, loadExtra } from "./mocks/extras-harbor.mjs";
 
 const SRC = fs.readFileSync(fileURLToPath(new URL("../browser/extras/accounts.js", import.meta.url)), "utf8");
 const plain = (x) => JSON.parse(JSON.stringify(x)); // values cross the vm boundary: compare structure, not prototypes
