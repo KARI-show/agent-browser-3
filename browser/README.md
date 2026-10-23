@@ -320,6 +320,31 @@ does with a brand:
   | `network` | the network tap | — |
   | `proxy` | the proxy settings and per-profile proxies | `proxy`, `webRequest`, `webRequestAuthProvider`, `privacy` |
 
+- **Extras** — opt-in features a brand switches on (`"clips": true`) and every
+  other brand lacks, so Tali stays as published while another brand gets
+  capabilities of its own. Each is two files: `browser/host/extras/<id>.ts`
+  declares the tools and the prompt section the model gets (tools.ts appends
+  them under the feature, so the host and the built-in agent declare them only
+  to builds that have it) and `browser/extras/<id>.js` implements them in the
+  side panel — tools through `AgentBrowserTools.register`, a tab in the 🧩 panel
+  and quick commands through `AgentExtras`. The build concatenates a brand's
+  modules into its `extras.js`. An extra that builds on a base feature declares
+  it (`FEATURE_REQUIRES`): the build refuses `accounts` without `cookies` and
+  `uptime` without `watchers`. `browser/host/features.ts` and `brand.mjs` hold the
+  same lists; `tests/features.test.ts` keeps them equal and pins each extra's
+  tool-name prefix.
+
+  | extra | what it is | tools | ships in |
+  | --- | --- | --- | --- |
+  | `clips` | research clips with their sources, exported as Markdown | `browser_clip_*` | Orbit |
+  | `sessions` | save a window's tabs, restore them later | `browser_session_*` | Orbit |
+  | `rewrite` | rewrite the selected text in place: tone, length, grammar, translation | `browser_selection_*` | Quill |
+  | `snippets` | saved texts with placeholders, inserted into any field | `browser_snippet_*` | Quill |
+  | `checks` | broken-link finder and URL status checks | `browser_check_*` | Beacon |
+  | `uptime` | HTTP status monitors on a schedule, with latency history (on the watcher machinery) | `browser_uptime_*` | Beacon |
+  | `accounts` | named sign-ins per site, switched without logging out (on the cookie tools) | `browser_account_*` | Harbor |
+  | `audit` | identity report: what the site sees, device profile and proxy consistency | `browser_identity_report` | Harbor |
+
 - **Logo** — the icon and avatar the brand points at. `browser/brands/make-logo.mjs`
   draws a vector mark (several styles: monogram, orbit, quill, beacon, harbor) and
   renders the two PNGs in headless Chromium, so a brand gets a clean, distinct
@@ -336,9 +361,11 @@ node browser/brands/make-logo.mjs orbit --style orbit --bg "#0b1d3a" --fg "#e8ee
 
 `tests/brand.test.mjs` checks every brand file, the permission and tool cuts;
 `tests/e2e/brands.e2e.mjs` loads each built brand in Chromium and checks name,
-colours, assistant, skin, permissions, declared tools, hidden controls and the
-settings page. The brands besides Tali are placeholders (invented names and
-texts, generated marks) — replace them before any of them goes anywhere.
+colours, assistant, skin, permissions, declared tools, hidden controls, the
+extras' runtime and the settings page; `tests/e2e/extras-<brand>.e2e.mjs` drive
+each brand's extras against fixture pages. The brands besides Tali are
+placeholders (invented names and texts, generated marks) — replace them before
+any of them goes anywhere.
 
 **Before publishing more than one of them under one developer account, read
 the Chrome Web Store policy on repetitive content.** The store does not allow a
