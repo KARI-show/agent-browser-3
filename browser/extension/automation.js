@@ -12,6 +12,8 @@
 //  Watchers chrome.alarms → open the page in a background tab → extract (page
 //           text, a CSS selector, a table, or a recipe's outputs) → hash, diff →
 //           notify (system notification + Telegram) → event feed for the panel.
+//           Mode "status" (the uptime extra) opens no tab: it fetches the URL and
+//           compares "HTTP 200" / "down: …", keeping a history of code + latency.
 //  Memory   Notes per site that browser_read_page shows the agent on its first
 //           look at that site (data, never instructions).
 //
@@ -449,10 +451,12 @@
   // Watchers
   // ═══════════════════════════════════════════════════════════════════════
 
-  var MODES = { text: 1, selector: 1, table: 1, recipe: 1 };
+  var MODES = { text: 1, selector: 1, table: 1, recipe: 1, status: 1 };
   var MIN_EVERY = 1, MAX_EVERY = 7 * 24 * 60;
   var CONTENT_CAP = 200000;
   var EVENTS_MAX = 100;
+  var STATUS_TIMEOUT = 15000; // mode "status": one HTTP request, no tab
+  var STATUS_HISTORY_MAX = 288; // 24 h of checks at 5 min
 
   async function loadWatchers() { return load(WATCHERS_KEY, {}); }
   function saveWatchers(w) { return store(WATCHERS_KEY, w); }
@@ -483,7 +487,7 @@
   }
 
   function watcherSummary(w) {
-    var how = w.mode === "selector" ? "CSS " + w.selector : w.mode === "table" ? "table" + (w.selector ? " " + w.selector : "") : w.mode === "recipe" ? "recipe " + w.recipeId : "page text";
+    var how = w.mode === "status" ? "HTTP status (expect " + (w.expect || 200) + ")" : w.mode === "selector" ? "CSS " + w.selector : w.mode === "table" ? "table" + (w.selector ? " " + w.selector : "") : w.mode === "recipe" ? "recipe " + w.recipeId : "page text";
     var lr = w.lastRun ? (w.lastRun.ok ? "checked " + ago(w.lastRun.at) : "ERROR " + ago(w.lastRun.at) + ": " + w.lastRun.error) : "not checked yet";
     return w.id + "  " + (w.enabled ? "⏱" : "⏸") + " " + w.name + "  |  " + w.url + "  |  every " + w.every + " min  |  " + how + "  |  " + lr +
       (w.changes ? "  |  " + w.changes + " change" + (w.changes === 1 ? "" : "s") + (w.lastChange ? ", last " + ago(w.lastChange.at) : "") : "") +
@@ -513,13 +517,18 @@
       created: Date.now(),
       changes: 0,
     };
+    if (mode === "status") {
+      // An uptime monitor: the status that counts as up, and a ring of the recent checks.
+      w.expect = Math.min(599, Math.max(100, Math.round(Number(a.expect) || 200)));
+      w.history = [];
+    }
     var all = await loadWatchers();
     all[w.id] = w;
     await saveWatchers(all);
     await schedule(w);
     // The first check (the baseline) runs right away in the background.
     requestRun(w.id);
-    return "Watching " + w.url + " every " + every + " min (id: " + w.id + ", " + (mode === "selector" ? "CSS " + w.selector : mode === "table" ? "the table" : mode === "recipe" ? "the recipe's outputs" : "the page text") +
+    return "Watching " + w.url + " every " + every + " min (id: " + w.id + ", " + (mode === "status" ? "the HTTP status, expecting " + w.expect : mode === "selector" ? "CSS " + w.selector : mode === "table" ? "the table" : mode === "recipe" ? "the recipe's outputs" : "the page text") +
       "). The first check establishes the baseline; after that every change is reported with a system notification" +
       (w.notify.telegram ? " and, when the Telegram bot is set up, a Telegram message" : "") + ". It runs in the background with the panel closed. The 🧩 panel lists the changes; browser_watch_list shows the status.";
   }
@@ -611,6 +620,29 @@
     return normalizeText(typeof v === "string" ? v : v && v.text);
   }
 
+  /** Mode "status": one request (HEAD; GET when HEAD is refused with 405/501 or fails), 15 s timeout, no tab. */
+  async function httpStatus(url, method) {
+    var ctrl = typeof AbortController === "function" ? new AbortController() : null;
+    var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, STATUS_TIMEOUT) : null;
+    var t0 = Date.now();
+    try {
+      var res = await fetch(url, { method: method, redirect: "follow", cache: "no-store", signal: ctrl ? ctrl.signal : undefined });
+      if (res.body && res.body.cancel) res.body.cancel().catch(function () {}); // the headers are all that matters
+      return { code: res.status, ms: Date.now() - t0 };
+    } catch (e) {
+      return { error: ctrl && ctrl.signal.aborted ? "timeout after " + STATUS_TIMEOUT / 1000 + " s" : String((e && e.message) || e), ms: Date.now() - t0 };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+  /** The content a status watcher compares ("HTTP 200" / "down: <reason>") plus the history entry of this check. */
+  async function statusProbe(url, expect) {
+    var r = await httpStatus(url, "HEAD");
+    if (r.error || r.code === 405 || r.code === 501) r = await httpStatus(url, "GET");
+    var code = r.error ? 0 : r.code;
+    return { content: r.error ? "down: " + r.error : "HTTP " + code, at: Date.now(), ms: r.ms, code: code, ok: !r.error && code === (expect || 200) };
+  }
+
   async function openBackgroundTab(url) {
     var wins = await chrome.windows.getAll({ windowTypes: ["normal"] });
     var win = wins.find(function (w) { return w.focused && !w.incognito; }) || wins.find(function (w) { return !w.incognito; });
@@ -693,10 +725,17 @@
     var t0 = Date.now();
     var outcome;
     try {
-      opened = await openBackgroundTab(w.url);
-      T.setCurrentTab(opened.tab.id);
-      await Promise.race([waitLoaded(opened.tab.id, 30000), sleep(35000)]);
-      var content = await Promise.race([extract(w, opened.tab.id), sleep(90000).then(function () { throw new Error("the check took longer than 90 s"); })]);
+      var content, probe = null;
+      if (w.mode === "status") {
+        // An uptime monitor: no tab, one request; the status string is what gets compared.
+        probe = await statusProbe(w.url, w.expect);
+        content = probe.content;
+      } else {
+        opened = await openBackgroundTab(w.url);
+        T.setCurrentTab(opened.tab.id);
+        await Promise.race([waitLoaded(opened.tab.id, 30000), sleep(35000)]);
+        content = await Promise.race([extract(w, opened.tab.id), sleep(90000).then(function () { throw new Error("the check took longer than 90 s"); })]);
+      }
       var hash = fnv(content);
       var first = !w.lastRun || !w.lastRun.hash;
       var changed = !first && w.lastRun.hash !== hash;
@@ -707,6 +746,7 @@
       w.lastRun = { at: Date.now(), ok: true, ms: Date.now() - t0, hash: hash, size: content.length };
       w.lastContent = content;
       w.errors = 0;
+      if (probe) w.history = (w.history || []).concat([{ at: probe.at, ms: probe.ms, code: probe.code, ok: probe.ok }]).slice(-STATUS_HISTORY_MAX);
       if (changed && (diff.added.length || diff.removed.length)) {
         w.changes = (w.changes || 0) + 1;
         w.lastChange = { at: Date.now(), added: diff.added.length, removed: diff.removed.length };
@@ -718,6 +758,7 @@
       all[id] = w;
       await saveWatchers(all);
       outcome = { ok: true, changed: changed, first: first, added: diff ? diff.added.length : 0, removed: diff ? diff.removed.length : 0, size: content.length, ms: w.lastRun.ms };
+      if (probe) outcome.status = probe.content;
     } catch (e) {
       var msg = String((e && e.message) || e).slice(0, 300);
       all = await loadWatchers();
@@ -868,6 +909,8 @@
     diffLines: diffLines,
     normalizeText: normalizeText,
     telegramSend: telegramSend,
+    statusProbe: statusProbe,
+    STATUS_HISTORY_MAX: STATUS_HISTORY_MAX,
     EVENTS_KEY: EVENTS_KEY,
     SEEN_KEY: SEEN_KEY,
     WATCHERS_KEY: WATCHERS_KEY,
