@@ -62,8 +62,11 @@
   var cmdBtn = document.getElementById("cmdBtn");
   if (!cmdPanel || !cmdBtn) return;
   function has(f) { return !window.AGENT_BRAND || !window.AGENT_BRAND.has || window.AGENT_BRAND.has(f); }
-  var TABS = [["recipes", "🧩 Recipes"], ["watchers", "👁 Watchers"], ["memory", "🧠 Memory"]].filter(function (t) { return has(t[0]); });
-  if (!TABS.length) return; // a brand without recipes, watchers and memory has no 🧩
+  // The brand's extra features (extras.js) add their own tabs after the built-in three.
+  var EXTRA_TABS = (window.AgentExtras && window.AgentExtras.tabs) || [];
+  var TABS = [["recipes", "🧩 Recipes"], ["watchers", "👁 Watchers"], ["memory", "🧠 Memory"]].filter(function (t) { return has(t[0]); })
+    .concat(EXTRA_TABS.map(function (t) { return [t.id, t.label]; }));
+  if (!TABS.length) return; // a brand without recipes, watchers, memory or an extra with a tab has no 🧩
 
   var content = el("div", { className: "cmd-list" });
   var statusLine = el("div", { className: "prof-status hidden" });
@@ -77,7 +80,7 @@
   cmdPanel.parentNode.insertBefore(panel, cmdPanel.nextSibling);
 
   var badge = el("span", { className: "auto-badge hidden" });
-  var btn = el("button", { id: "autoBtn", className: "icon-btn", title: "Automations: recipes, watchers, site memory", "aria-label": "Automations" }, ["🧩", badge]);
+  var btn = el("button", { id: "autoBtn", className: "icon-btn", title: "Automations: " + TABS.map(function (t) { return t[1].replace(/^\S+\s/, "").toLowerCase(); }).join(", "), "aria-label": "Automations" }, ["🧩", badge]);
   cmdBtn.parentNode.insertBefore(btn, cmdBtn);
   btn.addEventListener("click", function () {
     if (panel.classList.contains("hidden")) show(); else hide();
@@ -105,11 +108,18 @@
     tabsBar.querySelectorAll(".prof-tab").forEach(function (x) { x.classList.toggle("active", x.dataset.tab === name); });
     status("");
   }
+  var extraCtx = { el: el, field: field, ago: ago, hostOf: hostOf, status: status, sendPrompt: sendPrompt, currentTabUrl: currentTabUrl, rerender: function () { render(); } };
   function render() {
     if (panel.classList.contains("hidden")) return;
     if (curTab === "recipes") renderRecipes();
     else if (curTab === "watchers") renderWatchers();
-    else renderMemory();
+    else if (curTab === "memory") renderMemory();
+    else {
+      var extra = EXTRA_TABS.find(function (t) { return t.id === curTab; });
+      if (!extra) return;
+      content.textContent = "";
+      Promise.resolve(extra.render(content, extraCtx)).catch(function (e) { status("⚠ " + (e && e.message || e), "bad"); });
+    }
   }
 
   // ── Which chat / turn the traced steps belong to ───────────────────────
@@ -553,7 +563,8 @@
   chrome.storage.onChanged.addListener(function (ch, area) {
     if (area !== "local") return;
     if (ch[A.EVENTS_KEY] || ch[A.SEEN_KEY]) refreshBadge();
-    if ((ch[A.RECIPES_KEY] || ch[A.WATCHERS_KEY] || ch[A.EVENTS_KEY] || ch[A.MEMORY_KEY]) && !panel.classList.contains("hidden") && !content.querySelector(".ed-wrap")) render();
+    var extraKey = EXTRA_TABS.some(function (t) { return t.storageKeys && t.storageKeys.some(function (k) { return ch[k]; }); });
+    if ((ch[A.RECIPES_KEY] || ch[A.WATCHERS_KEY] || ch[A.EVENTS_KEY] || ch[A.MEMORY_KEY] || extraKey) && !panel.classList.contains("hidden") && !content.querySelector(".ed-wrap")) render();
   });
   refreshBadge();
 

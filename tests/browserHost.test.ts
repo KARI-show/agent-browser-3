@@ -151,6 +151,18 @@ test("every declared browser tool is implemented in the panel", () => {
   // Bundled into .test-dist/, one level below the repo root.
   const src = fs.readFileSync(path.join(__dirname, "..", "browser", "extension", "browserTools.js"), "utf8");
   const implemented = new Set([...src.matchAll(/^ {4}(browser_\w+): async function/gm)].map((m) => m[1]));
-  const missing = BROWSER_TOOLS.map((t) => t.name).filter((n) => !implemented.has(n));
-  assert.deepEqual(missing, [], "declared in browser/host/tools.ts but missing from browserTools.js");
+  // The extras register theirs (AgentBrowserTools.register) from browser/extras/<id>.js.
+  const extrasDir = path.join(__dirname, "..", "browser", "extras");
+  const registered = new Map<string, string>();
+  for (const f of fs.readdirSync(extrasDir).filter((f) => f.endsWith(".js"))) {
+    const code = fs.readFileSync(path.join(extrasDir, f), "utf8").replace(/^\s*\/\/.*$/gm, ""); // not the comments
+    for (const m of code.matchAll(/\.register\(\s*"(browser_\w+)"/g)) registered.set(m[1], f);
+  }
+  const missing = BROWSER_TOOLS.map((t) => t.name).filter((n) => !implemented.has(n) && !registered.has(n));
+  assert.deepEqual(missing, [], "declared in browser/host/tools.ts but implemented neither in browserTools.js nor in browser/extras/");
+  for (const t of BROWSER_TOOLS) {
+    if (registered.has(t.name)) assert.equal(registered.get(t.name), `${t.feature}.js`, `${t.name} must be registered by its own feature's module`);
+  }
+  const declared = new Set(BROWSER_TOOLS.map((t) => t.name));
+  for (const n of registered.keys()) assert.ok(declared.has(n), `${n} is registered by an extra but not declared in browser/host/extras/`);
 });

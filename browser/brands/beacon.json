@@ -21,7 +21,9 @@
     "profiles": false,
     "proxy": false,
     "converter": false,
-    "cookies": false
+    "cookies": false,
+    "checks": true,
+    "uptime": true
   },
   "_note": "Placeholder brand: rename, rewrite the texts and replace the artwork before use. Logo: node browser/brands/make-logo.mjs beacon --style beacon --bg #101214 --fg #f5f5f5 --accent #ffb020"
 }

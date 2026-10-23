@@ -9,7 +9,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { launch, findChromium } from "./cdp.mjs";
-import { FEATURE_PERMISSIONS, featuresOf } from "../../browser/brand.mjs";
+import { FEATURE_PERMISSIONS, OPT_IN_FEATURES, featuresOf, optInOf } from "../../browser/brand.mjs";
+
+// Tool-name prefix per extra (tests/features.test.ts holds the declarations to the same table).
+const EXTRA_TOOL_PREFIX = { clips: /^browser_clip_/, sessions: /^browser_session_/, rewrite: /^browser_selection_/, snippets: /^browser_snippet_/, checks: /^browser_check_/, uptime: /^browser_uptime_/, accounts: /^browser_account_/, audit: /^browser_identity_/ };
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = dirname(dirname(here));
@@ -64,7 +67,22 @@ for (const b of brands) {
         autoBtn: !!document.getElementById("autoBtn"),
         profBtn: !!document.getElementById("profBtn"),
         offer: !!document.getElementById("recipe-offer"),
+        extraTabs: AgentExtras.tabs.map((t) => t.id),
+        extraCommands: AgentExtras.commands.map((c) => c.name),
+        registered: AgentBrowserTools.names,
       })`);
+      // Extras: the runtime of every extra the brand has is built in; nothing of the others.
+      const extras = optInOf(b);
+      const extrasJs = await cdp.evaluate(panel, `fetch(chrome.runtime.getURL("extras.js")).then((r) => r.text())`);
+      for (const id of OPT_IN_FEATURES) assert.equal(extrasJs.includes(`── ${id} (browser/extras/${id}.js)`), extras.includes(id), `${b.id}: extras.js ↔ ${id}`);
+      for (const id of seen.extraTabs) assert.ok(extras.includes(id), `${b.id}: tab ${id} belongs to an extra the brand has`);
+      const toolExtra = (n) => (Object.entries(EXTRA_TOOL_PREFIX).find(([, re]) => re.test(n)) || [null])[0];
+      for (const n of seen.registered) { const id = toolExtra(n); if (id) assert.ok(extras.includes(id), `${b.id}: ${n} registered without its extra ${id}`); }
+      for (const n of seen.toolNames) { const id = toolExtra(n); if (id) assert.ok(extras.includes(id), `${b.id}: ${n} declared without its extra ${id}`); }
+      for (const id of extras) {
+        const declared = seen.toolNames.filter((n) => EXTRA_TOOL_PREFIX[id].test(n));
+        for (const n of declared) assert.ok(seen.registered.includes(n), `${b.id}: ${n} is declared to the model but not registered in the panel`);
+      }
       // Features: permissions, the built-in agent's tools and the panel's controls follow the brand.
       const feats = featuresOf(b);
       assert.deepEqual(seen.features, feats);
@@ -77,7 +95,7 @@ for (const b of brands) {
       }
       assert.equal(seen.remoteBtnHidden, !feats.remote, `${b.id}: 🛰 ↔ remote`);
       assert.equal(seen.profBtn, feats.profiles, `${b.id}: 👤 ↔ profiles`);
-      assert.equal(seen.autoBtn, feats.recipes || feats.watchers || feats.memory, `${b.id}: 🧩 ↔ recipes/watchers/memory`);
+      assert.equal(seen.autoBtn, feats.recipes || feats.watchers || feats.memory || seen.extraTabs.length > 0, `${b.id}: 🧩 ↔ recipes/watchers/memory/an extra's tab`);
       assert.equal(seen.offer, feats.recipes, `${b.id}: the save-as-recipe strip ↔ recipes`);
       assert.ok(seen.skinLinked, "skin.css is linked");
       if ((b.skin || "default") !== "default") assert.ok(seen.skinText > 0, `${b.id}: the skin has rules`);

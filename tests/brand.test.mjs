@@ -7,7 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
-import { DEFAULT_BRAND, FEATURES, FEATURE_PERMISSIONS, TOKEN_FILES, brandManifest, brandScript, featuresOf, fillTokens, listBrands, loadBrand, toolDefsFor, validateBrand } from "../browser/brand.mjs";
+import { ALL_FEATURES, DEFAULT_BRAND, FEATURES, FEATURE_PERMISSIONS, OPT_IN_FEATURES, TOKEN_FILES, brandManifest, brandScript, extrasScript, featuresOf, fillTokens, listBrands, loadBrand, optInOf, toolDefsFor, validateBrand } from "../browser/brand.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const ext = (f) => fs.readFileSync(path.join(root, "browser", "extension", f), "utf8");
@@ -35,7 +35,7 @@ test("every brand file loads, is complete, and names/ids/icons are distinct", ()
 
 test("features: a brand without a feature loses its permissions, tools and prompt sections; the default has everything", () => {
   const tali = loadBrand(root, DEFAULT_BRAND);
-  assert.deepEqual(featuresOf(tali), Object.fromEntries(FEATURES.map((f) => [f, true])), "the published brand keeps every feature");
+  assert.deepEqual(featuresOf(tali), Object.fromEntries([...FEATURES.map((f) => [f, true]), ...OPT_IN_FEATURES.map((f) => [f, false])]), "the published brand keeps every base feature and has no extras");
   const full = JSON.parse(brandManifest(ext("manifest.json"), tali));
   for (const perms of Object.values(FEATURE_PERMISSIONS)) for (const p of perms) assert.ok(full.permissions.includes(p), `${p} in the full manifest`);
 
@@ -70,7 +70,46 @@ test("features: a brand without a feature loses its permissions, tools and promp
   assert.match(script, /"recipes": true/);
   assert.match(script, /AGENT_BRAND\.has = function/);
   assert.match(brandScript(tali), /"skin": "default"/);
-  assert.deepEqual(validateBrand({ ...tali, features: { nope: true, watchers: "no" } }, root), ["features.nope: unknown feature (" + FEATURES.join(", ") + ")", "features.watchers must be true or false"]);
+  assert.deepEqual(validateBrand({ ...tali, features: { nope: true, watchers: "no" } }, root), ["features.nope: unknown feature (" + ALL_FEATURES.join(", ") + ")", "features.watchers must be true or false"]);
+});
+
+test("extras: an opt-in feature is off unless a brand switches it on; its tools, prompt, runtime and dependencies follow", () => {
+  const tali = loadBrand(root, DEFAULT_BRAND);
+  assert.deepEqual(optInOf(tali), [], "Tali has no extras");
+  const orbit = { ...tali, id: "orbit2", features: { clips: true, sessions: true } };
+  delete orbit.key;
+  assert.deepEqual(optInOf(orbit), ["clips", "sessions"]);
+  assert.equal(featuresOf(orbit).clips, true);
+  assert.equal(featuresOf(orbit).watchers, true, "base features stay on");
+  // The manifest is the same: extras own no permissions.
+  assert.deepEqual(JSON.parse(brandManifest(ext("manifest.json"), orbit)).permissions, JSON.parse(brandManifest(ext("manifest.json"), tali)).permissions);
+  // Tool definitions: an extra's tools and section reach only the brands that have it.
+  const defs = {
+    sections: [{ text: "# Agent" }, { feature: "clips", text: "## Clips\n- clip" }, { text: "## Safety" }],
+    tools: [
+      { name: "browser_read_page", readOnly: true, description: "r", input_schema: {} },
+      { name: "browser_clip_save", feature: "clips", readOnly: false, description: "c", input_schema: {} },
+    ],
+  };
+  assert.deepEqual(toolDefsFor(defs, tali).tools.map((t) => t.name), ["browser_read_page"]);
+  assert.equal(toolDefsFor(defs, tali).system, "# Agent\n\n## Safety");
+  assert.deepEqual(toolDefsFor(defs, orbit).tools.map((t) => t.name), ["browser_read_page", "browser_clip_save"]);
+  assert.match(toolDefsFor(defs, orbit).system, /## Clips\n- clip\n\n## Safety/);
+  // The runtime flag and the built extras.js.
+  const ctx = {};
+  vm.runInNewContext(brandScript(orbit), ctx);
+  assert.equal(ctx.AGENT_BRAND.has("clips"), true);
+  assert.equal(ctx.AGENT_BRAND.has("audit"), false);
+  assert.equal(ctx.AGENT_BRAND.has("recipes"), true);
+  assert.match(extrasScript(tali, root), /^\/\/ Generated[^\n]*\n\/\/ This brand has no extra features\.\n$/);
+  const js = extrasScript(orbit, root);
+  assert.ok(js.indexOf("── clips (browser/extras/clips.js)") < js.indexOf("── sessions (browser/extras/sessions.js)"), "modules in OPT_IN_FEATURES order");
+  assert.ok(js.includes(fs.readFileSync(path.join(root, "browser", "extras", "clips.js"), "utf8")), "the module's source is carried whole");
+  for (const id of OPT_IN_FEATURES) assert.ok(fs.existsSync(path.join(root, "browser", "extras", `${id}.js`)) && fs.existsSync(path.join(root, "browser", "host", "extras", `${id}.ts`)), `${id} has both halves`);
+  // An extra that builds on a base feature needs it.
+  assert.deepEqual(validateBrand({ ...tali, features: { cookies: false, accounts: true } }, root), ["features.accounts needs cookies, which this brand switches off"]);
+  assert.deepEqual(validateBrand({ ...tali, features: { watchers: false, uptime: true } }, root), ["features.uptime needs watchers, which this brand switches off"]);
+  assert.deepEqual(validateBrand({ ...tali, features: { accounts: true, uptime: true } }, root), []);
 });
 
 test("validateBrand: the reasons a brand is refused", () => {
@@ -129,5 +168,6 @@ test("the default brand reproduces the published strings; another brand replaces
   const ctx = {};
   vm.runInNewContext(script, ctx);
   assert.equal(ctx.AGENT_BRAND.shortName, "Zed");
-  assert.equal(ctx.AGENT_BRAND.has("watchers"), true, "every feature on unless switched off");
+  assert.equal(ctx.AGENT_BRAND.has("watchers"), true, "every base feature on unless switched off");
+  assert.equal(ctx.AGENT_BRAND.has("clips"), false, "no extra unless switched on");
 });

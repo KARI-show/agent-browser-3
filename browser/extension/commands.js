@@ -129,6 +129,8 @@
   function has(f) { return !window.AGENT_BRAND || !window.AGENT_BRAND.has || window.AGENT_BRAND.has(f); }
   // A command needs every feature its group and its name point at ("Check privacy" reads cookies and the User-Agent).
   COMMANDS = COMMANDS.filter(function (c) { return [GROUP_FEATURE[c.group], NAME_FEATURE[c.name]].every(function (f) { return !f || has(f); }); });
+  // The brand's extra features (extras.js) bring their own quick commands.
+  if (window.AgentExtras && window.AgentExtras.commands.length) COMMANDS = COMMANDS.concat(window.AgentExtras.commands);
 
   var panel = document.getElementById("commands-panel");
   var list = document.getElementById("cmdList");

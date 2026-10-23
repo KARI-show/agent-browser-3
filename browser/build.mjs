@@ -4,8 +4,8 @@
 // With --zip, also writes dist-browser/agent-browser.zip for the release.
 // The webview bundle (media/main.js) must be built first (`npm run build`).
 //
-// Brands (browser/brands/<id>.json, see browser/brand.mjs): the same extension under
-// another name, icon and accent colours. `--brand <id>` builds one into
+// Brands (browser/brands/<id>.json, see browser/brand.mjs): the extension under another
+// name, icon, skin and feature set (extras.js carries the brand's extra features). `--brand <id>` builds one into
 // dist-browser/brands/<id>/extension; `--all-brands` builds every brand; without a
 // flag the default brand goes to dist-browser/extension as before. Every brand build
 // also writes a store upload (manifest.json at the zip root) to
@@ -16,7 +16,7 @@ import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as zlib from "node:zlib";
 import { createRequire } from "node:module";
-import { DEFAULT_BRAND, DEFAULT_SKIN, TOKEN_FILES, brandManifest, brandScript, fillTokens, listBrands, loadBrand, toolDefsFor } from "./brand.mjs";
+import { DEFAULT_BRAND, DEFAULT_SKIN, TOKEN_FILES, brandManifest, brandScript, extrasScript, fillTokens, listBrands, loadBrand, toolDefsFor } from "./brand.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = dirname(here);
@@ -59,6 +59,7 @@ for (const b of brands) {
     writeFileSync(join(dir, f), f === "manifest.json" ? brandManifest(text, b) : fillTokens(text, b));
   }
   writeFileSync(join(dir, "brand.js"), brandScript(b));
+  writeFileSync(join(dir, "extras.js"), extrasScript(b, root)); // the runtime of the brand's extra features
   console.log(`brand ${b.id}: ${b.name} → ${relative(root, dir)}`);
 }
 

@@ -19,7 +19,9 @@
   "skin": "glass",
   "features": {
     "profiles": false,
-    "proxy": false
+    "proxy": false,
+    "clips": true,
+    "sessions": true
   },
   "_note": "Placeholder brand: rename, rewrite the texts and replace the artwork before use. Logo: node browser/brands/make-logo.mjs orbit --style orbit --bg #0d1b3e --fg #dbe6ff --accent #ff6b57"
 }

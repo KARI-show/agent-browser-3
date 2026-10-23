@@ -2470,7 +2470,24 @@
     stepListeners.forEach(function (fn) { try { fn(step); } catch (_) {} });
   }
 
+  // Extra features (browser/extras/<id>.js, built into extras.js for the brands that have them) add
+  // their tools here and their UI to AgentExtras; automations.js and commands.js pick those up.
+  var EXTRA_TOOLS = {};
+  globalThis.AgentExtras = {
+    /** [{ id, label, render(content, ctx) }] — tabs of the 🧩 panel (ctx: el, field, ago, hostOf, status, sendPrompt, currentTabUrl, rerender). */
+    tabs: [],
+    /** Quick commands ({ group, icon, name, prompt, partial? }) added to the ⚡ panel. */
+    commands: [],
+  };
+
   globalThis.AgentBrowserTools = {
+    /** An extra feature's tool: name as declared in browser/host/extras/<id>.ts, fn(args) → content parts. */
+    register: function (name, fn) {
+      if (TOOLS[name] || EXTRA_TOOLS[name]) throw new Error("Browser tool already defined: " + name);
+      EXTRA_TOOLS[name] = fn;
+    },
+    /** What the extras build on: the tab the tools act on, scripts in it, the page snapshot. */
+    helpers: { currentTab: currentTab, inTop: inTop, inAllFrames: inAllFrames, snapshot: snapshot, sleep: sleep, text: text, ownPage: ownPage },
     /** Words for what a call would act on — the element behind a ref, or the address — for approval cards. */
     describe: function (name, args) {
       args = args || {};
@@ -2485,7 +2502,7 @@
     },
     /** Run a tool; the call lands in the trace (replay=true marks a recipe's own steps). */
     run: function (name, args, replay) {
-      var fn = TOOLS[name];
+      var fn = TOOLS[name] || EXTRA_TOOLS[name];
       if (!fn) return Promise.reject(new Error("Unknown browser tool: " + name));
       args = args || {};
       var step = beginStep(name, args);
@@ -2500,7 +2517,7 @@
         function (err) { return after().then(function () { endStep(step, null, err); throw err; }); }
       );
     },
-    names: Object.keys(TOOLS),
+    get names() { return Object.keys(TOOLS).concat(Object.keys(EXTRA_TOOLS)); },
     /** The recorded steps (a copy), oldest first. */
     trace: function () { return trace.slice(); },
     clearTrace: function () { trace.length = 0; },
