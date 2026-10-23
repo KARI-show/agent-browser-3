@@ -1,4 +1,4 @@
-// Shared fakes for the extras' unit tests (tests/clips.test.mjs, tests/sessions.test.mjs): the
+// Shared fakes for the Orbit extras' unit tests (tests/clips.test.mjs, tests/sessions.test.mjs): the
 // module is loaded with vm against a fake chrome.*, a stand-in for the AgentBrowserTools registry and
 // an empty AgentExtras, exactly as extras.js finds them in the side panel; the 🧩 tab's render() is
 // exercised against a tiny DOM stand-in that records what was built (no jsdom needed).
