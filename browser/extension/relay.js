@@ -27,6 +27,7 @@
   var STATUS_KEY = "agentRemoteStatus";
   var HOST = "com.kari.agent_browser";
   var LOCK = "agent-browser-remote";
+  function brandName() { return (window.AGENT_BRAND && window.AGENT_BRAND.shortName) || "Tali"; }
 
   var session = null; // this panel's remote session (running, or waiting for the lock)
   // Set when the user starts remote with the 🛰 button: report in the panel how
@@ -256,7 +257,7 @@
     var sock;
     try {
       sock = new WebSocket(url + "/?token=" + encodeURIComponent(t.token) +
-        "&role=node&id=" + encodeURIComponent(nid) + "&name=" + encodeURIComponent("Tali"));
+        "&role=node&id=" + encodeURIComponent(nid) + "&name=" + encodeURIComponent(brandName()));
     } catch (e) {
       return fail("Bad relay address — fix it in the settings.");
     }
@@ -331,7 +332,7 @@
     var link = shareLink(activeChatId);
     var bot = target && target.bot ? "Your Telegram bot lists this browser's chats too." : "";
     if (!link) {
-      local({ type: "info", text: ["🛰 Remote ON — this browser's chats are on the relay as “Tali”.", bot].filter(Boolean).join(" ") });
+      local({ type: "info", text: ["🛰 Remote ON — this browser's chats are on the relay as “" + brandName() + "”.", bot].filter(Boolean).join(" ") });
       return;
     }
     var lines = ["🛰 Remote ON — open this chat on your phone:", link, bot];

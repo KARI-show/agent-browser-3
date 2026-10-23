@@ -26,6 +26,7 @@
   var ALARM_PREFIX = "watch:";
 
   var inWorker = typeof window === "undefined";
+  function brandName() { return (globalThis.AGENT_BRAND && globalThis.AGENT_BRAND.shortName) || "Tali"; }
 
   function tools() {
     if (!globalThis.AgentBrowserTools) throw new Error("The browser tools didn't load.");
@@ -661,7 +662,7 @@
         await chrome.notifications.create("watch:" + w.id + ":" + Date.now(), {
           type: "basic",
           iconUrl: chrome.runtime.getURL("icon.png"),
-          title: "Tali · " + w.name,
+          title: brandName() + " · " + w.name,
           message: (diff.added[0] || diff.removed[0] || "").slice(0, 150) || head,
           contextMessage: w.url.slice(0, 100),
           priority: 1,

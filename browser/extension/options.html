@@ -5,15 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link href="theme.css" rel="stylesheet" />
   <link href="options.css" rel="stylesheet" />
-  <title>Tali — settings</title>
+  <title>{{brand.shortName}} — settings</title>
 </head>
 <body>
   <main>
     <header class="brand-head">
       <img class="brand-icon" src="icon.png" alt="" width="44" height="44" />
       <div>
-        <p class="brand-name">Tali <span>&middot; AI Browser Agent</span></p>
-        <p class="brand-sub">Your AI agent in the browser &mdash; reads, clicks, types &amp; fills forms for you.</p>
+        <p class="brand-name">{{brand.shortName}} <span>&middot; {{brand.tagline}}</span></p>
+        <p class="brand-sub">{{brand.subtitle}}</p>
       </div>
     </header>
     <h1>How the agent runs</h1>
@@ -107,7 +107,7 @@
     <h1>Proxy for this browser profile</h1>
     <p class="lead">
       Sends all traffic of <b>this browser profile</b> through your proxy. For a separate address for the agent,
-      create a dedicated Chrome/Edge profile, install Tali there and set the proxy here.
+      create a dedicated Chrome/Edge profile, install {{brand.shortName}} there and set the proxy here.
     </p>
 
     <div id="status" class="status off"><span class="dot"></span><span id="statusText">Proxy is off</span></div>
@@ -239,10 +239,11 @@
     <div id="incognitoStatus" class="status off"><span class="dot"></span><span id="incognitoStatusText">Checking…</span></div>
     <p class="hint">
       Chrome keeps this off by default for every extension. Turn it on once at
-      <code>chrome://extensions</code> → Tali → Details → "Allow in Incognito" — otherwise the
+      <code>chrome://extensions</code> → {{brand.shortName}} → Details → "Allow in Incognito" — otherwise the
       private-window tool will fail and say so.
     </p>
   </main>
+  <script src="brand.js"></script>
   <script src="agentLocal.js"></script>
   <script src="proxyConfig.js"></script>
   <script src="options.js"></script>

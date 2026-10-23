@@ -29,6 +29,7 @@
 
   var STALE = "That element is gone — the page changed. Call browser_read_page again.";
   var inWorker = typeof window === "undefined"; // background.js (service worker) vs the side panel
+  function brandName() { return (globalThis.AGENT_BRAND && globalThis.AGENT_BRAND.shortName) || "Tali"; }
 
   function auto() {
     if (!globalThis.AgentAutomation) throw new Error("The automation module (recipes, watchers, memory) didn't load.");
@@ -1579,7 +1580,7 @@
       } catch (e) {
         throw new Error(
           "Couldn't open a private window (" + ((e && e.message) || e) + "). Turn on \"Allow in Incognito\" " +
-          "for Tali at chrome://extensions, then try again."
+          "for " + brandName() + " at chrome://extensions, then try again."
         );
       }
       var tab = win.tabs && win.tabs[0];

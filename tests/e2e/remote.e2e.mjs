@@ -19,6 +19,8 @@ import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 import { extensionIdFromKey, findChromium, launch } from "./cdp.mjs";
 
+const BRAND = JSON.parse(readFileSync(new URL("../../browser/brands/tali.json", import.meta.url), "utf8"));
+
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const EXT_DIR = join(root, "dist-browser", "extension");
 const HOST_DIR = join(root, "dist-browser", "host");
@@ -242,7 +244,7 @@ test("relay mode: the phone sees the chats, opens one and runs a prompt that str
       sendJ(ws, { t: "list" });
       node = await waitUntil(() => browserNode(ws) || (sendJ(ws, { t: "list" }), false), 15000, "the browser node with its chats");
     }
-    assert.equal(node.name, "Agent Browser");
+    assert.equal(node.name, BRAND.shortName, "the node is named after the brand");
 
     sendJ(ws, { t: "subscribe", channel: `${node.nodeId}:${CHAT}` });
     sendJ(ws, { t: "toNode", nodeId: node.nodeId, msg: { type: "ready", chatId: CHAT } });

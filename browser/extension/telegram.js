@@ -188,7 +188,8 @@
 
   function helpText() {
     var st = R().state();
-    return "🦊 Tali — your browser agent.\n" +
+    var b = window.AGENT_BRAND || { shortName: "Tali", mascot: "🦊" };
+    return (b.mascot ? b.mascot + " " : "") + b.shortName + " — your browser agent.\n" +
       "Write a task and it is done in the browser (the side panel must stay open).\n\n" +
       "Now: " + (st.activeChatId ? chatTitle(st.activeChatId) : "new chat") + "\n" +
       "/chats — switch chat\n/new — start a new chat\n/stop — stop the running task";

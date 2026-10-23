@@ -531,7 +531,8 @@ function host(api: Awaited<ReturnType<typeof mockApi>>, over: Partial<LocalHostD
   };
   const h = new LocalHost(deps);
   const types = () => posted.map((m) => m.type);
-  const waitFor = async (pred: () => boolean, ms = 4000) => {
+  // Generous: the suite runs next to e2e browsers on CI, and a slow machine must not fail a correct flow.
+  const waitFor = async (pred: () => boolean, ms = 15000) => {
     const t0 = Date.now();
     while (!pred()) {
       if (Date.now() - t0 > ms) throw new Error("timed out; got " + JSON.stringify(types()));

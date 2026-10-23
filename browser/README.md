@@ -258,6 +258,56 @@ free-trial sign-in). Before a release:
    profiles: proxy, cookies, debugger, scripting; converter: downloads) — a
    reviewer asks about each one.
 
+## Brands (white-label builds)
+
+The extension can be built under another name, icon and accent colours without
+touching the code: a brand is a JSON file in `browser/brands/` —
+
+```json
+{
+  "id": "nova",
+  "name": "Nova — AI Browser Assistant",      // store listing / manifest name (≤ 75 chars)
+  "shortName": "Nova",                         // the assistant's name in the panel, Telegram, notifications
+  "tagline": "AI Browser Assistant",           // settings page header
+  "subtitle": "…",                             // settings page, one line
+  "description": "…",                          // manifest description (≤ 132 chars)
+  "mascot": "✨",                              // the Telegram greeting's emoji
+  "icon": "media/brands/nova-icon.png",        // 128×128 PNG
+  "avatar": "media/brands/nova-avatar.png",    // 256×256 PNG, the chat avatar
+  "colors": { "accent": "#ed25ff", "accentLight": "#b01ec0", "spark": "#50c2d4", "action": "#1aff1b", "ink": "#0a1628", "radius": "10px" }
+}
+```
+
+`browser/brands/tali.json` is the published brand and the default. The build fills
+the `{{brand.*}}` tokens in `manifest.json`, `sidepanel.html`, `options.html` and
+`theme.css`, copies the icon and avatar, and writes `brand.js`
+(`globalThis.AGENT_BRAND`) for the strings the code shows at run time (the relay
+node name, watcher notifications, the Telegram greeting, the assistant's name —
+whichever backend posts the identity). Everything else — tools, host, protocol —
+is the same file for every brand. Only the default brand carries the manifest
+`key` (a fixed id for unpacked installs); the others get their id from the store.
+
+```bash
+npm run build:brands                 # every brand → dist-browser/brands/<id>/extension (default → dist-browser/extension)
+node browser/build.mjs --brand nova  # one brand
+npm run package:brands               # production build + dist-browser/store/<id>-<version>.zip per brand (manifest at the zip root)
+node browser/brands/make-icon.mjs <id> <hue> [--saturate 1.1]   # icon + avatar from the default ones, hue-shifted, and matching colours
+```
+
+`tests/brand.test.mjs` checks every brand file; `tests/e2e/brands.e2e.mjs` loads
+each built brand in Chromium and checks the name, colours and assistant on the
+panel and the settings page. The four brands besides Tali are placeholders
+(generated artwork, invented names) — replace the texts and the PNGs before any
+of them goes anywhere.
+
+**Before publishing more than one of them under one developer account, read
+the Chrome Web Store policy on repetitive content.** The store does not allow a
+developer (or related accounts) to publish multiple extensions with the same
+functionality under different names, and enforcement takes down every listing
+involved, the published one included. Brands exist for white-label use: a
+partner publishing under their own, unrelated account, unlisted or private
+distribution, or variants that genuinely differ in what they do.
+
 ## Install for development
 
 ```bash

@@ -1,0 +1,20 @@
+{
+  "id": "nova",
+  "name": "Nova — AI Browser Assistant",
+  "shortName": "Nova",
+  "tagline": "AI Browser Assistant",
+  "subtitle": "An AI assistant in your side panel that browses for you — reads, clicks, types and fills forms.",
+  "description": "AI assistant in your browser's side panel: reads pages, clicks, fills forms, records recipes and watches pages for changes.",
+  "mascot": "✨",
+  "icon": "media/brands/nova-icon.png",
+  "avatar": "media/brands/nova-avatar.png",
+  "colors": {
+    "accent": "#ed25ff",
+    "accentLight": "#b01ec0",
+    "spark": "#50c2d4",
+    "action": "#1aff1b",
+    "ink": "#0a1628",
+    "radius": "10px"
+  },
+  "_note": "Placeholder branding generated with: node browser/brands/make-icon.mjs nova 95 — replace name, texts and artwork before publishing."
+}

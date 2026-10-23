@@ -1,0 +1,20 @@
+{
+  "id": "lumen",
+  "name": "Lumen — AI Web Assistant",
+  "shortName": "Lumen",
+  "tagline": "AI Web Assistant",
+  "subtitle": "Lumen reads, clicks and fills forms in your browser and remembers how each site works.",
+  "description": "AI web assistant in the side panel: reads pages, acts on them, saves repeatable recipes and remembers each site.",
+  "mascot": "💡",
+  "icon": "media/brands/lumen-icon.png",
+  "avatar": "media/brands/lumen-avatar.png",
+  "colors": {
+    "accent": "#25ff6e",
+    "accentLight": "#06a85c",
+    "spark": "#d49950",
+    "action": "#ff1a9f",
+    "ink": "#0a1628",
+    "radius": "10px"
+  },
+  "_note": "Placeholder branding generated with: node browser/brands/make-icon.mjs lumen 300 — replace name, texts and artwork before publishing."
+}

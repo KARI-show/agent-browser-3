@@ -182,7 +182,7 @@
       el.className = "status " + (allowed ? "active" : "error");
       $("incognitoStatusText").textContent = allowed
         ? "Allowed — the agent can open private windows."
-        : "Not allowed yet — turn it on at chrome://extensions (Tali → Details).";
+        : "Not allowed yet — turn it on at chrome://extensions (" + ((window.AGENT_BRAND && window.AGENT_BRAND.shortName) || "Tali") + " → Details).";
     });
   }
 

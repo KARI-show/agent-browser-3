@@ -5,7 +5,7 @@ chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(consol
 // Watchers run here, on chrome.alarms, with the panel closed: the same tool
 // runtime the panel uses (browserTools.js has no DOM dependency) plus the
 // automation module that knows how to check a page and report a change.
-importScripts("fingerprint.js", "converter.js", "browserTools.js", "automation.js");
+importScripts("brand.js", "fingerprint.js", "converter.js", "browserTools.js", "automation.js");
 
 chrome.alarms.onAlarm.addListener(function (alarm) {
   if (alarm.name.indexOf(AgentAutomation.ALARM_PREFIX) !== 0) return;
@@ -60,7 +60,7 @@ function setStatus(state, message) {
   chrome.storage.session.set({ [STATUS_KEY]: s }).catch(function () {});
   chrome.action.setBadgeBackgroundColor({ color: state === "error" ? "#cf222e" : "#1a7f37" }).catch(function () {});
   chrome.action.setBadgeText({ text: state === "off" ? "" : state === "error" ? "!" : "P" }).catch(function () {});
-  chrome.action.setTitle({ title: "Tali" + (state === "active" ? " — proxy on" : state === "error" ? " — proxy problem" : "") }).catch(function () {});
+  chrome.action.setTitle({ title: AGENT_BRAND.shortName + (state === "active" ? " — proxy on" : state === "error" ? " — proxy problem" : "") }).catch(function () {});
 }
 
 function randomToken() {

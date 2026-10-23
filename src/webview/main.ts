@@ -317,7 +317,7 @@ const SLASH_DESC: Record<string, string> = {
 let runModel = "";
 const modelLabels: Record<string, string> = {};
 // Display name of the assistant (configurable: agentIde.assistantName).
-let assistantName = "Tali";
+let assistantName = document.body.dataset.assistant || "Tali";
 // Avatar image (media/avatar.png) — used instead of the name/logo when present.
 const AVATAR = document.body.dataset.avatar || "";
 let avatarOk = !!AVATAR; // flips false if the image 404s → text fallback

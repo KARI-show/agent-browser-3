@@ -325,7 +325,7 @@ test("worker: a check opens a background tab, keeps the baseline, reports a chan
   w = data.agentWatchers[id];
   assert.equal(w.changes, 1);
   assert.equal(notifications.length, 1);
-  assert.equal(notifications[0].title, "Agent Browser · Lamp");
+  assert.equal(notifications[0].title, "Tali · Lamp", "the default brand's name (no brand.js in the vm → the built-in fallback)");
   assert.equal(notifications[0].message, "€ 15.00");
   assert.equal(sent.length, 1);
   assert.equal(sent[0].body.chat_id, "42");

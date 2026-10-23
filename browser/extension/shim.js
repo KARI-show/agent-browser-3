@@ -28,6 +28,8 @@
   function deliver(ev) {
     // A file a phone uploaded through relay.js belongs in that phone's composer, not this one's.
     if (ev && ev.type === "attached" && window.AgentRemote && window.AgentRemote.claimAttached && window.AgentRemote.claimAttached(ev)) return;
+    // Both backends name the assistant; the brand this build carries decides what the panel shows.
+    if (ev && ev.type === "identity" && window.AGENT_BRAND && window.AGENT_BRAND.shortName) ev = Object.assign({}, ev, { name: window.AGENT_BRAND.shortName });
     window.dispatchEvent(new MessageEvent("message", { data: ev }));
   }
 
