@@ -1372,6 +1372,7 @@
   // The setting in place before the first profile launch is kept aside and restored by endProfile();
   // a profile without a proxy launched over another profile's proxy goes direct, not through it.
   async function applyProfileProxy(pid, p) {
+    if (!chrome.proxy) return p.proxy && p.proxy.enabled && p.proxy.host ? " — NOT applied: this build has no proxy support" : "";
     var st = await chrome.storage.local.get(["agentProxy", PROXY_BEFORE_KEY]);
     var before = st[PROXY_BEFORE_KEY];
     var want = p.proxy && p.proxy.enabled && p.proxy.host
@@ -1473,7 +1474,7 @@
       // The page text is budgeted inside the snapshot; this is only a safety net for pathological pages.
       var out = s.text.length > 120000 ? s.text.slice(0, 120000) + "\n… (output truncated)" : s.text;
       // Site memory: what was learnt about this site earlier rides along with the first look at it.
-      if (globalThis.AgentAutomation) {
+      if (globalThis.AgentAutomation && (!globalThis.AGENT_BRAND || !globalThis.AGENT_BRAND.has || globalThis.AGENT_BRAND.has("memory"))) {
         var notes = await globalThis.AgentAutomation.memoryBlock(s.top.url).catch(function () { return ""; });
         if (notes) out += "\n\n" + notes;
       }
@@ -2260,7 +2261,7 @@
       // 4. Session: this is the regular cookie jar, so the profile's domains are cleared first —
       //    whatever account was signed in there is signed out — then the saved cookies go in.
       var imported = 0, replaced = 0, domainList = [];
-      if (p.cookies && p.cookies.length) {
+      if (p.cookies && p.cookies.length && chrome.cookies) {
         var domains = {};
         p.cookies.forEach(function (c) { if (c.domain) domains[c.domain.replace(/^\./, "")] = true; });
         domainList = Object.keys(domains);
@@ -2345,7 +2346,7 @@
       } catch (_) {}
 
       // Snapshot cookies for current domain
-      if (tab.url) {
+      if (tab.url && chrome.cookies) {
         try {
           var domain = new URL(tab.url).hostname;
           var cookies = await chrome.cookies.getAll({ domain: domain });

@@ -1,0 +1,27 @@
+{
+  "id": "beacon",
+  "name": "Beacon — Page Monitor & Agent",
+  "shortName": "Beacon",
+  "tagline": "Page Monitor & Agent",
+  "subtitle": "Beacon watches pages for you and tells you when something changes — and does the follow-up work in your browser.",
+  "description": "Page monitor and browser agent: scheduled checks with notifications and Telegram, recipes to replay, page actions.",
+  "mascot": "🔦",
+  "icon": "media/brands/beacon-icon.png",
+  "avatar": "media/brands/beacon-avatar.png",
+  "colors": {
+    "accent": "#ffb020",
+    "accentLight": "#a86a00",
+    "spark": "#f5f5f5",
+    "action": "#ff5c5c",
+    "ink": "#101214",
+    "radius": "2px"
+  },
+  "skin": "mono",
+  "features": {
+    "profiles": false,
+    "proxy": false,
+    "converter": false,
+    "cookies": false
+  },
+  "_note": "Placeholder brand: rename, rewrite the texts and replace the artwork before use. Logo: node browser/brands/make-logo.mjs beacon --style beacon --bg #101214 --fg #f5f5f5 --accent #ffb020"
+}

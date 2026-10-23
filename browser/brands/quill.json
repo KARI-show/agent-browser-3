@@ -1,0 +1,30 @@
+{
+  "id": "quill",
+  "name": "Quill — Writing & Forms Assistant",
+  "shortName": "Quill",
+  "tagline": "Writing & Forms Assistant",
+  "subtitle": "Quill reads what is on the page, writes with you and fills forms for you — a calm assistant for the paperwork of the web.",
+  "description": "Writing and forms assistant in the side panel: reads pages, drafts and fills forms, saves routines as recipes.",
+  "mascot": "🪶",
+  "icon": "media/brands/quill-icon.png",
+  "avatar": "media/brands/quill-avatar.png",
+  "colors": {
+    "accent": "#d4a017",
+    "accentLight": "#8f6a0c",
+    "spark": "#2b2b2e",
+    "action": "#c0392b",
+    "ink": "#2b2b2e",
+    "radius": "4px"
+  },
+  "skin": "paper",
+  "features": {
+    "helper": false,
+    "remote": false,
+    "watchers": false,
+    "profiles": false,
+    "proxy": false,
+    "network": false,
+    "cookies": false
+  },
+  "_note": "Placeholder brand: rename, rewrite the texts and replace the artwork before use. Logo: node browser/brands/make-logo.mjs quill --style quill --bg #f5efe0 --fg #2b2b2e --accent #d4a017"
+}

@@ -6,7 +6,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_BRAND, TOKEN_FILES, brandManifest, brandScript, fillTokens, listBrands, loadBrand, validateBrand } from "../browser/brand.mjs";
+import vm from "node:vm";
+import { DEFAULT_BRAND, FEATURES, FEATURE_PERMISSIONS, TOKEN_FILES, brandManifest, brandScript, featuresOf, fillTokens, listBrands, loadBrand, toolDefsFor, validateBrand } from "../browser/brand.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const ext = (f) => fs.readFileSync(path.join(root, "browser", "extension", f), "utf8");
@@ -30,6 +31,46 @@ test("every brand file loads, is complete, and names/ids/icons are distinct", ()
     // Only one brand may pin the extension id: two listings with one key would be the same extension.
     if (b.id !== DEFAULT_BRAND) assert.equal(b.key, undefined, `${b.id} must not carry the default brand's key`);
   }
+});
+
+test("features: a brand without a feature loses its permissions, tools and prompt sections; the default has everything", () => {
+  const tali = loadBrand(root, DEFAULT_BRAND);
+  assert.deepEqual(featuresOf(tali), Object.fromEntries(FEATURES.map((f) => [f, true])), "the published brand keeps every feature");
+  const full = JSON.parse(brandManifest(ext("manifest.json"), tali));
+  for (const perms of Object.values(FEATURE_PERMISSIONS)) for (const p of perms) assert.ok(full.permissions.includes(p), `${p} in the full manifest`);
+
+  const lite = { ...tali, id: "lite", features: { watchers: false, proxy: false, helper: false, cookies: false, converter: false, profiles: false } };
+  delete lite.key;
+  const m = JSON.parse(brandManifest(ext("manifest.json"), lite));
+  for (const p of ["alarms", "notifications", "proxy", "webRequest", "webRequestAuthProvider", "privacy", "nativeMessaging", "cookies", "downloads", "downloads.open"]) {
+    assert.ok(!m.permissions.includes(p), `${p} dropped`);
+  }
+  for (const p of ["sidePanel", "tabs", "scripting", "storage", "debugger", "unlimitedStorage"]) assert.ok(m.permissions.includes(p), `${p} stays (core)`);
+
+  // Tool definitions as gen-tooldefs produces them: tagged tools and prompt sections.
+  const defs = {
+    sections: [{ text: "# Agent" }, { feature: "watchers", text: "## Watchers\n- watch" }, { feature: "cookies", text: "## Cookies" }, { text: "## Safety" }],
+    tools: [
+      { name: "browser_read_page", readOnly: true, description: "r", input_schema: {} },
+      { name: "browser_watch_create", feature: "watchers", readOnly: false, description: "w", input_schema: {} },
+      { name: "browser_cookies_get", feature: "cookies", readOnly: false, alwaysAsk: true, description: "c", input_schema: {} },
+      { name: "browser_recipe_save", feature: "recipes", readOnly: false, description: "s", input_schema: {} },
+    ],
+  };
+  const cut = toolDefsFor(defs, lite);
+  assert.deepEqual(cut.tools.map((t) => t.name), ["browser_read_page", "browser_recipe_save"]);
+  assert.ok(cut.tools.every((t) => !("feature" in t)), "the tag is build-time only");
+  assert.equal(cut.system, "# Agent\n\n## Safety");
+  const all = toolDefsFor(defs, tali);
+  assert.equal(all.tools.length, 4);
+  assert.match(all.system, /## Watchers\n- watch\n\n## Cookies/);
+
+  const script = brandScript(lite);
+  assert.match(script, /"watchers": false/);
+  assert.match(script, /"recipes": true/);
+  assert.match(script, /AGENT_BRAND\.has = function/);
+  assert.match(brandScript(tali), /"skin": "default"/);
+  assert.deepEqual(validateBrand({ ...tali, features: { nope: true, watchers: "no" } }, root), ["features.nope: unknown feature (" + FEATURES.join(", ") + ")", "features.watchers must be true or false"]);
 });
 
 test("validateBrand: the reasons a brand is refused", () => {
@@ -85,6 +126,8 @@ test("the default brand reproduces the published strings; another brand replaces
   const script = brandScript(other);
   assert.match(script, /globalThis\.AGENT_BRAND = /);
   assert.doesNotMatch(script, /MIIB|media\//, "no key or file paths reach the runtime");
-  const parsed = JSON.parse(script.slice(script.indexOf("= ") + 2).replace(/;\s*$/, ""));
-  assert.equal(parsed.shortName, "Zed");
+  const ctx = {};
+  vm.runInNewContext(script, ctx);
+  assert.equal(ctx.AGENT_BRAND.shortName, "Zed");
+  assert.equal(ctx.AGENT_BRAND.has("watchers"), true, "every feature on unless switched off");
 });

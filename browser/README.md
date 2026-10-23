@@ -260,53 +260,94 @@ free-trial sign-in). Before a release:
 
 ## Brands (white-label builds)
 
-The extension can be built under another name, icon and accent colours without
-touching the code: a brand is a JSON file in `browser/brands/` —
+The same extension can ship as several products that differ in name, logo,
+design and what they can do, while the core — tools, host, protocol — stays one
+code base. A brand is a JSON file in `browser/brands/`:
 
 ```json
 {
-  "id": "nova",
-  "name": "Nova — AI Browser Assistant",      // store listing / manifest name (≤ 75 chars)
-  "shortName": "Nova",                         // the assistant's name in the panel, Telegram, notifications
-  "tagline": "AI Browser Assistant",           // settings page header
-  "subtitle": "…",                             // settings page, one line
-  "description": "…",                          // manifest description (≤ 132 chars)
-  "mascot": "✨",                              // the Telegram greeting's emoji
-  "icon": "media/brands/nova-icon.png",        // 128×128 PNG
-  "avatar": "media/brands/nova-avatar.png",    // 256×256 PNG, the chat avatar
-  "colors": { "accent": "#ed25ff", "accentLight": "#b01ec0", "spark": "#50c2d4", "action": "#1aff1b", "ink": "#0a1628", "radius": "10px" }
+  "id": "orbit",
+  "name": "Orbit — AI Copilot for the Web",     // store listing / manifest name (≤ 75 chars)
+  "shortName": "Orbit",                          // the assistant's name in the panel, Telegram, notifications
+  "tagline": "AI Copilot for the Web",           // settings page header
+  "subtitle": "…",                               // settings page, one line
+  "description": "…",                            // manifest description (≤ 132 chars)
+  "mascot": "🪐",                                // the Telegram greeting's emoji
+  "icon": "media/brands/orbit-icon.png",         // 128×128 PNG
+  "avatar": "media/brands/orbit-avatar.png",     // 256×256 PNG, the chat avatar
+  "colors": { "accent": "#…", "accentLight": "#…", "spark": "#…", "action": "#…", "ink": "#…", "radius": "12px" },
+  "skin": "glass",                               // browser/skins/<skin>.css — the design (default: "default", Tali's look)
+  "features": { "profiles": false, "proxy": false }   // what this product leaves out (everything else is on)
 }
 ```
 
-`browser/brands/tali.json` is the published brand and the default. The build fills
-the `{{brand.*}}` tokens in `manifest.json`, `sidepanel.html`, `options.html` and
-`theme.css`, copies the icon and avatar, and writes `brand.js`
-(`globalThis.AGENT_BRAND`) for the strings the code shows at run time (the relay
-node name, watcher notifications, the Telegram greeting, the assistant's name —
-whichever backend posts the identity). Everything else — tools, host, protocol —
-is the same file for every brand. Only the default brand carries the manifest
-`key` (a fixed id for unpacked installs); the others get their id from the store.
+`browser/brands/tali.json` is the published brand and the default. What the build
+does with a brand:
+
+- **Texts** — fills the `{{brand.*}}` tokens in `manifest.json`, `sidepanel.html`,
+  `options.html` and `theme.css`; writes `brand.js` (`globalThis.AGENT_BRAND`) for
+  the strings shown at run time: the relay node name, watcher notifications, the
+  Telegram greeting, the assistant's name (whichever backend posts the identity).
+- **Design** — copies `browser/skins/<skin>.css` to `skin.css`, linked after every
+  other stylesheet on both pages (`body.browser` for the panel, `body.options` for
+  the settings page). A skin can restyle the whole chat; it reads the brand's
+  colours through `--brand-accent` and friends and never sets them, so one skin
+  serves any brand. The default look maps the accent to focus rings and links and
+  switches to `accentLight` under a light OS theme; a skin may pin a scheme or use
+  its own ink for focus. Shipped: `default` (Tali's look), `glass` (dark, frosted
+  translucent panels, gradient header, pill composer), `paper` (light, serif
+  reading, ruled lists instead of cards, monochrome buttons), `mono` (terminal:
+  monospace, sharp corners, prompt-style messages, the accent as phosphor on
+  near-black), `slate` (compact professional, follows the OS scheme, accent bars
+  instead of fills).
+- **Features** — the brand's `features` decide what the product can do, and that
+  is visible to a reviewer and to the user: the tools of a feature the brand
+  leaves out are not declared to the model (built-in agent and helper alike — the
+  panel tells the helper its features with `ready`), the matching system-prompt
+  sections go with them, the panel's controls disappear (🛰, 🧩 tabs, 👤, quick
+  commands, settings sections), and the manifest drops the feature's permissions:
+
+  | feature | what it is | permissions it owns |
+  | --- | --- | --- |
+  | `helper` | "My Claude subscription" through the local helper | `nativeMessaging` |
+  | `remote` | phone / Telegram remote (🛰) | — |
+  | `recipes` | record and replay | — |
+  | `watchers` | scheduled page checks + notifications | `alarms`, `notifications` |
+  | `memory` | site notes | — |
+  | `profiles` | device profiles and the User-Agent tools (👤) | — |
+  | `cookies` | the cookie tools | `cookies` |
+  | `converter` | documents, PDFs, saved pages, screenshots to file | `downloads`, `downloads.open` |
+  | `network` | the network tap | — |
+  | `proxy` | the proxy settings and per-profile proxies | `proxy`, `webRequest`, `webRequestAuthProvider`, `privacy` |
+
+- **Logo** — the icon and avatar the brand points at. `browser/brands/make-logo.mjs`
+  draws a vector mark (several styles: monogram, orbit, quill, beacon, harbor) and
+  renders the two PNGs in headless Chromium, so a brand gets a clean, distinct
+  logo from one command; real artwork can replace the files any time.
+- Only the default brand carries the manifest `key` (a fixed id for unpacked
+  installs); every other brand gets its id from the store.
 
 ```bash
 npm run build:brands                 # every brand → dist-browser/brands/<id>/extension (default → dist-browser/extension)
-node browser/build.mjs --brand nova  # one brand
+node browser/build.mjs --brand orbit # one brand
 npm run package:brands               # production build + dist-browser/store/<id>-<version>.zip per brand (manifest at the zip root)
-node browser/brands/make-icon.mjs <id> <hue> [--saturate 1.1]   # icon + avatar from the default ones, hue-shifted, and matching colours
+node browser/brands/make-logo.mjs orbit --style orbit --bg "#0b1d3a" --fg "#e8eefc" --accent "#ff7a59"
 ```
 
-`tests/brand.test.mjs` checks every brand file; `tests/e2e/brands.e2e.mjs` loads
-each built brand in Chromium and checks the name, colours and assistant on the
-panel and the settings page. The four brands besides Tali are placeholders
-(generated artwork, invented names) — replace the texts and the PNGs before any
-of them goes anywhere.
+`tests/brand.test.mjs` checks every brand file, the permission and tool cuts;
+`tests/e2e/brands.e2e.mjs` loads each built brand in Chromium and checks name,
+colours, assistant, skin, permissions, declared tools, hidden controls and the
+settings page. The brands besides Tali are placeholders (invented names and
+texts, generated marks) — replace them before any of them goes anywhere.
 
 **Before publishing more than one of them under one developer account, read
 the Chrome Web Store policy on repetitive content.** The store does not allow a
 developer (or related accounts) to publish multiple extensions with the same
 functionality under different names, and enforcement takes down every listing
-involved, the published one included. Brands exist for white-label use: a
+involved, the published one included. Brands exist for white-label use — a
 partner publishing under their own, unrelated account, unlisted or private
-distribution, or variants that genuinely differ in what they do.
+distribution — and the feature profiles are what makes a brand a different
+product rather than a renamed copy.
 
 ## Install for development
 

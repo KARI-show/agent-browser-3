@@ -123,6 +123,12 @@
     { group: "Privacy", icon: "🔒", name: "Check privacy",
       prompt: "Check my current User-Agent and list all cookies for the current site. Tell me what tracking cookies I have." },
   ];
+  // Quick commands of a feature this brand ships without would only send the agent to tools it doesn't have.
+  var GROUP_FEATURE = { "Cookies & Sessions": "cookies", "Privacy": "cookies", "Converter": "converter", "Device profiles": "profiles", "User-Agent": "profiles" };
+  var NAME_FEATURE = { "Read the page's API": "network", "Watch this page for changes": "watchers", "Save this chat as a recipe": "recipes", "Copy session to a private window": "cookies", "Check privacy": "profiles" };
+  function has(f) { return !window.AGENT_BRAND || !window.AGENT_BRAND.has || window.AGENT_BRAND.has(f); }
+  // A command needs every feature its group and its name point at ("Check privacy" reads cookies and the User-Agent).
+  COMMANDS = COMMANDS.filter(function (c) { return [GROUP_FEATURE[c.group], NAME_FEATURE[c.name]].every(function (f) { return !f || has(f); }); });
 
   var panel = document.getElementById("commands-panel");
   var list = document.getElementById("cmdList");

@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { launch, findChromium } from "./cdp.mjs";
+import { FEATURE_PERMISSIONS, featuresOf } from "../../browser/brand.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = dirname(dirname(here));
@@ -39,7 +40,9 @@ for (const b of brands) {
       const extId = new URL(sw.url).host;
       const { targetId } = await cdp.send("Target.createTarget", { url: `chrome-extension://${extId}/sidepanel.html` });
       const panel = await cdp.attach(targetId);
-      await waitUntil(() => cdp.evaluate(panel, "typeof AgentBrowserTools === 'object' && typeof AGENT_BRAND === 'object'"), 10000, "panel scripts");
+      // The parser yields between the panel's scripts: wait for the whole page (relay.js hides 🛰,
+      // profiles.js adds 👤 at the very end), not for the first globals.
+      await waitUntil(() => cdp.evaluate(panel, "document.readyState === 'complete' && typeof AgentBrowserTools === 'object' && typeof AGENT_BRAND === 'object'"), 10000, "panel scripts");
       const seen = await cdp.evaluate(panel, `({
         manifestName: chrome.runtime.getManifest().name,
         manifestDescription: chrome.runtime.getManifest().description,
@@ -52,15 +55,45 @@ for (const b of brands) {
         focus: getComputedStyle(document.documentElement).getPropertyValue("--vscode-focusBorder").trim(),
         light: matchMedia("(prefers-color-scheme: light)").matches,
         icon: chrome.runtime.getURL("icon.png"),
+        permissions: chrome.runtime.getManifest().permissions,
+        toolNames: window.AgentLocal ? window.AgentLocal.toolNames : null,
+        features: AGENT_BRAND.features,
+        skinLinked: !!document.querySelector('link[href="skin.css"]'),
+        skinText: (() => { const s = [...document.styleSheets].find((x) => (x.href || "").endsWith("/skin.css")); try { return s ? s.cssRules.length : -1; } catch (e) { return -2; } })(),
+        remoteBtnHidden: document.getElementById("remoteBtn").hidden,
+        autoBtn: !!document.getElementById("autoBtn"),
+        profBtn: !!document.getElementById("profBtn"),
+        offer: !!document.getElementById("recipe-offer"),
       })`);
+      // Features: permissions, the built-in agent's tools and the panel's controls follow the brand.
+      const feats = featuresOf(b);
+      assert.deepEqual(seen.features, feats);
+      for (const [f, perms] of Object.entries(FEATURE_PERMISSIONS)) for (const p of perms) assert.equal(seen.permissions.includes(p), feats[f], `${b.id}: permission ${p} ↔ feature ${f}`);
+      const toolFeature = (n) => /^browser_(cookies_)/.test(n) ? "cookies" : /^browser_(profile_|set_useragent|get_useragent)/.test(n) ? "profiles" : /^browser_recipe_/.test(n) ? "recipes" : /^browser_watch_/.test(n) ? "watchers" : /^browser_memory_/.test(n) ? "memory" : n === "browser_network_capture" ? "network" : /^browser_(convert|page_to_pdf|save_page|screenshot_save)$/.test(n) ? "converter" : null;
+      assert.ok(seen.toolNames && seen.toolNames.includes("browser_read_page"));
+      for (const n of seen.toolNames) { const f = toolFeature(n); if (f) assert.ok(feats[f], `${b.id}: tool ${n} declared without its feature ${f}`); }
+      for (const [f, sample] of [["cookies", "browser_cookies_get"], ["profiles", "browser_profile_launch"], ["recipes", "browser_recipe_run"], ["watchers", "browser_watch_create"], ["memory", "browser_memory_save"], ["network", "browser_network_capture"], ["converter", "browser_convert"]]) {
+        assert.equal(seen.toolNames.includes(sample), feats[f], `${b.id}: ${sample} ↔ ${f}`);
+      }
+      assert.equal(seen.remoteBtnHidden, !feats.remote, `${b.id}: 🛰 ↔ remote`);
+      assert.equal(seen.profBtn, feats.profiles, `${b.id}: 👤 ↔ profiles`);
+      assert.equal(seen.autoBtn, feats.recipes || feats.watchers || feats.memory, `${b.id}: 🧩 ↔ recipes/watchers/memory`);
+      assert.equal(seen.offer, feats.recipes, `${b.id}: the save-as-recipe strip ↔ recipes`);
+      assert.ok(seen.skinLinked, "skin.css is linked");
+      if ((b.skin || "default") !== "default") assert.ok(seen.skinText > 0, `${b.id}: the skin has rules`);
       assert.equal(seen.manifestName, b.name);
       assert.equal(seen.manifestDescription, b.description);
       assert.equal(seen.title, b.shortName);
       assert.equal(seen.bar, `${b.shortName} · Browser`);
       assert.equal(seen.assistant, b.shortName);
       assert.equal(seen.brand, b.shortName);
-      assert.equal(seen.accent, b.colors.accent);
-      assert.equal(seen.focus, seen.light ? b.colors.accentLight : b.colors.accent, "the accent (light or dark variant, by the OS theme) drives focus rings and links");
+      assert.equal(seen.accent, b.colors.accent, `${b.id}: the brand's accent reaches the page (a skin reads it, never sets it)`);
+      if ((b.skin || "default") === "default") {
+        assert.equal(seen.focus, seen.light ? b.colors.accentLight : b.colors.accent, "the accent (light or dark variant, by the OS theme) drives focus rings and links");
+      } else {
+        // A skin pins its own scheme or ink for focus; it still has to resolve to a colour.
+        assert.match(seen.focus, /^(#[0-9a-f]{3,8}|rgb|color-mix|var)/i, `${b.id}: the skin sets a focus colour`);
+      }
       // The icon the manifest points at is the brand's file, byte for byte.
       const iconBytes = await cdp.evaluate(panel, `fetch(${JSON.stringify(seen.icon)}).then((r) => r.arrayBuffer()).then((a) => Array.from(new Uint8Array(a).slice(0, 64)))`);
       assert.deepEqual(iconBytes, Array.from(readFileSync(join(root, b.icon)).subarray(0, 64)));
@@ -70,11 +103,13 @@ for (const b of brands) {
       const { targetId: optTarget } = await cdp.send("Target.createTarget", { url: `chrome-extension://${extId}/options.html` });
       const opt = await cdp.attach(optTarget);
       // The target starts as an empty document (readyState "complete" already): wait for the page's own markup.
-      await waitUntil(() => cdp.evaluate(opt, "!!document.querySelector('.brand-sub')"), 10000, "options page");
+      await waitUntil(() => cdp.evaluate(opt, "document.readyState === 'complete' && !!document.querySelector('.brand-sub')"), 10000, "options page");
       const optSeen = await cdp.evaluate(opt, `({ title: document.title, head: document.querySelector(".brand-name").textContent.replace(/\\s+/g, " ").trim(), sub: document.querySelector(".brand-sub").textContent.trim(), body: document.body.innerText })`);
       assert.equal(optSeen.title, `${b.shortName} — settings`);
       assert.equal(optSeen.head, `${b.shortName} · ${b.tagline}`);
       assert.equal(optSeen.sub, b.subtitle);
+      const hiddenSections = await cdp.evaluate(opt, `[...document.querySelectorAll("[data-feature]")].map((el) => [el.dataset.feature, el.hidden])`);
+      for (const [f, hidden] of hiddenSections) assert.equal(hidden, !feats[f], `${b.id}: settings section ${f} ↔ feature`);
       for (const other of brands) {
         if (other.id === b.id) continue;
         assert.doesNotMatch(optSeen.body, new RegExp(`\\b${other.shortName}\\b`), `no "${other.shortName}" on ${b.id}'s settings page`);

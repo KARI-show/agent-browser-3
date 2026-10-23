@@ -61,6 +61,9 @@
   var cmdPanel = document.getElementById("commands-panel");
   var cmdBtn = document.getElementById("cmdBtn");
   if (!cmdPanel || !cmdBtn) return;
+  function has(f) { return !window.AGENT_BRAND || !window.AGENT_BRAND.has || window.AGENT_BRAND.has(f); }
+  var TABS = [["recipes", "🧩 Recipes"], ["watchers", "👁 Watchers"], ["memory", "🧠 Memory"]].filter(function (t) { return has(t[0]); });
+  if (!TABS.length) return; // a brand without recipes, watchers and memory has no 🧩
 
   var content = el("div", { className: "cmd-list" });
   var statusLine = el("div", { className: "prof-status hidden" });
@@ -91,8 +94,7 @@
     statusLine.className = "prof-status" + (text ? "" : " hidden") + (kind ? " " + kind : "");
   }
 
-  var curTab = "recipes";
-  var TABS = [["recipes", "🧩 Recipes"], ["watchers", "👁 Watchers"], ["memory", "🧠 Memory"]];
+  var curTab = TABS[0][0];
   TABS.forEach(function (t) {
     var b = el("button", { className: "prof-tab" + (t[0] === curTab ? " active" : ""), dataset: { tab: t[0] } }, [t[1]]);
     b.addEventListener("click", function () { setTab(t[0]); render(); });
@@ -151,12 +153,13 @@
     el("button", { className: "prof-btn primary small", onclick: function () { show("recipes"); showSaveDialog(); } }, ["Save as recipe"]),
     el("button", { className: "icon-btn", title: "Dismiss", onclick: function () { offer.classList.add("hidden"); } }, ["✕"]),
   ]);
-  if (composer) composer.parentNode.insertBefore(offer, composer);
+  if (composer && has("recipes")) composer.parentNode.insertBefore(offer, composer);
 
   function replayable(steps) {
     try { return A.buildRecipe(steps, { name: "x" }).steps.length; } catch (_) { return 0; }
   }
   function maybeOffer() {
+    if (!has("recipes")) return;
     var n = replayable(A.traceSteps("chat"));
     if (n < 2) return;
     offerText.textContent = n + " actions recorded — replay them later without the model.";

@@ -1004,6 +1004,7 @@ test("panel: Retry runs the last user message again on a history cut back to it;
     await t.h.handle({ type: "ready" });
     void t.h.handle({ type: "prompt", text: "long job" });
     await t.waitFor(() => t.types().includes("started"));
+    await t.waitFor(() => busy.requests.length === 1); // "started" is posted before the request reaches the server
     t.posted.length = 0;
     await t.h.handle({ type: "regenerate" });
     await t.h.handle({ type: "rewind", userIndex: 0 });

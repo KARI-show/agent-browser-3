@@ -71,6 +71,7 @@
   var cmdPanel = document.getElementById("commands-panel");
   var cmdBtn = document.getElementById("cmdBtn");
   if (!cmdPanel || !cmdBtn) return;
+  if (window.AGENT_BRAND && window.AGENT_BRAND.has && !window.AGENT_BRAND.has("profiles")) return; // this brand ships without device profiles
 
   var content = el("div", { id: "profContent", className: "cmd-list" });
   var statusLine = el("div", { id: "profStatus", className: "prof-status hidden" });

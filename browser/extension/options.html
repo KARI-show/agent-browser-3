@@ -5,9 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link href="theme.css" rel="stylesheet" />
   <link href="options.css" rel="stylesheet" />
+  <link href="skin.css" rel="stylesheet" />
   <title>{{brand.shortName}} — settings</title>
 </head>
-<body>
+<body class="options">
   <main>
     <header class="brand-head">
       <img class="brand-icon" src="icon.png" alt="" width="44" height="44" />
@@ -79,6 +80,7 @@
         <p class="hint">Stored on this computer in this browser profile's extension storage; only ever sent to the address above. Get a key at console.anthropic.com.</p>
       </div>
 
+<div data-feature="helper">
       <label class="mode">
         <input type="radio" name="mode" value="subscription" />
         <span><b>My Claude subscription</b> <span class="hint">— uses the Claude Code signed in on this computer. Needs the small local helper.</span></span>
@@ -96,6 +98,7 @@
         <p class="hint">Sign-in happens in Anthropic's own flow (claude.ai) inside Claude Code; this extension never sees or stores your Claude login.</p>
       </div>
 
+</div>
       <div class="actions">
         <button type="submit" id="saveMode" class="primary">Save</button>
         <span id="modeResult" class="result" role="status"></span>
@@ -104,6 +107,7 @@
 
     <hr />
 
+<div data-feature="proxy">
     <h1>Proxy for this browser profile</h1>
     <p class="lead">
       Sends all traffic of <b>this browser profile</b> through your proxy. For a separate address for the agent,
@@ -168,9 +172,11 @@
       The password is stored on this computer, in this browser profile's extension storage. SOCKS5 with a username and
       password is handled by the local agent host (it must be installed); other types are handled by the browser itself.
     </p>
+</div>
 
     <hr />
 
+<div data-feature="remote">
     <h1 id="remote">Remote: phone &amp; Telegram</h1>
     <p class="lead">
       Work with this browser's agent from your phone — no VS Code needed. Works while the side panel is
@@ -227,6 +233,7 @@
       </div>
     </form>
     <p class="hint">Tokens are stored in this browser profile's extension storage. Anyone with the bot or relay token can drive the agent — keep them private.</p>
+</div>
 
     <hr />
 

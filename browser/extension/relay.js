@@ -684,8 +684,12 @@
     if ((area === "local" && ch[CONFIG_KEY]) || (area === "session" && ch[ON_KEY])) sync();
   });
 
-  updateStatus("off", "", false);
-  sync();
+  if (!window.AGENT_BRAND || !window.AGENT_BRAND.has || window.AGENT_BRAND.has("remote")) {
+    updateStatus("off", "", false);
+    sync();
+  } else if (remoteBtn) {
+    remoteBtn.hidden = true; // this brand ships without remote access
+  }
 
   // For telegram.js (bot mode) — the same panel state and host channel.
   window.AgentRemote = {

@@ -16,7 +16,7 @@ import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as zlib from "node:zlib";
 import { createRequire } from "node:module";
-import { DEFAULT_BRAND, TOKEN_FILES, brandManifest, brandScript, fillTokens, listBrands, loadBrand } from "./brand.mjs";
+import { DEFAULT_BRAND, DEFAULT_SKIN, TOKEN_FILES, brandManifest, brandScript, fillTokens, listBrands, loadBrand, toolDefsFor } from "./brand.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = dirname(here);
@@ -53,6 +53,7 @@ for (const b of brands) {
   for (const f of ["main.js", "style.css"]) cpSync(join(root, "media", f), join(dir, f));
   cpSync(join(root, b.icon), join(dir, "icon.png"));
   cpSync(join(root, b.avatar), join(dir, "avatar.png"));
+  cpSync(join(here, "skins", `${b.skin || DEFAULT_SKIN}.css`), join(dir, "skin.css")); // linked last by both pages
   for (const f of TOKEN_FILES) {
     const text = readFileSync(join(dir, f), "utf8");
     writeFileSync(join(dir, f), f === "manifest.json" ? brandManifest(text, b) : fillTokens(text, b));
@@ -74,22 +75,25 @@ await build({
   logLevel: "warning",
 });
 const toolDefs = createRequire(import.meta.url)(join(genDir, "gen-tooldefs.cjs")).default;
-writeFileSync(join(genDir, "toolDefs.json"), JSON.stringify(toolDefs));
-await build({
-  entryPoints: [join(here, "standalone", "entry.ts")],
-  bundle: true,
-  format: "iife",
-  platform: "browser",
-  target: "es2022",
-  outfile: join(extDir(brands[0]), "agentLocal.js"),
-  alias: { "toolDefs.json": join(genDir, "toolDefs.json") },
-  // Address of the free-trial gateway (trial-server/); empty = this build has no free trial.
-  define: { __TRIAL_URL__: JSON.stringify((process.env.AGENT_TRIAL_URL || "").replace(/\/+$/, "")) },
-  minify: production,
-  sourcemap: false,
-  logLevel: "info",
-});
-for (const b of brands.slice(1)) cpSync(join(extDir(brands[0]), "agentLocal.js"), join(extDir(b), "agentLocal.js"));
+// One bundle per brand: its tool list and system prompt hold only the features the brand has.
+for (const b of brands) {
+  const defsFile = join(genDir, `toolDefs.${b.id}.json`);
+  writeFileSync(defsFile, JSON.stringify(toolDefsFor(toolDefs, b)));
+  await build({
+    entryPoints: [join(here, "standalone", "entry.ts")],
+    bundle: true,
+    format: "iife",
+    platform: "browser",
+    target: "es2022",
+    outfile: join(extDir(b), "agentLocal.js"),
+    alias: { "toolDefs.json": defsFile },
+    // Address of the free-trial gateway (trial-server/); empty = this build has no free trial.
+    define: { __TRIAL_URL__: JSON.stringify((process.env.AGENT_TRIAL_URL || "").replace(/\/+$/, "")) },
+    minify: production,
+    sourcemap: false,
+    logLevel: "warning",
+  });
+}
 rmSync(genDir, { recursive: true, force: true });
 
 // Host: one CJS file; the Agent SDK stays external (ESM + per-platform

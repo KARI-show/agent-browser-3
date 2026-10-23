@@ -22,3 +22,4 @@ media/main.js.map
 
 # Agent worktrees
 .claude/worktrees/
+!media/brands/*.png

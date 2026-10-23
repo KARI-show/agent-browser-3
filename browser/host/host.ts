@@ -20,11 +20,12 @@ import { FileMemento } from "./memento";
 import { RemoteServices } from "./remote";
 import {
   ALWAYS_ASK_TOOLS,
-  BROWSER_SYSTEM_PROMPT,
+  Features,
   READ_ONLY_TOOLS,
   ToolContent,
   browserToolName,
   createBrowserToolsServer,
+  systemPromptFor,
 } from "./tools";
 import { attachmentLimit, isImageAttachment, parseDataUrl, pruneAttachments, safeAttachmentName } from "./attachments";
 
@@ -98,6 +99,7 @@ class BrowserHost {
   private lastUsageLimits: unknown;
   private slashCommands: string[] = this.state.get<string[]>("slashCommands", []);
   private modelChoice = this.state.get<string>("model", "default");
+  private features: Features | undefined;
   private modeChoice = this.state.get<BrowserMode>("mode", "agent");
 
   private post(m: unknown) {
@@ -107,6 +109,8 @@ class BrowserHost {
   private async handle(msg: any) {
     switch (msg.type) {
       case "ready":
+        // The panel says which features its brand build has: the model gets only those tools.
+        if (msg.features && typeof msg.features === "object") this.features = msg.features;
         this.onReady();
         break;
       case "prompt":
@@ -483,10 +487,10 @@ class BrowserHost {
         mode: mode === "ask" ? "ask" : "agent",
         thinking: { type: "adaptive", display: "summarized" },
         tools: BUILTIN_TOOLS,
-        appendSystemPrompt: BROWSER_SYSTEM_PROMPT,
+        appendSystemPrompt: systemPromptFor(this.features),
         // Read the mode on every tool call, so switching it mid-run takes effect (as the built-in engine does).
         toolPolicy: this.toolPolicy(() => (MODE_OPTIONS.some((o) => o.value === conv.mode) ? (conv.mode as BrowserMode) : mode)),
-        mcpServers: { browser: createBrowserToolsServer(sdk, (n, a) => this.callBrowser(n, a)) },
+        mcpServers: { browser: createBrowserToolsServer(sdk, (n, a) => this.callBrowser(n, a), this.features) },
       },
       {
         onText: (t) => {

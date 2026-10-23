@@ -468,6 +468,7 @@
   }
   /** Alarms ↔ storage after an install/update or a browser start. */
   async function syncAlarms() {
+    if (!chrome.alarms) return; // a brand without watchers
     if (!chrome.alarms) return;
     var ws = await loadWatchers();
     var have = {};
