@@ -14,6 +14,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { extensionIdFromKey, findChromium, launch } from "./cdp.mjs";
+import { DEFAULT_BRAND, loadBrand, toolDefsFor } from "../../browser/brand.mjs";
 import { loadConfig } from "../../trial-server/config.mjs";
 import { createHandler } from "../../trial-server/handler.mjs";
 import { serve } from "../../trial-server/server.mjs";
@@ -79,7 +80,9 @@ async function extensionFor(trialUrl) {
   cpSync(BUILT, dir, { recursive: true });
   const gen = join(workDir, "gen");
   await build({ entryPoints: [join(root, "browser", "gen-tooldefs.ts")], bundle: true, format: "cjs", platform: "node", outfile: join(gen, "gen-tooldefs.cjs"), logLevel: "warning" });
-  writeFileSync(join(gen, "toolDefs.json"), JSON.stringify(createRequire(import.meta.url)(join(gen, "gen-tooldefs.cjs")).default));
+  // The default brand's cut of the tool list, as build.mjs makes it: the unfiltered list carries every
+  // extra's tools too and is over the gateway's cap of tools per request.
+  writeFileSync(join(gen, "toolDefs.json"), JSON.stringify(toolDefsFor(createRequire(import.meta.url)(join(gen, "gen-tooldefs.cjs")).default, loadBrand(root, DEFAULT_BRAND))));
   await build({
     entryPoints: [join(root, "browser", "standalone", "entry.ts")],
     bundle: true,

@@ -3,6 +3,8 @@
 // keeps to its tool-name prefix so the brand e2e can tell a tool's feature from its name.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { BASE_FEATURES, OPT_IN_FEATURES, hasFeature } from "../browser/host/features";
 import { BROWSER_TOOLS, BASE_TOOLS, PROMPT_SECTIONS, systemPromptFor, toolsFor } from "../browser/host/tools";
 import { EXTRAS } from "../browser/host/extras/index";
@@ -61,4 +63,15 @@ test("every extra's tools carry its feature, keep to its name prefix, and are de
   }
   // No base tool wears an extra's prefix (the e2e would attribute it to the wrong feature).
   for (const t of BASE_TOOLS) for (const [id, re] of Object.entries(EXTRA_TOOL_PREFIX)) assert.ok(!re.test(t.name), `${t.name} looks like a ${id} tool`);
+});
+
+test("every brand's tool list fits the free-trial gateway's cap on tools per request", () => {
+  // Bundled into .test-dist/, one level below the repo root.
+  const root = path.join(__dirname, "..");
+  const cap = Number(/const MAX_TOOLS = (\d+)/.exec(fs.readFileSync(path.join(root, "trial-server", "handler.mjs"), "utf8"))![1]);
+  assert.ok(cap > 0);
+  for (const id of brand.listBrands(root)) {
+    const n = toolsFor(brand.featuresOf(brand.loadBrand(root, id))).length;
+    assert.ok(n <= cap, `${id} declares ${n} tools; the gateway takes at most ${cap} — a brand with that many extras can't use the free trial`);
+  }
 });
