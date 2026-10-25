@@ -299,7 +299,11 @@ does with a brand:
   reading, ruled lists instead of cards, monochrome buttons), `mono` (terminal:
   monospace, sharp corners, prompt-style messages, the accent as phosphor on
   near-black), `slate` (compact professional, follows the OS scheme, accent bars
-  instead of fills).
+  instead of fills), `studio` (light creative studio: warm paper, 14px radii, the
+  accent on chips, tabs, rings and Send, a tri-colour stripe and paint wash,
+  tinted code cards), `blueprint` (dark technical drawing: navy from the brand's
+  ink under a faint grid, 1px accent lines, 4px corners, small-caps labels with
+  ruler ticks, monospace for code and tool names only).
 - **Features** — the brand's `features` decide what the product can do, and that
   is visible to a reviewer and to the user: the tools of a feature the brand
   leaves out are not declared to the model (built-in agent and helper alike — the
@@ -368,7 +372,8 @@ does with a brand:
   registers it with `chrome.scripting.registerContentScripts`.
 
 - **Logo** — the icon and avatar the brand points at. `browser/brands/make-logo.mjs`
-  draws a vector mark (several styles: monogram, orbit, quill, beacon, harbor) and
+  draws a vector mark (several styles: monogram, orbit, quill, beacon, harbor,
+  palette, stencil) and
   renders the two PNGs in headless Chromium, so a brand gets a clean, distinct
   logo from one command; real artwork can replace the files any time.
 - Only the default brand carries the manifest `key` (a fixed id for unpacked
