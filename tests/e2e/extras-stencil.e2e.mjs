@@ -166,12 +166,15 @@ test("stencil's panel has the 🧱 Elements and 📐 Overlay tabs, the Design co
     scripts: scripts.map((s) => ({ id: s.id, js: s.js, runAt: s.runAt, matches: s.matches, persistAcrossSessions: s.persistAcrossSessions })),
   }))`);
   assert.equal(seen.brand, "stencil");
-  assert.deepEqual(seen.tabs, ["elements", "overlay"]);
-  assert.deepEqual(seen.labels, ["🧩 Recipes", "🧠 Memory", "🧱 Elements", "📐 Overlay"], "the built-in tabs of the brand's features, then the extras'");
-  assert.deepEqual(seen.commands, [
+  // Other extras of the brand (skills) add their own tabs and commands after these; check ours and their order.
+  assert.deepEqual(seen.tabs.filter((t) => ["elements", "overlay"].includes(t)), ["elements", "overlay"]);
+  const ownLabels = ["🧩 Recipes", "🧠 Memory", "🧱 Elements", "📐 Overlay"];
+  assert.deepEqual(seen.labels.filter((l) => ownLabels.includes(l)), ownLabels, "the built-in tabs of the brand's features, then the extras'");
+  const ownCommands = [
     ["Design", "Add a note to this page", true], ["Design", "Hide this element…", false], ["Design", "Replace the hero text with…", true], ["Design", "Show this site's edits", false],
     ["Design", "Show a 12-column grid", false], ["Design", "Measure the spacing between these two elements", true], ["Design", "Mark up this page for review", false],
-  ]);
+  ];
+  assert.deepEqual(seen.commands.filter((c) => ownCommands.some((o) => o[1] === c[1])), ownCommands);
   const tools = ["browser_element_add", "browser_element_edit", "browser_element_hide", "browser_element_list", "browser_element_forget", "browser_overlay_grid", "browser_overlay_measure", "browser_overlay_note", "browser_overlay_clear"];
   assert.deepEqual(seen.registered.sort(), tools.slice().sort());
   assert.deepEqual(seen.declared.sort(), tools.slice().sort(), "the built-in agent declares the same tools");
@@ -325,15 +328,16 @@ test("the 🧱 Elements and 📐 Overlay tabs render in the 🧩 panel", { skip 
   await ok("browser_overlay_note", { selector: "#box-b", text: "Check this" });
   await inPanel(`AgentAutomationsPanel.show("elements"), true`);
   const elements = await waitUntil(() => inPanel(`(() => { const t = document.querySelector("#automations-panel .cmd-list").innerText; return /Promo card/.test(t) ? t : ""; })()`), 10000, "the Elements tab");
-  // Group titles are rendered upper-case (CSS text-transform), so innerText has them that way.
-  for (const n of ["Quick add", "ADDED (1)", "Promo card", "fixed bottom-right", "1 edit on localhost", "🧹 Forget all for this site", "💬 Explain in chat"]) assert.ok(elements.includes(n), `${n} in the tab`);
+  // Group titles may be rendered upper-case by the skin (CSS text-transform shows in innerText): compare case-insensitively.
+  const has = (text, n) => text.toLowerCase().includes(n.toLowerCase());
+  for (const n of ["Quick add", "Added (1)", "Promo card", "fixed bottom-right", "1 edit on localhost", "🧹 Forget all for this site", "💬 Explain in chat"]) assert.ok(has(elements, n), `${n} in the tab`);
   // Its delete button undoes the add on the page.
   await inPanel(`[...document.querySelectorAll("#automations-panel .prof-btn")].find((b) => b.textContent === "🗑").click(), true`);
   await waitUntil(() => inPage(`document.querySelectorAll("[data-agent-element]").length === 0`), 5000, "the card gone");
   await waitUntil(() => inPanel(`chrome.storage.local.get("agentPageEdits").then((s) => Object.keys(s.agentPageEdits || {}).length === 0)`), 5000, "the record gone");
   await inPanel(`AgentAutomationsPanel.show("overlay"), true`);
   const overlay = await waitUntil(() => inPanel(`(() => { const t = document.querySelector("#automations-panel .cmd-list").innerText; return /Check this/.test(t) ? t : ""; })()`), 10000, "the Overlay tab");
-  for (const n of ["GRID", "Columns", "▦ Grid on", "Grid off", "NOTES", "#1", "Check this", "🧹 Clear all", "📸 Screenshot with overlays"]) assert.ok(overlay.includes(n), `${n} in the tab`);
+  for (const n of ["Grid", "Columns", "▦ Grid on", "Grid off", "Notes", "#1", "Check this", "🧹 Clear all", "📸 Screenshot with overlays"]) assert.ok(has(overlay, n), `${n} in the tab`);
   await inPanel(`[...document.querySelectorAll("#automations-panel .prof-btn")].find((b) => b.textContent === "▦ Grid on").click(), true`);
   await waitUntil(() => inPage(`document.querySelectorAll("[data-agent-grid-col]").length === 12`), 5000, "the grid from the panel");
   await inPanel(`[...document.querySelectorAll("#automations-panel .prof-btn")].find((b) => b.textContent === "🧹 Clear all").click(), true`);
