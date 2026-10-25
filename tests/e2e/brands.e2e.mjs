@@ -99,8 +99,12 @@ for (const b of brands) {
         const read = await cdp.evaluate(panel, `AgentBrowserTools.run("browser_skill_read", { name: ${JSON.stringify(playbooks[0].name)} }).then((r) => r[0].text)`);
         assert.ok(read.includes(playbooks[0].body.slice(0, 80)), `${b.id}: ${playbooks[0].name} readable in full`);
         assert.ok(seen.extraTabs.includes("skills"), `${b.id}: the 🎓 tab`);
-        // The quick commands arrive once skills.json is loaded.
+        // The quick commands arrive once skills.json is loaded — in the registry and in the ⚡ panel, each name once.
         await waitUntil(() => cdp.evaluate(panel, `AgentExtras.commands.some((c) => c.name === ${JSON.stringify(playbooks[0].command)})`), 5000, "the playbooks' quick commands");
+        const shown = await cdp.evaluate(panel, `(() => { document.getElementById("cmdBtn").click(); const out = [...document.querySelectorAll("#cmdList .cmd-item .cmd-name")].map((n) => n.textContent); document.getElementById("cmdClose").click(); return out; })()`);
+        for (const p of playbooks) assert.equal(shown.filter((n) => n === p.command).length, 1, `${b.id}: "${p.command}" once in the ⚡ panel`);
+        const registry = await cdp.evaluate(panel, `AgentExtras.commands.map((c) => c.name)`);
+        assert.equal(new Set(registry).size, registry.length, `${b.id}: no duplicate quick commands`);
       }
       // Features: permissions, the built-in agent's tools and the panel's controls follow the brand.
       const feats = featuresOf(b);

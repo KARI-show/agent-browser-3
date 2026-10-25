@@ -166,12 +166,15 @@ test("palette's panel has the 🎨 Styles and 🧪 Palette tabs, six Design comm
     refTarget: typeof AgentBrowserTools.helpers.refTarget,
   })`);
   assert.equal(seen.brand, "palette");
-  assert.deepEqual(seen.tabs, [["styles", "🎨 Styles", ["agentSiteStyles"]], ["palette", "🧪 Palette", ["agentSiteStyles"]]]);
-  assert.deepEqual(seen.labels, ["🧩 Recipes", "👁 Watchers", "🧠 Memory", "🎨 Styles", "🧪 Palette"], "the built-in tabs of the brand's features, then the extras'");
-  assert.deepEqual(seen.commands, [
+  // Other extras of the brand (skills) add their own tabs and commands after these; check ours and their order.
+  assert.deepEqual(seen.tabs.filter((t) => ["styles", "palette"].includes(t[0])), [["styles", "🎨 Styles", ["agentSiteStyles"]], ["palette", "🧪 Palette", ["agentSiteStyles"]]]);
+  const ownLabels = ["🧩 Recipes", "👁 Watchers", "🧠 Memory", "🎨 Styles", "🧪 Palette"];
+  assert.deepEqual(seen.labels.filter((l) => ownLabels.includes(l)), ownLabels, "the built-in tabs of the brand's features, then the extras'");
+  const ownCommands = [
     ["Design", "Make this page easier to read", false], ["Design", "Hide the distractions on this page", false], ["Design", "Show this site's style overrides", false],
     ["Design", "What colours and fonts does this page use?", false], ["Design", "Check this page's contrast", false], ["Design", "Dark theme for this site", false],
-  ]);
+  ];
+  assert.deepEqual(seen.commands.filter((c) => ownCommands.some((o) => o[1] === c[1])), ownCommands);
   const tools = ["browser_palette_contrast", "browser_palette_extract", "browser_palette_theme", "browser_style_apply", "browser_style_inspect", "browser_style_list", "browser_style_remove"];
   assert.deepEqual(seen.registered, tools);
   assert.deepEqual(seen.declared, tools, "the built-in agent declares the same tools");

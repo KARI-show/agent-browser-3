@@ -53,7 +53,12 @@
   load().then(function (list) {
     list.forEach(function (s) {
       if (!s.command || !s.prompt) return;
-      globalThis.AgentExtras.commands.push({ group: "Design", icon: s.icon || "🎓", name: s.command, prompt: s.prompt });
+      // Another extra may already offer a command of this name (the styles extra's "Make this page easier to
+      // read" next to the readability playbook): one command, with the playbook's prompt — it reads the
+      // playbook first, so it is the richer of the two.
+      var existing = globalThis.AgentExtras.commands.find(function (c) { return c.name === s.command; });
+      if (existing) { existing.prompt = s.prompt; existing.playbook = s.name; return; }
+      globalThis.AgentExtras.commands.push({ group: "Design", icon: s.icon || "🎓", name: s.command, prompt: s.prompt, playbook: s.name });
     });
   }).catch(function () {});
 

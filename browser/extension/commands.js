@@ -129,8 +129,9 @@
   function has(f) { return !window.AGENT_BRAND || !window.AGENT_BRAND.has || window.AGENT_BRAND.has(f); }
   // A command needs every feature its group and its name point at ("Check privacy" reads cookies and the User-Agent).
   COMMANDS = COMMANDS.filter(function (c) { return [GROUP_FEATURE[c.group], NAME_FEATURE[c.name]].every(function (f) { return !f || has(f); }); });
-  // The brand's extra features (extras.js) bring their own quick commands.
-  if (window.AgentExtras && window.AgentExtras.commands.length) COMMANDS = COMMANDS.concat(window.AgentExtras.commands);
+  // The brand's extra features (extras.js) bring their own quick commands; some arrive after load (the
+  // skills extra reads its playbooks first), so the registry is read at render time, not copied here.
+  function allCommands() { return window.AgentExtras && window.AgentExtras.commands.length ? COMMANDS.concat(window.AgentExtras.commands) : COMMANDS; }
 
   var panel = document.getElementById("commands-panel");
   var list = document.getElementById("cmdList");
@@ -145,7 +146,7 @@
     var q = (filter || "").toLowerCase();
     list.innerHTML = "";
     var groups = {};
-    COMMANDS.forEach(function (c) {
+    allCommands().forEach(function (c) {
       if (q && c.name.toLowerCase().indexOf(q) === -1 && c.group.toLowerCase().indexOf(q) === -1 && c.prompt.toLowerCase().indexOf(q) === -1) return;
       if (!groups[c.group]) groups[c.group] = [];
       groups[c.group].push(c);

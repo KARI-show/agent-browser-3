@@ -24,14 +24,14 @@ function fakeEl(tag, props, children) {
 }
 const textOf = (n) => (n.text !== undefined ? n.text : n.children.map(textOf).join(" ")) || "";
 
-function load({ json = PLAYBOOKS, ok = true, has = true } = {}) {
+function load({ json = PLAYBOOKS, ok = true, has = true, commands = [] } = {}) {
   const registered = {};
   const fetched = [];
   const context = vm.createContext({
     console,
     AGENT_BRAND: { has: (f) => has && f === "skills" },
     AgentBrowserTools: { register: (name, fn) => { registered[name] = fn; }, helpers: { text: (t) => [{ type: "text", text: t }] } },
-    AgentExtras: { tabs: [], commands: [] },
+    AgentExtras: { tabs: [], commands },
     chrome: { runtime: { getURL: (p) => "chrome-extension://abc/" + p } },
     fetch: async (url) => { fetched.push(url); return { ok, json: async () => json }; },
   });
@@ -78,6 +78,17 @@ test("skills: each playbook with a command becomes a Design quick command; the �
   const body = items[0].children.find((c) => c.className === "cmd-body wide").children.find((c) => c.tag === "pre");
   assert.ok(body.className.includes("hidden"));
   assert.match(textOf(body), /## Process/);
+});
+
+test("skills: a command another extra already offers under the same name is upgraded with the playbook's prompt, not duplicated", async () => {
+  const own = { group: "Design", icon: "🔤", name: "Fix the typography on this page", prompt: "Inspect the type and fix it." };
+  const { extras } = load({ commands: [own] });
+  await settle();
+  assert.deepEqual(extras.commands.map((c) => c.name), ["Fix the typography on this page", "Review this page like a designer"]);
+  assert.equal(extras.commands[0], own, "the same object, so a panel holding a reference sees the change");
+  assert.equal(own.prompt, 'Read the "typography" playbook.');
+  assert.equal(own.icon, "🔤", "the extra's icon stays");
+  assert.equal(own.playbook, "typography");
 });
 
 test("skills: a build without skills.json, and a brand without the extra", async () => {
