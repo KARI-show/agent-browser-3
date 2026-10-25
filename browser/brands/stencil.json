@@ -1,0 +1,30 @@
+{
+  "id": "stencil",
+  "name": "Stencil — Page Builder Assistant",
+  "shortName": "Stencil",
+  "tagline": "Page Builder Assistant",
+  "subtitle": "Stencil builds on the page in front of you: adds banners, buttons and notes, edits texts, hides what is in the way, lays grids and marks up screenshots for review.",
+  "description": "Design assistant in the side panel: adds and edits elements on any page and keeps them per site, layout grids, review markup.",
+  "mascot": "📐",
+  "icon": "media/brands/stencil-icon.png",
+  "avatar": "media/brands/stencil-avatar.png",
+  "colors": {
+    "accent": "#3fb8ff",
+    "accentLight": "#0b76c2",
+    "spark": "#e8f4ff",
+    "action": "#ffb347",
+    "ink": "#0c2340",
+    "radius": "4px"
+  },
+  "skin": "blueprint",
+  "features": {
+    "profiles": false,
+    "proxy": false,
+    "cookies": false,
+    "network": false,
+    "watchers": false,
+    "elements": true,
+    "overlay": true
+  },
+  "_note": "Placeholder brand: rename, rewrite the texts and replace the artwork before use. Logo: node browser/brands/make-logo.mjs stencil --style monogram --bg #0c2340 --fg #e8f4ff --accent #3fb8ff --letter S"
+}

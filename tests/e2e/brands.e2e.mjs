@@ -9,10 +9,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { launch, findChromium } from "./cdp.mjs";
-import { FEATURE_PERMISSIONS, OPT_IN_FEATURES, featuresOf, optInOf } from "../../browser/brand.mjs";
+import { FEATURE_PERMISSIONS, OPT_IN_FEATURES, extrasContentScripts, featuresOf, optInOf } from "../../browser/brand.mjs";
 
 // Tool-name prefix per extra (tests/features.test.ts holds the declarations to the same table).
-const EXTRA_TOOL_PREFIX = { clips: /^browser_clip_/, sessions: /^browser_session_/, rewrite: /^browser_selection_/, snippets: /^browser_snippet_/, checks: /^browser_check_/, uptime: /^browser_uptime_/, accounts: /^browser_account_/, audit: /^browser_identity_/ };
+const EXTRA_TOOL_PREFIX = { clips: /^browser_clip_/, sessions: /^browser_session_/, rewrite: /^browser_selection_/, snippets: /^browser_snippet_/, checks: /^browser_check_/, uptime: /^browser_uptime_/, accounts: /^browser_account_/, audit: /^browser_identity_/, styles: /^browser_style_/, palette: /^browser_palette_/, elements: /^browser_element_/, overlay: /^browser_overlay_/ };
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = dirname(dirname(here));
@@ -75,6 +75,13 @@ for (const b of brands) {
       const extras = optInOf(b);
       const extrasJs = await cdp.evaluate(panel, `fetch(chrome.runtime.getURL("extras.js")).then((r) => r.text())`);
       for (const id of OPT_IN_FEATURES) assert.equal(extrasJs.includes(`── ${id} (browser/extras/${id}.js)`), extras.includes(id), `${b.id}: extras.js ↔ ${id}`);
+      // An extra's content script ships only with the brands that have the extra.
+      const shipped = new Set(extrasContentScripts(b, root).map((cs) => cs.file));
+      for (const id of OPT_IN_FEATURES) {
+        if (!existsSync(join(root, "browser", "extras", `${id}.cs.js`))) continue;
+        assert.equal(existsSync(join(extDir(b), `extras-${id}.cs.js`)), shipped.has(`extras-${id}.cs.js`), `${b.id}: extras-${id}.cs.js ↔ ${id}`);
+        assert.equal(shipped.has(`extras-${id}.cs.js`), extras.includes(id));
+      }
       for (const id of seen.extraTabs) assert.ok(extras.includes(id), `${b.id}: tab ${id} belongs to an extra the brand has`);
       const toolExtra = (n) => (Object.entries(EXTRA_TOOL_PREFIX).find(([, re]) => re.test(n)) || [null])[0];
       for (const n of seen.registered) { const id = toolExtra(n); if (id) assert.ok(extras.includes(id), `${b.id}: ${n} registered without its extra ${id}`); }

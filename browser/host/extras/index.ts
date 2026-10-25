@@ -10,6 +10,10 @@ import { checks } from "./checks";
 import { uptime } from "./uptime";
 import { accounts } from "./accounts";
 import { audit } from "./audit";
+import { styles } from "./styles";
+import { palette } from "./palette";
+import { elements } from "./elements";
+import { overlay } from "./overlay";
 
-export const EXTRAS: ExtraFeature[] = [clips, sessions, rewrite, snippets, checks, uptime, accounts, audit];
+export const EXTRAS: ExtraFeature[] = [clips, sessions, rewrite, snippets, checks, uptime, accounts, audit, styles, palette, elements, overlay];
 export type { ExtraFeature } from "./types";

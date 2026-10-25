@@ -344,6 +344,15 @@ does with a brand:
   | `uptime` | HTTP status monitors on a schedule, with latency history (on the watcher machinery) | `browser_uptime_*` | Beacon |
   | `accounts` | named sign-ins per site, switched without logging out (on the cookie tools) | `browser_account_*` | Harbor |
   | `audit` | identity report: what the site sees, device profile and proxy consistency | `browser_identity_report` | Harbor |
+  | `styles` | restyle a site: inspect an element's styles, apply CSS overrides the site keeps (content script), reset | `browser_style_*` | Palette |
+  | `palette` | the page's colours, fonts and type scale, contrast check, a dark theme for the site (on `styles`) | `browser_palette_*` | Palette |
+  | `elements` | add, edit and hide elements on a page and keep them per site (content script) | `browser_element_*` | Stencil |
+  | `overlay` | layout overlays for review: column and baseline grids, measurements, numbered notes to screenshot | `browser_overlay_*` | Stencil |
+
+  An extra that must act on pages while the panel is closed ships a content
+  script, `browser/extras/<id>.cs.js`: the build copies it to
+  `extras-<id>.cs.js` in the brands that have the extra and the feature's module
+  registers it with `chrome.scripting.registerContentScripts`.
 
 - **Logo** — the icon and avatar the brand points at. `browser/brands/make-logo.mjs`
   draws a vector mark (several styles: monogram, orbit, quill, beacon, harbor) and

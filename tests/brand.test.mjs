@@ -7,7 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
-import { ALL_FEATURES, DEFAULT_BRAND, FEATURES, FEATURE_PERMISSIONS, OPT_IN_FEATURES, TOKEN_FILES, brandManifest, brandScript, extrasScript, featuresOf, fillTokens, listBrands, loadBrand, optInOf, toolDefsFor, validateBrand } from "../browser/brand.mjs";
+import { ALL_FEATURES, DEFAULT_BRAND, FEATURES, FEATURE_PERMISSIONS, OPT_IN_FEATURES, TOKEN_FILES, brandManifest, brandScript, extrasContentScripts, extrasScript, featuresOf, fillTokens, listBrands, loadBrand, optInOf, toolDefsFor, validateBrand } from "../browser/brand.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const ext = (f) => fs.readFileSync(path.join(root, "browser", "extension", f), "utf8");
@@ -106,6 +106,13 @@ test("extras: an opt-in feature is off unless a brand switches it on; its tools,
   assert.ok(js.indexOf("── clips (browser/extras/clips.js)") < js.indexOf("── sessions (browser/extras/sessions.js)"), "modules in OPT_IN_FEATURES order");
   assert.ok(js.includes(fs.readFileSync(path.join(root, "browser", "extras", "clips.js"), "utf8")), "the module's source is carried whole");
   for (const id of OPT_IN_FEATURES) assert.ok(fs.existsSync(path.join(root, "browser", "extras", `${id}.js`)) && fs.existsSync(path.join(root, "browser", "host", "extras", `${id}.ts`)), `${id} has both halves`);
+  // Content scripts: only of the brand's extras that ship one, named for the panel to register.
+  assert.deepEqual(extrasContentScripts(tali, root), []);
+  assert.deepEqual(extrasContentScripts(orbit, root), [], "clips and sessions act from the panel only");
+  const styled = { ...orbit, features: { styles: true, elements: true } };
+  assert.deepEqual(extrasContentScripts(styled, root).map((c) => c.file), ["extras-styles.cs.js", "extras-elements.cs.js"]);
+  for (const c of extrasContentScripts(styled, root)) assert.ok(fs.existsSync(c.src), c.src);
+  assert.deepEqual(validateBrand({ ...tali, features: { palette: true } }, root), ["features.palette needs styles, which this brand switches off"]);
   // An extra that builds on a base feature needs it.
   assert.deepEqual(validateBrand({ ...tali, features: { cookies: false, accounts: true } }, root), ["features.accounts needs cookies, which this brand switches off"]);
   assert.deepEqual(validateBrand({ ...tali, features: { watchers: false, uptime: true } }, root), ["features.uptime needs watchers, which this brand switches off"]);
