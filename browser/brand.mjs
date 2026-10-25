@@ -106,6 +106,7 @@ export function validateBrand(b, root) {
     if (!existsSync(skin)) p.push(`"skin": ${skin} does not exist`);
     if (Array.isArray(b.playbooks)) {
       for (const n of b.playbooks) {
+        if (typeof n !== "string" || !/^[a-z][a-z0-9-]*$/.test(n)) continue; // reported above
         const file = join(root, "browser", "playbooks", `${n}.md`);
         if (!existsSync(file)) { p.push(`"playbooks": ${file} does not exist`); continue; }
         const problems = validatePlaybook(parsePlaybook(readFileSync(file, "utf8"), n));
