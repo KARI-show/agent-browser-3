@@ -2487,7 +2487,14 @@
       EXTRA_TOOLS[name] = fn;
     },
     /** What the extras build on: the tab the tools act on, scripts in it, the page snapshot. */
-    helpers: { currentTab: currentTab, inTop: inTop, inAllFrames: inAllFrames, snapshot: snapshot, sleep: sleep, text: text, ownPage: ownPage },
+    helpers: {
+      currentTab: currentTab, inTop: inTop, inAllFrames: inAllFrames, snapshot: snapshot, sleep: sleep, text: text, ownPage: ownPage,
+      /** The element behind a ref of the current tab's last snapshot — { documentId, local, loc } — for extras that act on refs themselves; null when the ref is unknown. */
+      refTarget: function (ref) {
+        var e = (refTables[currentTabId] || {})[ref];
+        return e ? { documentId: e.documentId, local: e.local, loc: Object.assign({}, e.loc) } : null;
+      },
+    },
     /** Words for what a call would act on — the element behind a ref, or the address — for approval cards. */
     describe: function (name, args) {
       args = args || {};
