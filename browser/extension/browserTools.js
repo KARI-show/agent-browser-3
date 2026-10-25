@@ -2422,6 +2422,13 @@
     return e && e.loc ? Object.assign({}, e.loc) : null;
   }
 
+  // The frame and in-page index behind a ref of the current tab, for an extra that runs its own
+  // function on the element (window.__agentRefs[local - 1] in that document's ISOLATED world).
+  function refTarget(ref) {
+    var e = (refTables[currentTabId] || {})[ref];
+    return e ? { documentId: e.documentId, local: e.local, loc: e.loc ? Object.assign({}, e.loc) : null } : null;
+  }
+
   // Arguments as they may be stored: no file bytes, no cookie values, no passwords.
   function traceArgs(name, args) {
     var a = {};
@@ -2487,7 +2494,7 @@
       EXTRA_TOOLS[name] = fn;
     },
     /** What the extras build on: the tab the tools act on, scripts in it, the page snapshot. */
-    helpers: { currentTab: currentTab, inTop: inTop, inAllFrames: inAllFrames, snapshot: snapshot, sleep: sleep, text: text, ownPage: ownPage },
+    helpers: { currentTab: currentTab, inTop: inTop, inAllFrames: inAllFrames, snapshot: snapshot, sleep: sleep, text: text, ownPage: ownPage, refTarget: refTarget },
     /** Words for what a call would act on — the element behind a ref, or the address — for approval cards. */
     describe: function (name, args) {
       args = args || {};
