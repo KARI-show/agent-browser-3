@@ -25,5 +25,5 @@
     "styles": true,
     "palette": true
   },
-  "_note": "Placeholder brand: rename, rewrite the texts and replace the artwork before use. Logo: node browser/brands/make-logo.mjs palette --style monogram --bg #2d1b2e --fg #fff4e6 --accent #e0457b --letter P"
+  "_note": "Placeholder brand: rename, rewrite the texts and replace the artwork before use. Logo: node browser/brands/make-logo.mjs palette --style palette --bg \"#2d1b2e\" --fg \"#fff4e6\" --accent \"#e0457b\""
 }

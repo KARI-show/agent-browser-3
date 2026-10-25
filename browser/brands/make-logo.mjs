@@ -10,6 +10,10 @@
 //   quill     a feather on a circle, the nib in the accent colour
 //   beacon    a lighthouse: tapered tower with light beams in the accent colour
 //   harbor    an anchor inside a shield with an accent border
+//   palette   a painter's palette with a thumb hole and four paint dots derived from the accent (the
+//             accent, its two hue neighbours, a tint); the avatar adds a brush loaded with the accent
+//   stencil   a drafting set square with ruler ticks along its base and a pencil in the accent colour
+//             crossing it; the avatar adds a faint grid
 //
 // --bg is the background colour, --fg the mark, --accent the secondary colour (defaults to --fg).
 // --shape overrides the icon's background shape (the avatar is always a full-bleed square, which
@@ -25,7 +29,7 @@ import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 
 const root = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
-const STYLES = ["monogram", "orbit", "quill", "beacon", "harbor"];
+const STYLES = ["monogram", "orbit", "quill", "beacon", "harbor", "palette", "stencil"];
 const SHAPES = ["square", "circle", "none"];
 
 // ── Arguments ────────────────────────────────────────────────────────────────
@@ -68,6 +72,21 @@ const rgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
 const toHex = (c) => "#" + c.map((v) => Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, "0")).join("");
 // mix(a, b, t): the colour t of the way from a to b.
 const mix = (a, b, t) => toHex(rgb(a).map((v, i) => v + (rgb(b)[i] - v) * t));
+// rotate(h, deg): the colour h with its hue turned by deg degrees (same saturation and lightness).
+const rotate = (h, deg) => {
+  const [r, g, b] = rgb(h).map((v) => v / 255);
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), l = (max + min) / 2;
+  let hue = 0, s = 0;
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    hue = (max === r ? (g - b) / d + (g < b ? 6 : 0) : max === g ? (b - r) / d + 2 : (r - g) / d + 4) / 6;
+  }
+  hue = (hue + deg / 360 + 1) % 1;
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s, p = 2 * l - q;
+  const channel = (t) => ((t = (t + 1) % 1), t < 1 / 6 ? p + (q - p) * 6 * t : t < 1 / 2 ? q : t < 2 / 3 ? p + (q - p) * (2 / 3 - t) * 6 : p);
+  return toHex([channel(hue + 1 / 3), channel(hue), channel(hue - 1 / 3)].map((v) => v * 255));
+};
 const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const wave = (x0, y, step, n, amp) => `M${x0} ${y} q ${step / 2} ${-amp} ${step} 0` + ` t ${step} 0`.repeat(n - 1);
 
@@ -200,6 +219,75 @@ const styles = {
         </g>
         <polygon points="18,62 32,62 25,49" fill="${c.fg}"/>
         <polygon points="68,62 82,62 75,49" fill="${c.fg}"/>`;
+    },
+  },
+
+  palette: {
+    shape: "square",
+    radius: 24,
+    avatarScale: 0.9,
+    draw: (c, d) => {
+      // The paint: the accent, its two hue neighbours and a tint of it, so the dots differ on any brand.
+      const paint = [c.accent, rotate(c.accent, 36), rotate(c.accent, -36), mix(c.accent, "#ffffff", 0.5)];
+      const spots = [[27, 41], [41, 26], [57, 25], [26, 59]];
+      const r = d.avatar ? 7 : 7.5;
+      // A kidney-shaped board: wide at the top left, a notch curving in at the lower right, the thumb hole beside it.
+      const board = "M50 12 C 26 12, 10 30, 10 52 C 10 74, 28 90, 50 90 C 66 90, 72 82, 70 72 C 68 64, 74 60, 82 60 C 88 60, 92 54, 92 46 C 92 26, 74 12, 50 12 Z";
+      const field = d.avatar ? `
+        <defs><radialGradient id="studio" gradientUnits="userSpaceOnUse" cx="28" cy="22" r="92">
+          <stop offset="0" stop-color="${mix(c.bg, c.fg, 0.16)}"/><stop offset="1" stop-color="${c.bg}"/>
+        </radialGradient></defs>
+        <rect x="-6" y="-6" width="112" height="112" fill="url(#studio)"/>` : "";
+      // The brush lies across the mixing area: handle, ferrule, bristles dipped in the accent; a background-coloured
+      // outline keeps it apart from the board where the two share a colour.
+      const brush = d.avatar ? `
+        <g stroke="${c.bg}" fill="${c.bg}" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M92 94 L64 66" stroke-width="10"/>
+          <path d="M65.5 67.5 L56.5 58.5" stroke-width="10.5"/>
+          <path d="M59.8 56.2 L47 49 L54.2 61.8 Z" stroke-width="3"/>
+        </g>
+        <path d="M92 94 L64 66" stroke="${mix(c.bg, c.fg, 0.5)}" stroke-width="7" stroke-linecap="round"/>
+        <path d="M65 67 L57 59" stroke="${c.fg}" stroke-width="7.5"/>
+        <path d="M59.8 56.2 L47 49 L54.2 61.8 Z" fill="${c.accent}"/>` : "";
+      return `${field}
+        <path d="${board}" fill="${c.fg}"/>
+        <circle cx="70" cy="42" r="${d.avatar ? 7.5 : 8}" fill="${d.avatar ? "url(#studio)" : c.bg}"/>
+        ${spots.map(([x, y], i) => `<circle cx="${x}" cy="${y}" r="${r}" fill="${paint[i]}"/>`).join("")}
+        ${brush}`;
+    },
+  },
+
+  stencil: {
+    shape: "square",
+    radius: 18,
+    avatarScale: 0.88,
+    draw: (c, d) => {
+      const lead = mix(c.bg, "#000000", 0.4);
+      // Ruler ticks along the base, cut into the set square in the background colour; the avatar's are finer.
+      const step = d.avatar ? 6 : 12;
+      const ticks = [];
+      for (let x = 20, i = 0; x <= 80; x += step, i++) {
+        const tall = d.avatar ? i % 5 === 0 : i % 2 === 0;
+        const w = d.avatar ? 1.3 : 2.4, h = tall ? 8 : 4.5;
+        ticks.push(`<rect x="${(x - w / 2).toFixed(2)}" y="${88 - h}" width="${w}" height="${h}" fill="${c.bg}"/>`);
+      }
+      const grid = d.avatar ? `<g stroke="${c.accent}" stroke-width="0.5" opacity="0.26">${
+        Array.from({ length: 12 }, (_, i) => `<path d="M${-6 + i * 10} -6 V106 M-6 ${-6 + i * 10} H106"/>`).join("")}</g>` : "";
+      // The pencil is drawn upright (tip at the top) and turned 30°, so it crosses the hypotenuse from the base band.
+      const hw = d.avatar ? 5 : 6;
+      const pencil = `
+        <g transform="translate(74 60) rotate(30)">
+          <path d="M${-hw} 30 H${hw} V-16 L0 -30 L${-hw} -16 Z" fill="${c.bg}" stroke="${c.bg}" stroke-width="3" stroke-linejoin="round"/>
+          <rect x="${-hw}" y="-16" width="${hw * 2}" height="40" fill="${c.accent}"/>
+          <rect x="${-hw}" y="24" width="${hw * 2}" height="6" fill="${c.fg}"/>
+          <path d="M${-hw} -16 H${hw} L0 -30 Z" fill="${c.fg}"/>
+          <path d="M${(-hw * 0.38).toFixed(2)} -24.7 H${(hw * 0.38).toFixed(2)} L0 -30 Z" fill="${lead}"/>
+          ${d.avatar ? `<path d="M0 -14 V22" stroke="${c.bg}" stroke-width="1" opacity="0.35"/>` : ""}
+        </g>`;
+      return `${grid}
+        <path d="M12 88 H88 L12 12 Z M26 76 V42 L60 76 Z" fill="${c.fg}" fill-rule="evenodd"/>
+        ${ticks.join("")}
+        ${pencil}`;
     },
   },
 };
