@@ -21,7 +21,7 @@ const MANIFEST_DESCRIPTION_MAX = 132; // the Web Store's limit
  * without the feature drops — so the builds differ in what they can do, not only in their name.
  */
 export const FEATURES = ["helper", "remote", "recipes", "watchers", "memory", "profiles", "cookies", "converter", "network", "proxy"];
-export const OPT_IN_FEATURES = ["clips", "sessions", "rewrite", "snippets", "checks", "uptime", "accounts", "audit", "styles", "palette", "elements", "overlay"];
+export const OPT_IN_FEATURES = ["clips", "sessions", "rewrite", "snippets", "checks", "uptime", "accounts", "audit", "styles", "palette", "elements", "overlay", "skills"];
 export const ALL_FEATURES = [...FEATURES, ...OPT_IN_FEATURES];
 export const FEATURE_PERMISSIONS = {
   helper: ["nativeMessaging"],
@@ -81,6 +81,10 @@ export function validateBrand(b, root) {
   if (b.colors && !/^\d+px$/.test(b.colors.radius || "")) p.push(`colors.radius must be like "10px"`);
   if (b.key !== undefined && !/^[A-Za-z0-9+/=]{300,}$/.test(String(b.key))) p.push(`"key" doesn't look like an extension public key`);
   if (b.skin !== undefined && !/^[a-z][a-z0-9-]*$/.test(String(b.skin))) p.push(`"skin" must be a file name like "glass" (browser/skins/glass.css)`);
+  if (b.playbooks !== undefined && (!Array.isArray(b.playbooks) || b.playbooks.some((n) => typeof n !== "string" || !/^[a-z][a-z0-9-]*$/.test(n)))) {
+    p.push(`"playbooks" must be a list of names like "design-review" (browser/playbooks/<name>.md)`);
+  }
+  if (b.features && b.features.skills === true && !(Array.isArray(b.playbooks) && b.playbooks.length)) p.push(`features.skills needs a "playbooks" list`);
   if (b.features !== undefined) {
     if (!b.features || typeof b.features !== "object") p.push(`"features" must be an object of feature → boolean`);
     else {
@@ -100,8 +104,51 @@ export function validateBrand(b, root) {
     }
     const skin = join(root, "browser", "skins", `${b.skin || DEFAULT_SKIN}.css`);
     if (!existsSync(skin)) p.push(`"skin": ${skin} does not exist`);
+    if (Array.isArray(b.playbooks)) {
+      for (const n of b.playbooks) {
+        const file = join(root, "browser", "playbooks", `${n}.md`);
+        if (!existsSync(file)) { p.push(`"playbooks": ${file} does not exist`); continue; }
+        const problems = validatePlaybook(parsePlaybook(readFileSync(file, "utf8"), n));
+        for (const q of problems) p.push(`playbook ${n}: ${q}`);
+      }
+    }
   }
   return p;
+}
+
+// ── Playbooks (the "skills" extra) ────────────────────────────────────────────
+// browser/playbooks/<name>.md: a front-matter block (title, summary, when, command, prompt, icon)
+// between two "---" lines, then the Markdown body the model reads.
+
+/** Parse one playbook file into { name, title, summary, when, command, prompt, icon, body }. */
+export function parsePlaybook(text, name) {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(text);
+  const meta = {};
+  if (m) {
+    for (const line of m[1].split(/\r?\n/)) {
+      const kv = /^([a-z]+):\s*(.*)$/.exec(line.trim());
+      if (kv) meta[kv[1]] = kv[2].trim();
+    }
+  }
+  return { name, title: meta.title || "", summary: meta.summary || "", when: meta.when || "", command: meta.command || "", prompt: meta.prompt || "", icon: meta.icon || "", body: m ? m[2].trim() : text.trim() };
+}
+
+/** What a playbook must have to be useful to the model and the panel. */
+export function validatePlaybook(pb) {
+  const p = [];
+  if (!pb.title) p.push("front matter needs a title");
+  if (!pb.summary || pb.summary.length < 20) p.push("front matter needs a one-line summary (20+ chars)");
+  if (!pb.when) p.push("front matter needs 'when' (when the model should read it)");
+  if (pb.command && !pb.prompt) p.push("a command needs a prompt");
+  if (pb.body.length < 400) p.push("the body is too short to be a playbook (400+ chars)");
+  if (!/^#\s/m.test(pb.body)) p.push("the body needs headings");
+  return p;
+}
+
+/** The brand's playbooks, parsed, in the order of its list (empty for a brand without the skills extra). */
+export function playbooksOf(brand, root) {
+  if (!featuresOf(brand).skills || !Array.isArray(brand.playbooks)) return [];
+  return brand.playbooks.map((n) => parsePlaybook(readFileSync(join(root, "browser", "playbooks", `${n}.md`), "utf8"), n));
 }
 
 function lookup(brand, path) {

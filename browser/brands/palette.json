@@ -23,7 +23,17 @@
     "cookies": false,
     "network": false,
     "styles": true,
-    "palette": true
+    "palette": true,
+    "skills": true
   },
+  "playbooks": [
+    "design-review",
+    "typography",
+    "color",
+    "layout",
+    "dark-mode",
+    "accessibility",
+    "readability"
+  ],
   "_note": "Placeholder brand: rename, rewrite the texts and replace the artwork before use. Logo: node browser/brands/make-logo.mjs palette --style monogram --bg #2d1b2e --fg #fff4e6 --accent #e0457b --letter P"
 }

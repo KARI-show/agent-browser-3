@@ -9,10 +9,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { launch, findChromium } from "./cdp.mjs";
-import { FEATURE_PERMISSIONS, OPT_IN_FEATURES, extrasContentScripts, featuresOf, optInOf } from "../../browser/brand.mjs";
+import { FEATURE_PERMISSIONS, OPT_IN_FEATURES, extrasContentScripts, featuresOf, optInOf, playbooksOf } from "../../browser/brand.mjs";
 
 // Tool-name prefix per extra (tests/features.test.ts holds the declarations to the same table).
-const EXTRA_TOOL_PREFIX = { clips: /^browser_clip_/, sessions: /^browser_session_/, rewrite: /^browser_selection_/, snippets: /^browser_snippet_/, checks: /^browser_check_/, uptime: /^browser_uptime_/, accounts: /^browser_account_/, audit: /^browser_identity_/, styles: /^browser_style_/, palette: /^browser_palette_/, elements: /^browser_element_/, overlay: /^browser_overlay_/ };
+const EXTRA_TOOL_PREFIX = { clips: /^browser_clip_/, sessions: /^browser_session_/, rewrite: /^browser_selection_/, snippets: /^browser_snippet_/, checks: /^browser_check_/, uptime: /^browser_uptime_/, accounts: /^browser_account_/, audit: /^browser_identity_/, styles: /^browser_style_/, palette: /^browser_palette_/, elements: /^browser_element_/, overlay: /^browser_overlay_/, skills: /^browser_skill_/ };
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = dirname(dirname(here));
@@ -89,6 +89,18 @@ for (const b of brands) {
       for (const id of extras) {
         const declared = seen.toolNames.filter((n) => EXTRA_TOOL_PREFIX[id].test(n));
         for (const n of declared) assert.ok(seen.registered.includes(n), `${b.id}: ${n} is declared to the model but not registered in the panel`);
+      }
+      // Skills: the brand's playbooks are packed into the build and served to the model; nothing of them elsewhere.
+      const playbooks = playbooksOf(b, root);
+      assert.equal(existsSync(join(extDir(b), "skills.json")), playbooks.length > 0, `${b.id}: skills.json ↔ playbooks`);
+      if (playbooks.length) {
+        const listed = await cdp.evaluate(panel, `AgentBrowserTools.run("browser_skill_list", {}).then((r) => r[0].text)`);
+        for (const p of playbooks) assert.ok(listed.includes(`- ${p.name} — ${p.title}`), `${b.id}: ${p.name} listed`);
+        const read = await cdp.evaluate(panel, `AgentBrowserTools.run("browser_skill_read", { name: ${JSON.stringify(playbooks[0].name)} }).then((r) => r[0].text)`);
+        assert.ok(read.includes(playbooks[0].body.slice(0, 80)), `${b.id}: ${playbooks[0].name} readable in full`);
+        assert.ok(seen.extraTabs.includes("skills"), `${b.id}: the 🎓 tab`);
+        // The quick commands arrive once skills.json is loaded.
+        await waitUntil(() => cdp.evaluate(panel, `AgentExtras.commands.some((c) => c.name === ${JSON.stringify(playbooks[0].command)})`), 5000, "the playbooks' quick commands");
       }
       // Features: permissions, the built-in agent's tools and the panel's controls follow the brand.
       const feats = featuresOf(b);

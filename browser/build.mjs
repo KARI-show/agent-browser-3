@@ -16,7 +16,7 @@ import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as zlib from "node:zlib";
 import { createRequire } from "node:module";
-import { DEFAULT_BRAND, DEFAULT_SKIN, TOKEN_FILES, brandManifest, brandScript, extrasContentScripts, extrasScript, fillTokens, listBrands, loadBrand, toolDefsFor } from "./brand.mjs";
+import { DEFAULT_BRAND, DEFAULT_SKIN, TOKEN_FILES, brandManifest, brandScript, extrasContentScripts, extrasScript, fillTokens, listBrands, loadBrand, playbooksOf, toolDefsFor } from "./brand.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = dirname(here);
@@ -61,6 +61,8 @@ for (const b of brands) {
   writeFileSync(join(dir, "brand.js"), brandScript(b));
   writeFileSync(join(dir, "extras.js"), extrasScript(b, root)); // the runtime of the brand's extra features
   for (const cs of extrasContentScripts(b, root)) cpSync(cs.src, join(dir, cs.file)); // their content scripts, if any
+  const playbooks = playbooksOf(b, root); // the "skills" extra: the brand's playbooks, packed for the panel
+  if (playbooks.length) writeFileSync(join(dir, "skills.json"), JSON.stringify(playbooks));
   console.log(`brand ${b.id}: ${b.name} → ${relative(root, dir)}`);
 }
 

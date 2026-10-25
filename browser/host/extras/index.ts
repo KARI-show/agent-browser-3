@@ -14,6 +14,7 @@ import { styles } from "./styles";
 import { palette } from "./palette";
 import { elements } from "./elements";
 import { overlay } from "./overlay";
+import { skills } from "./skills";
 
-export const EXTRAS: ExtraFeature[] = [clips, sessions, rewrite, snippets, checks, uptime, accounts, audit, styles, palette, elements, overlay];
+export const EXTRAS: ExtraFeature[] = [clips, sessions, rewrite, snippets, checks, uptime, accounts, audit, styles, palette, elements, overlay, skills];
 export type { ExtraFeature } from "./types";

@@ -348,6 +348,19 @@ does with a brand:
   | `palette` | the page's colours, fonts and type scale, contrast check, a dark theme for the site (on `styles`) | `browser_palette_*` | Palette |
   | `elements` | add, edit and hide elements on a page and keep them per site (content script) | `browser_element_*` | Stencil |
   | `overlay` | layout overlays for review: column and baseline grids, measurements, numbered notes to screenshot | `browser_overlay_*` | Stencil |
+  | `skills` | the playbooks a brand ships with (`browser/playbooks/*.md`), served to the model on demand, a 🎓 tab, one quick command each | `browser_skill_*` | Palette, Stencil |
+
+  **Playbooks** make a brand an expert rather than a generalist. Each is a
+  Markdown file with a front matter (title, summary, when to read it, the quick
+  command it brings and that command's prompt) and a body of process, numbers,
+  checklists and CSS patterns. A brand lists the ones it carries in
+  `"playbooks"`; the build packs them into `skills.json`, the system prompt tells
+  the model to read the matching one before a design task, and the model fetches
+  it with `browser_skill_read`, so the prompt stays short. Shipped: design-review,
+  typography, color, layout, dark-mode, accessibility, readability (Palette's
+  shelf); design-review, layout, components, landing-page, ux-writing,
+  typography, accessibility (Stencil's). `tests/brand.test.mjs` checks every
+  playbook is complete and every brand packs only its own.
 
   An extra that must act on pages while the panel is closed ships a content
   script, `browser/extras/<id>.cs.js`: the build copies it to

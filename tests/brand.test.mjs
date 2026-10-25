@@ -7,7 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
-import { ALL_FEATURES, DEFAULT_BRAND, FEATURES, FEATURE_PERMISSIONS, OPT_IN_FEATURES, TOKEN_FILES, brandManifest, brandScript, extrasContentScripts, extrasScript, featuresOf, fillTokens, listBrands, loadBrand, optInOf, toolDefsFor, validateBrand } from "../browser/brand.mjs";
+import { ALL_FEATURES, DEFAULT_BRAND, FEATURES, FEATURE_PERMISSIONS, OPT_IN_FEATURES, TOKEN_FILES, brandManifest, brandScript, extrasContentScripts, extrasScript, featuresOf, fillTokens, listBrands, loadBrand, optInOf, parsePlaybook, playbooksOf, toolDefsFor, validateBrand, validatePlaybook } from "../browser/brand.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const ext = (f) => fs.readFileSync(path.join(root, "browser", "extension", f), "utf8");
@@ -117,6 +117,39 @@ test("extras: an opt-in feature is off unless a brand switches it on; its tools,
   assert.deepEqual(validateBrand({ ...tali, features: { cookies: false, accounts: true } }, root), ["features.accounts needs cookies, which this brand switches off"]);
   assert.deepEqual(validateBrand({ ...tali, features: { watchers: false, uptime: true } }, root), ["features.uptime needs watchers, which this brand switches off"]);
   assert.deepEqual(validateBrand({ ...tali, features: { accounts: true, uptime: true } }, root), []);
+});
+
+test("playbooks (the skills extra): every shipped playbook is complete, a brand packs only its own, and the rules are enforced", () => {
+  const dir = path.join(root, "browser", "playbooks");
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith(".md"));
+  assert.ok(files.length >= 8, "a shelf of playbooks");
+  for (const f of files) {
+    const pb = parsePlaybook(fs.readFileSync(path.join(dir, f), "utf8"), f.replace(/\.md$/, ""));
+    assert.deepEqual(validatePlaybook(pb), [], `${f} is complete`);
+    assert.ok(pb.command && pb.prompt, `${f} brings a quick command`);
+    assert.match(pb.prompt, new RegExp(`"${pb.name}"`), `${f}: the command's prompt names the playbook to read`);
+    assert.ok(pb.body.includes("## "), `${f} has sections`);
+    assert.ok(/- \[ \]/.test(pb.body), `${f} ends with a checklist`);
+    assert.doesNotMatch(pb.body, /antidetect|spoof/i);
+  }
+  // Parsing: front matter → fields; a file without front matter is still a body.
+  const pb = parsePlaybook("---\ntitle: T\nsummary: A summary that is long enough to count.\nwhen: always\ncommand: Do it\nprompt: Read \"x\"\nicon: ✨\n---\n# T\n\nBody " + "x".repeat(400), "x");
+  assert.equal(pb.title, "T"); assert.equal(pb.icon, "✨"); assert.match(pb.body, /^# T/);
+  assert.deepEqual(validatePlaybook(pb), []);
+  assert.deepEqual(validatePlaybook(parsePlaybook("# Just a body", "y")), ["front matter needs a title", "front matter needs a one-line summary (20+ chars)", "front matter needs 'when' (when the model should read it)", "the body is too short to be a playbook (400+ chars)"]);
+  // A brand packs the playbooks it lists, in order; brands without the extra pack none.
+  const tali = loadBrand(root, DEFAULT_BRAND);
+  assert.deepEqual(playbooksOf(tali, root), []);
+  const palette = loadBrand(root, "palette");
+  assert.deepEqual(playbooksOf(palette, root).map((p) => p.name), palette.playbooks);
+  assert.ok(playbooksOf(palette, root).every((p) => p.body.length > 400 && p.title));
+  const stencil = loadBrand(root, "stencil");
+  assert.ok(stencil.playbooks.includes("components") && !palette.playbooks.includes("components"), "the shelves differ by brand");
+  // Rules: skills needs a list; names are checked; files must exist and be complete.
+  assert.deepEqual(validateBrand({ ...tali, features: { skills: true } }, root), ['features.skills needs a "playbooks" list']);
+  assert.deepEqual(validateBrand({ ...tali, features: { skills: true }, playbooks: ["Nope Name"] }, root), ['"playbooks" must be a list of names like "design-review" (browser/playbooks/<name>.md)']);
+  assert.match(validateBrand({ ...tali, features: { skills: true }, playbooks: ["no-such"] }, root)[0], /no-such\.md does not exist/);
+  assert.deepEqual(validateBrand({ ...tali, features: { skills: true }, playbooks: ["typography"] }, root), []);
 });
 
 test("validateBrand: the reasons a brand is refused", () => {
