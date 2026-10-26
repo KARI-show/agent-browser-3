@@ -18,8 +18,6 @@
   },
   "skin": "glass",
   "features": {
-    "profiles": false,
-    "proxy": false,
     "clips": true,
     "sessions": true
   },

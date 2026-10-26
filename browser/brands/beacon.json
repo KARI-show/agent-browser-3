@@ -18,10 +18,6 @@
   },
   "skin": "mono",
   "features": {
-    "profiles": false,
-    "proxy": false,
-    "converter": false,
-    "cookies": false,
     "checks": true,
     "uptime": true
   },

@@ -18,11 +18,6 @@
   },
   "skin": "blueprint",
   "features": {
-    "profiles": false,
-    "proxy": false,
-    "cookies": false,
-    "network": false,
-    "watchers": false,
     "elements": true,
     "overlay": true,
     "skills": true
