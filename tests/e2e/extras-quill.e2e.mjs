@@ -141,33 +141,35 @@ after(async () => {
 
 // ── The panel: tabs, quick commands, tools ─────────────────────────────────
 
-test("quill's panel has the ✍️ Rewrite and ✂️ Snippets tabs, the Writing commands, and the six tools registered and declared", { skip }, async () => {
+test("quill's panel has the ✍️ Rewrite, ✂️ Snippets and 🪪 Identities tabs, the Writing and Forms commands, and the thirteen tools registered and declared", { skip }, async () => {
   const seen = await inPanel(`({
     brand: AGENT_BRAND.id,
     tabs: AgentExtras.tabs.map((t) => t.id),
     labels: [...document.querySelectorAll("#automations-panel .prof-tab")].map((b) => b.textContent),
     commands: AgentExtras.commands.map((c) => [c.group, c.name, !!c.partial]),
-    registered: AgentBrowserTools.names.filter((n) => /^browser_(selection|snippet)_/.test(n)),
-    declared: AgentLocal.toolNames.filter((n) => /^browser_(selection|snippet)_/.test(n)),
+    registered: AgentBrowserTools.names.filter((n) => /^browser_(selection|snippet|autofill)_/.test(n)),
+    declared: AgentLocal.toolNames.filter((n) => /^browser_(selection|snippet|autofill)_/.test(n)),
     autoBtn: !!document.getElementById("autoBtn"),
-    extraObjects: [typeof AgentExtras.rewrite, typeof AgentExtras.snippets],
+    extraObjects: [typeof AgentExtras.rewrite, typeof AgentExtras.snippets, typeof AgentExtras.autofill],
   })`);
   assert.equal(seen.brand, "quill");
-  assert.deepEqual(seen.tabs, ["rewrite", "snippets"]);
-  assert.deepEqual(seen.labels, ["🧩 Recipes", "🧠 Memory", "✍️ Rewrite", "✂️ Snippets"], "the built-in tabs of the brand's features, then the extras'");
+  assert.deepEqual(seen.tabs, ["rewrite", "snippets", "autofill"]);
+  assert.deepEqual(seen.labels, ["🧩 Recipes", "👁 Watchers", "🧠 Memory", "✍️ Rewrite", "✂️ Snippets", "🪪 Identities"], "the built-in tabs of the brand's features, then the extras'");
   assert.deepEqual(seen.commands, [
     ["Writing", "Formal", false], ["Writing", "Friendly", false], ["Writing", "Shorter", false], ["Writing", "Fix grammar & spelling", false],
     ["Writing", "Translate to English", false], ["Writing", "Expand", false], ["Writing", "Draft a reply to the selected message", false],
+    ["Writing", "Statistics of the selection", false], ["Writing", "Find & replace in this field", true],
     ["Writing", "Save the selection as a snippet", true], ["Writing", "Insert a snippet", true],
+    ["Forms", "Fill this form with my details", false], ["Forms", "Save my details from this form", false],
   ]);
-  const tools = ["browser_selection_get", "browser_selection_replace", "browser_snippet_save", "browser_snippet_list", "browser_snippet_insert", "browser_snippet_delete"];
+  const tools = ["browser_selection_get", "browser_selection_replace", "browser_selection_stats", "browser_selection_replace_all", "browser_snippet_save", "browser_snippet_list", "browser_snippet_insert", "browser_snippet_update", "browser_snippet_delete", "browser_autofill_save", "browser_autofill_apply", "browser_autofill_list", "browser_autofill_delete"];
   assert.deepEqual(seen.registered.sort(), tools.slice().sort());
   assert.deepEqual(seen.declared.sort(), tools.slice().sort(), "the built-in agent declares the same tools");
   assert.ok(seen.autoBtn, "the 🧩 button is there");
-  assert.deepEqual(seen.extraObjects, ["object", "object"]);
-  // The ⚡ panel lists the Writing group with the commands.
+  assert.deepEqual(seen.extraObjects, ["object", "object", "object"]);
+  // The ⚡ panel lists the Writing and Forms groups with the commands.
   const names = await inPanel(`(() => { document.getElementById("cmdBtn").click(); const out = [...document.querySelectorAll("#cmdList .cmd-item .cmd-name")].map((n) => n.textContent); document.getElementById("cmdClose").click(); return out; })()`);
-  for (const n of ["Formal", "Draft a reply to the selected message", "Save the selection as a snippet", "Insert a snippet"]) assert.ok(names.includes(n), `${n} in the ⚡ panel`);
+  for (const n of ["Formal", "Draft a reply to the selected message", "Statistics of the selection", "Save the selection as a snippet", "Insert a snippet", "Fill this form with my details"]) assert.ok(names.includes(n), `${n} in the ⚡ panel`);
 });
 
 // ── Rewrite ────────────────────────────────────────────────────────────────

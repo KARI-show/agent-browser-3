@@ -19,7 +19,8 @@
   "skin": "paper",
   "features": {
     "rewrite": true,
-    "snippets": true
+    "snippets": true,
+    "autofill": true
   },
   "_note": "Placeholder brand: rename, rewrite the texts and replace the artwork before use. Logo: node browser/brands/make-logo.mjs quill --style quill --bg #f5efe0 --fg #2b2b2e --accent #d4a017"
 }

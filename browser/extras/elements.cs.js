@@ -6,7 +6,7 @@
 //
 // One registration at document_start, branching on document.readyState: the hides go in at once as a
 // <style data-agent-hide> (selector { display: none !important }) so a hidden element never flashes;
-// insertions and edits need the DOM and wait for DOMContentLoaded. Storage changes are followed live.
+// insertions, moves and edits need the DOM and wait for DOMContentLoaded. Storage changes are followed live.
 // Everything is idempotent — an element is never added twice (its data-agent-element id is looked up),
 // an edit applied twice changes nothing — because the panel runs the same code right after it saves.
 //
@@ -153,9 +153,9 @@
 
   // ── Everything that needs the DOM: markers of removed hides, insertions, edits ──
   function applyDom(edits) {
-    var rep = { hidden: 0, marked: 0, added: [], present: [], missingAnchor: [], removed: [], edited: [], missing: [], reverted: [] };
-    var enabled = {};
-    edits.forEach(function (e) { if (on(e)) enabled[e.id] = e; });
+    var rep = { hidden: 0, marked: 0, added: [], present: [], missingAnchor: [], removed: [], edited: [], missing: [], reverted: [], moved: [], unmoved: [], missingMove: [], missingTarget: [], stuck: [] };
+    var enabled = {}, byId = {};
+    edits.forEach(function (e) { byId[e.id] = e; if (on(e)) enabled[e.id] = e; });
     // mode=remove hides: hidden + aria-hidden on the matched elements, marked with the hide's id; unmarked when the hide is off or gone.
     qsa("[data-agent-hidden]").forEach(function (el) {
       var e = enabled[el.getAttribute("data-agent-hidden")];
@@ -179,6 +179,35 @@
       if (e.kind !== "add" || !on(e)) return;
       if (qs('[data-agent-element="' + e.id + '"]')) { rep.present.push(e.id); ensureCss(e); return; }
       insert(e, rep);
+    });
+    // Moves: a move that is off or forgotten puts its element back where it was — `from` names the parent and the next
+    // sibling as they select with the element taken out, so it is taken out first (stuck: no place to go back to; a
+    // reload does it). An enabled move moves the element once; the move's id on it says it is in place.
+    qsa("[data-agent-moved]").forEach(function (el) {
+      var id = el.getAttribute("data-agent-moved");
+      var e = byId[id];
+      if (e && e.kind === "move" && on(e)) return;
+      el.removeAttribute("data-agent-moved");
+      if (!e || !e.from || !e.from.parentSelector) { rep.stuck.push(id); return; }
+      var was = { parent: el.parentNode, next: el.nextSibling };
+      remove(el);
+      var parent = qs(e.from.parentSelector), next = e.from.nextSelector ? qs(e.from.nextSelector) : null;
+      if (parent) { parent.insertBefore(el, next && next.parentNode === parent ? next : null); rep.unmoved.push(id); }
+      else { was.parent.insertBefore(el, was.next); rep.stuck.push(id); }
+    });
+    edits.forEach(function (e) {
+      if (e.kind !== "move" || !on(e)) return;
+      if (qs('[data-agent-moved="' + e.id + '"]')) { rep.moved.push(e.id); return; }
+      var el = qs(e.selector);
+      if (!el) { rep.missingMove.push(e.id); return; }
+      var target = qs(e.targetSelector);
+      if (!target || target === el || el.contains(target)) { rep.missingTarget.push(e.id); return; }
+      if (e.position === "before") target.parentNode.insertBefore(el, target);
+      else if (e.position === "prepend") target.insertBefore(el, target.firstChild);
+      else if (e.position === "append") target.appendChild(el);
+      else target.parentNode.insertBefore(el, target.nextSibling);
+      el.setAttribute("data-agent-moved", e.id);
+      rep.moved.push(e.id);
     });
     edits.forEach(function (e) {
       if (e.kind !== "edit") return;
@@ -206,7 +235,7 @@
     if (!domReady) return { deferred: true, hidden: hidden };
     var rep = applyDom(current);
     rep.hidden = hidden;
-    if (rep.missingAnchor.length || rep.missing.length) scheduleRetries();
+    if (rep.missingAnchor.length || rep.missing.length || rep.missingMove.length || rep.missingTarget.length) scheduleRetries();
     return rep;
   }
   function forHost(all) { var list = all && all[host]; return Array.isArray(list) ? list : []; }

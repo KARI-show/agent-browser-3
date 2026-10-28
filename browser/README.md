@@ -340,18 +340,19 @@ does with a brand:
 
   | extra | what it is | tools | ships in |
   | --- | --- | --- | --- |
-  | `clips` | research clips with their sources, exported as Markdown | `browser_clip_*` | Orbit |
-  | `sessions` | save a window's tabs, restore them later | `browser_session_*` | Orbit |
-  | `rewrite` | rewrite the selected text in place: tone, length, grammar, translation | `browser_selection_*` | Quill |
-  | `snippets` | saved texts with placeholders, inserted into any field | `browser_snippet_*` | Quill |
-  | `checks` | broken-link finder and URL status checks | `browser_check_*` | Beacon |
-  | `uptime` | HTTP status monitors on a schedule, with latency history (on the watcher machinery) | `browser_uptime_*` | Beacon |
-  | `accounts` | named sign-ins per site, switched without logging out (on the cookie tools) | `browser_account_*` | Harbor |
-  | `audit` | identity report: what the site sees, device profile and proxy consistency | `browser_identity_report` | Harbor |
-  | `styles` | restyle a site: inspect an element's styles, apply CSS overrides the site keeps (content script), reset | `browser_style_*` | Palette |
-  | `palette` | the page's colours, fonts and type scale, contrast check, a dark theme for the site (on `styles`) | `browser_palette_*` | Palette |
-  | `elements` | add, edit and hide elements on a page and keep them per site (content script) | `browser_element_*` | Stencil |
-  | `overlay` | layout overlays for review: column and baseline grids, measurements, numbered notes to screenshot | `browser_overlay_*` | Stencil |
+  | `clips` | research clips with their sources: save, search, edit, export as Markdown; a citation (APA, MLA, Harvard, BibTeX) for the page from its metadata | `browser_clip_*` | Orbit |
+  | `sessions` | save a window's tabs, add to a session later, restore; tidy a window (close duplicates or a host's tabs, never the active or pinned ones) | `browser_session_*` | Orbit |
+  | `rewrite` | rewrite the selected text in place: tone, length, grammar, translation; text statistics (words, sentences, reading time, Flesch) of the selection, the field or the page; find & replace inside the focused field (literal or regex, markup kept) | `browser_selection_*` | Quill |
+  | `snippets` | saved texts with placeholders, inserted into any field, edited in place | `browser_snippet_*` | Quill |
+  | `autofill` | named identities (name, email, phone, company, address …, never secrets) that fill a page's form fields by label, name, placeholder and autocomplete, with a dry run and a report of what was and was not filled; nothing is submitted | `browser_autofill_*` | Quill |
+  | `checks` | broken-link finder and URL status checks; an on-page SEO audit (title, description, canonical, robots, headings, alt texts, links, Open Graph, structured data); a speed report from the Performance API (TTFB, DCL, load, FCP, LCP, requests and weight by type, slowest resources); robots.txt and sitemap reading with the first URLs checked | `browser_check_*` | Beacon |
+  | `uptime` | HTTP status monitors on a schedule, with latency history, pause/resume, and an availability report (uptime %, avg/median/p95 latency, flips, longest outage) over a window (on the watcher machinery) | `browser_uptime_*` | Beacon |
+  | `accounts` | named sign-ins per site, switched without logging out, rotated to the next one, exported and imported as a JSON envelope (on the cookie tools; export, import and next ask first) | `browser_account_*` | Harbor |
+  | `audit` | identity report: what the site sees, device profile and proxy consistency; the exit address through the current proxy (Cloudflare trace) against the profile; leak checks in the tab (WebRTC, time zone, languages, screen, webdriver, UA vs client hints) | `browser_identity_*` | Harbor |
+  | `styles` | restyle a site: inspect an element's styles, apply CSS overrides the site keeps (content script), reset; presets (reading, focus, compact, dyslexia, print), a font swap (Google Fonts @import allowed), UserCSS export for Stylus and import | `browser_style_*` | Palette |
+  | `palette` | the page's colours, fonts and type scale, contrast check, a dark theme for the site, colour harmonies from the accent with their contrast and CSS variables (on `styles`) | `browser_palette_*` | Palette |
+  | `elements` | add, edit, hide, move and duplicate elements on a page and keep them per site (content script); a developer hand-off of the edits as Markdown, CSS or a JSON patch | `browser_element_*` | Stencil |
+  | `overlay` | layout overlays for review: column and baseline grids, measurements, numbered notes to screenshot, a design image laid over the page at an opacity, the window resized to phone / tablet / laptop / desktop widths | `browser_overlay_*` | Stencil |
   | `skills` | the playbooks a brand ships with (`browser/playbooks/*.md`), served to the model on demand, a 🎓 tab, one quick command each | `browser_skill_*` | Palette, Stencil |
 
   **Playbooks** make a brand an expert rather than a generalist. Each is a

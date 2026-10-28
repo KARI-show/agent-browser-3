@@ -1,5 +1,5 @@
 // Fakes for unit-testing the Stencil extras (tests/elements.test.mjs, tests/overlay.test.mjs) in node:
-// a chrome with storage.local (promise and callback forms, onChanged) / tabs / scripting (executeScript
+// a chrome with storage.local (promise and callback forms, onChanged) / tabs / windows (get, update recorded) / scripting (executeScript
 // answers by the injected function's name, or records a file injection; content-script registration is
 // recorded), the AgentBrowserTools registry with its helpers (refTarget included) and run(), an
 // AgentExtras registry, the brand flag — and a small DOM: enough of the DOM API (createElement, template
@@ -45,6 +45,14 @@ export function fakeChrome() {
       current: { id: 7, url: "https://www.example.com/page", title: "Example", windowId: 1, active: true },
       async query() { return [chrome.tabs.current]; },
       async get(id) { return { ...chrome.tabs.current, id }; },
+    },
+    // windows.list[id] is the window as chrome.windows.get returns it; update() changes it in place and records the call.
+    windows: {
+      list: { 1: { id: 1, type: "normal", state: "normal", left: 10, top: 20, width: 1600, height: 1000, focused: true } },
+      updates: [],
+      async get(id) { const w = chrome.windows.list[id]; if (!w) throw new Error("No window with id: " + id + "."); return plain(w); },
+      async getCurrent() { return plain(chrome.windows.list[1]); },
+      async update(id, info) { const w = chrome.windows.list[id]; if (!w) throw new Error("No window with id: " + id + "."); chrome.windows.updates.push({ id, info: plain(info) }); Object.assign(w, info); return plain(w); },
     },
     scripting: {
       async executeScript(o) {

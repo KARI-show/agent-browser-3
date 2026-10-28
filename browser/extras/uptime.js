@@ -4,8 +4,10 @@
 // compares "HTTP 200" / "HTTP 503" / "down: <reason>" like any other watcher — so a flip goes through the
 // same notification + Telegram path — and appends { at, ms, code, ok } to the watcher's `history` (a ring
 // of the last 288 checks, 24 h at 5 min). This module adds the tools (declared in
-// browser/host/extras/uptime.ts), the ⏱ Uptime tab and the quick commands; the pure helpers (state,
-// sparkline, uptime %, formatting) are exposed on AgentExtras.uptime for the unit tests.
+// browser/host/extras/uptime.ts: add, list, delete, toggle = pause/resume, report = availability, latency
+// percentiles, flips and the longest outage over the history), the ⏱ Uptime tab and the quick commands;
+// the pure helpers (state, sparkline, uptime %, summarizeHistory, formatting) are exposed on
+// AgentExtras.uptime for the unit tests.
 // Built into extras.js only for brands that switch the feature on. No innerHTML: names and addresses come
 // from storage.
 (function () {
@@ -117,6 +119,105 @@
     return "Uptime monitors (" + ws.length + "):\n" + ws.map(formatMonitor).join("\n");
   }
 
+  // ── reports over the history ────────────────────────────────────────────
+
+  var DEFAULT_REPORT_HOURS = 24, MAX_REPORT_HOURS = 720;
+
+  function pad2(n) { return (n < 10 ? "0" : "") + n; }
+  /** "2026-10-25 14:05" in the browser's local time. */
+  function stamp(ts) {
+    var d = new Date(ts);
+    return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()) + " " + pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+  }
+  function fmtDuration(ms) {
+    if (ms < 60000) return "< 1 min";
+    var m = Math.round(ms / 60000);
+    if (m < 60) return m + " min";
+    var h = Math.floor(m / 60), rest = m % 60;
+    if (h < 24) return h + " h" + (rest ? " " + rest + " min" : "");
+    var d = Math.floor(h / 24);
+    return d + " d" + (h % 24 ? " " + (h % 24) + " h" : "");
+  }
+  /** Nearest-rank percentile of an ascending list; null when empty. */
+  function percentile(sorted, p) {
+    if (!sorted.length) return null;
+    return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1))];
+  }
+  function median(sorted) {
+    var n = sorted.length;
+    if (!n) return null;
+    return n % 2 ? sorted[(n - 1) / 2] : Math.round((sorted[n / 2 - 1] + sorted[n / 2]) / 2);
+  }
+
+  /**
+   * The checks between sinceTs and nowTs summarized: counts, availability %, latency (avg / median / p95 of
+   * the answered checks), the flips between up and down, the outages (a run of failed checks, measured
+   * from its first failed check to the check that saw the site back, or to nowTs while it lasts) and the
+   * longest of them, the last check and the state it leaves. An empty window gives nulls, not errors.
+   */
+  function summarizeHistory(history, sinceTs, nowTs) {
+    sinceTs = Number(sinceTs) || 0;
+    nowTs = nowTs == null ? Date.now() : Number(nowTs);
+    var h = (history || []).filter(function (e) { return e && e.at >= sinceTs && e.at <= nowTs; });
+    var out = { checks: h.length, up: 0, down: 0, availability: null, avgMs: null, medianMs: null, p95Ms: null, flips: 0, outages: 0, longestOutage: null, last: null, state: "unknown" };
+    if (!h.length) return out;
+    var lat = [], cur = null;
+    function close(o) { if (!out.longestOutage || o.ms > out.longestOutage.ms) out.longestOutage = o; }
+    h.forEach(function (e, i) {
+      if (e.ok) out.up++; else out.down++;
+      if (e.code > 0 && e.ms >= 0) lat.push(e.ms);
+      if (i > 0 && !!h[i - 1].ok !== !!e.ok) out.flips++;
+      if (!e.ok) {
+        if (!cur) { cur = { from: e.at, to: null, ms: 0, checks: 0, ongoing: false }; out.outages++; }
+        cur.checks++;
+      } else if (cur) {
+        cur.to = e.at;
+        cur.ms = e.at - cur.from;
+        close(cur);
+        cur = null;
+      }
+    });
+    if (cur) { cur.ongoing = true; cur.ms = Math.max(0, nowTs - cur.from); close(cur); }
+    out.availability = Math.round((out.up / h.length) * 1000) / 10;
+    if (lat.length) {
+      lat.sort(function (a, b) { return a - b; });
+      out.avgMs = Math.round(lat.reduce(function (s, v) { return s + v; }, 0) / lat.length);
+      out.medianMs = median(lat);
+      out.p95Ms = percentile(lat, 0.95);
+    }
+    var last = h[h.length - 1];
+    out.last = { at: last.at, ok: !!last.ok, code: last.code, ms: last.ms };
+    out.state = last.ok ? "up" : "down";
+    return out;
+  }
+
+  function outageLabel(o) {
+    return fmtDuration(o.ms) + " (" + (o.ongoing ? "since " + stamp(o.from) + ", still down" : stamp(o.from) + " → " + stamp(o.to)) + ")";
+  }
+
+  /** The report for the model: a compact table per monitor over the last `hours`. */
+  function formatReport(ws, hours, now) {
+    now = now || Date.now();
+    hours = Number(hours) || DEFAULT_REPORT_HOURS;
+    if (!ws.length) return "No uptime monitors. browser_uptime_add checks a site's HTTP status on a schedule and reports when it goes down or comes back.";
+    var since = now - hours * 3600000;
+    var lines = ["Uptime report, last " + hours + " h (" + ws.length + " monitor" + (ws.length === 1 ? "" : "s") + ", since " + stamp(since) + "):"];
+    ws.forEach(function (w) {
+      var r = summarizeHistory(w.history, since, now);
+      lines.push(w.id + "  " + w.name + "  |  " + w.url + "  |  every " + w.every + " min" + (w.enabled ? "" : "  |  ⏸ paused"));
+      if (!r.checks) {
+        var older = (w.history || []).length;
+        lines.push("  no checks in the last " + hours + " h" + (older ? " (" + older + " older in the history)" : w.enabled ? " — waiting for the first check" : "") + ".");
+        return;
+      }
+      lines.push("  state       " + (r.state === "up" ? "🟢 UP" : "🔴 DOWN") + "  ·  " + (r.last.code ? "HTTP " + r.last.code + " in " + r.last.ms + " ms" : "no answer (timeout or network error)") + "  ·  " + ago(r.last.at));
+      lines.push("  checks      " + r.checks + "  ·  " + r.up + " up, " + r.down + " down  ·  availability " + r.availability + "%");
+      lines.push("  latency     " + (r.avgMs == null ? "no answered check" : "avg " + r.avgMs + " ms  ·  median " + r.medianMs + " ms  ·  p95 " + r.p95Ms + " ms"));
+      lines.push("  incidents   " + r.flips + " flip" + (r.flips === 1 ? "" : "s") + "  ·  " + (r.longestOutage ? r.outages + " outage" + (r.outages === 1 ? "" : "s") + ", longest " + outageLabel(r.longestOutage) : "no outage"));
+    });
+    return lines.join("\n");
+  }
+
   // ── tools ───────────────────────────────────────────────────────────────
 
   /** A status watcher by id or name — never a page watcher. */
@@ -168,6 +269,26 @@
     var w = await findMonitor(a || {});
     await auto().watchDelete({ id: w.id });
     return text("Deleted uptime monitor '" + w.name + "'.");
+  });
+
+  T.register("browser_uptime_toggle", async function (a) {
+    a = a || {};
+    if (!a.id) throw new Error("id is required (browser_uptime_list shows the ids).");
+    var w = await findMonitor({ id: String(a.id).trim() });
+    var enabled = a.enabled == null ? !w.enabled : !!a.enabled;
+    var already = !!w.enabled === enabled;
+    // Same path as the ⏱ tab's pause button: the alarm is cleared, or created again when enabled.
+    await auto().watchToggle(w.id, enabled);
+    var who = "uptime monitor '" + w.name + "' (" + w.id + ")";
+    if (enabled) return text((already ? "The " + who + " was already running" : "Resumed the " + who) + " — checking " + w.url + " every " + w.every + " min, the next check within a minute.");
+    return text((already ? "The " + who + " was already paused" : "Paused the " + who) + " — no checks or notifications until it is resumed (browser_uptime_toggle with enabled=true); the history is kept.");
+  });
+
+  T.register("browser_uptime_report", async function (a) {
+    a = a || {};
+    var hours = Math.max(1, Math.min(MAX_REPORT_HOURS, Math.floor(Number(a.hours)) || DEFAULT_REPORT_HOURS));
+    var ws = a.id ? [await findMonitor({ id: String(a.id).trim() })] : statusWatchers(await auto().loadWatchers());
+    return text(formatReport(ws, hours, Date.now()));
   });
 
   // ── ⏱ Uptime tab ────────────────────────────────────────────────────────
@@ -259,7 +380,9 @@
     { group: "Monitoring", icon: "⏱", name: "Monitor this site's uptime",
       prompt: "Monitor this site's uptime with browser_uptime_add: check it every 5 minutes and tell me what you set up." },
     { group: "Monitoring", icon: "📈", name: "Show my uptime monitors",
-      prompt: "Show my uptime monitors with browser_uptime_list: which are up or down, the last status and latency, and the uptime over the stored history." }
+      prompt: "Show my uptime monitors with browser_uptime_list: which are up or down, the last status and latency, and the uptime over the stored history." },
+    { group: "Monitoring", icon: "📊", name: "Uptime report",
+      prompt: "Give me an uptime report for the last 24 hours with browser_uptime_report: availability, latency (average, median, p95), flips and the longest outage per monitor, and tell me which monitor needs attention." }
   );
 
   // Pure helpers for the unit tests (and other extras).
@@ -276,5 +399,11 @@
     findMonitor: findMonitor,
     addMonitor: addMonitor,
     renderTab: renderTab,
+    DEFAULT_REPORT_HOURS: DEFAULT_REPORT_HOURS,
+    MAX_REPORT_HOURS: MAX_REPORT_HOURS,
+    summarizeHistory: summarizeHistory,
+    fmtDuration: fmtDuration,
+    stamp: stamp,
+    formatReport: formatReport,
   };
 })();

@@ -1,6 +1,7 @@
 // The "checks" extra (browser/extras/checks.js) against fakes of chrome.storage / tabs, of the tool
 // runtime (AgentBrowserTools.register + helpers) and of fetch: the HEAD → GET fallback, redirects,
-// 4xx/5xx, network errors and the timeout; the link collection filter and the reports; the 🔗 tab.
+// 4xx/5xx, network errors and the timeout; the link collection filter and the reports; the 🔗 tab; the
+// SEO audit and the speed report on fixed page data; the sitemap check against fake robots.txt/sitemaps.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -10,7 +11,7 @@ import { fileURLToPath } from "node:url";
 const CHECKS_JS = fileURLToPath(new URL("../browser/extras/checks.js", import.meta.url));
 const plain = (x) => JSON.parse(JSON.stringify(x));
 
-/** A fetch answering from a route table: url → { status, headStatus, headers, redirectTo, fail, hang, delay }. */
+/** A fetch answering from a route table: url → { status, headStatus, headers, redirectTo, fail, hang, delay, body (text) }. */
 function fakeFetch(routes) {
   const calls = [];
   const f = async (url, init) => {
@@ -23,13 +24,13 @@ function fakeFetch(routes) {
     let status = r.status === undefined ? 200 : r.status;
     if (init.method === "HEAD" && r.headStatus) status = r.headStatus;
     const headers = Object.fromEntries(Object.entries(r.headers || {}).map(([k, v]) => [k.toLowerCase(), String(v)]));
-    return { status, ok: status >= 200 && status < 300, url: r.redirectTo || String(url), redirected: !!r.redirectTo, headers: { get: (k) => (k.toLowerCase() in headers ? headers[k.toLowerCase()] : null) }, body: null };
+    return { status, ok: status >= 200 && status < 300, url: r.redirectTo || String(url), redirected: !!r.redirectTo, headers: { get: (k) => (k.toLowerCase() in headers ? headers[k.toLowerCase()] : null) }, body: null, text: async () => (r.body == null ? "" : String(r.body)) };
   };
   f.calls = calls;
   return f;
 }
 
-/** Load checks.js the way extras.js is loaded in the panel, with a brand that has (or lacks) the feature. */
+/** Load checks.js the way extras.js is loaded in the panel, with a brand that has (or lacks) the feature. `page` is what an injected function returns, or a function of the injected function's name. */
 function load({ brand = ["checks"], routes = {}, page = null } = {}) {
   const data = {};
   const tools = {};
@@ -56,8 +57,9 @@ function load({ brand = ["checks"], routes = {}, page = null } = {}) {
         async currentTab() { return { id: 1, url: "https://site.example/page" }; },
         async inTop(func, args) {
           inTopCalls.push({ func: func.name, args: plain(args) });
-          if (!page) throw new Error("This page (chrome://newtab) can't be automated — navigate to a regular website first.");
-          return plain(page);
+          const result = typeof page === "function" ? page(func.name, args) : page;
+          if (!result) throw new Error("This page (chrome://newtab) can't be automated — navigate to a regular website first.");
+          return plain(result);
         },
       },
     },
@@ -124,9 +126,9 @@ test("a brand without the feature gets nothing: no tools, no tab, no commands, n
   assert.equal(ctx.AgentExtras.checks, undefined);
 });
 
-test("with the feature: both tools, the 🔗 tab watching its storage key, the Monitoring quick commands", () => {
+test("with the feature: the five tools, the 🔗 tab watching its storage key, the Monitoring quick commands", () => {
   const { tools, ctx } = load();
-  assert.deepEqual(Object.keys(tools).sort(), ["browser_check_links", "browser_check_url"]);
+  assert.deepEqual(Object.keys(tools).sort(), ["browser_check_links", "browser_check_seo", "browser_check_sitemap", "browser_check_speed", "browser_check_url"]);
   assert.equal(ctx.AgentExtras.tabs.length, 1);
   assert.equal(ctx.AgentExtras.tabs[0].id, "checks");
   assert.equal(ctx.AgentExtras.tabs[0].label, "🔗 Checks");
@@ -136,8 +138,11 @@ test("with the feature: both tools, the 🔗 tab watching its storage key, the M
     ["Monitoring", "Find broken links on this page", false],
     ["Monitoring", "Check this URL's status", true],
     ["Monitoring", "Check the links in the footer and navigation only", false],
+    ["Monitoring", "SEO audit of this page", false],
+    ["Monitoring", "Page speed report", false],
+    ["Monitoring", "Check the sitemap", false],
   ]);
-  for (const c of ctx.AgentExtras.commands) assert.match(c.prompt, /browser_check_(url|links)/, c.name + " names its tool");
+  for (const c of ctx.AgentExtras.commands) assert.match(c.prompt, /browser_check_(url|links|seo|speed|sitemap)/, c.name + " names its tool");
 });
 
 // ── browser_check_url ──────────────────────────────────────────────────────
@@ -401,4 +406,297 @@ test("formatLinkReport caps the redirect list and omits sections that are empty"
   assert.doesNotMatch(out, /Broken:/);
   const one = X.formatLinkReport({ url: "https://s.example/", title: "One", selector: "footer", results: [{ url: "https://s.example/x", status: 200, ok: true, ms: 3, text: "X" }] });
   assert.equal(one, 'Checked 1 link on "One" (https://s.example/) within footer: 1 ok, 0 redirected, 0 broken.');
+});
+
+// ── browser_check_seo ──────────────────────────────────────────────────────
+
+const SEO_GOOD = {
+  url: "https://site.example/page", host: "site.example",
+  title: "Beacon — page monitor and browser agent for teams", // 49 chars
+  description: "Beacon watches pages and sites for you: content changes, uptime and broken links, with notifications and Telegram.", // 114 chars
+  canonical: "https://site.example/page", canonicalHost: "site.example",
+  robots: "index, follow", viewport: true, lang: "en",
+  h1: ["Welcome to Beacon"], h1Count: 1, h2: 3, h3: 4,
+  images: { total: 4, noAlt: 0, samples: [] },
+  links: { total: 20, internal: 15, external: 5, nofollow: 2 },
+  og: { title: true, description: true, image: true }, twitterCard: "summary_large_image",
+  ld: { count: 1, types: ["Organization", "WebSite"] },
+  words: 850, hreflang: 2,
+};
+const SEO_BAD = {
+  url: "https://site.example/bad", host: "site.example",
+  title: "Home", description: null,
+  canonical: "https://other.example/bad", canonicalHost: "other.example",
+  robots: "noindex, nofollow", viewport: false, lang: "",
+  h1: ["One", "Two"], h1Count: 2, h2: 0, h3: 0,
+  images: { total: 9, noAlt: 7, samples: ["a.png", "b.png", "c.png", "d.png", "e.png"] },
+  links: { total: 0, internal: 0, external: 0, nofollow: 0 },
+  og: { title: true, description: false, image: false }, twitterCard: null,
+  ld: { count: 0, types: [] }, words: 120, hreflang: 0,
+};
+
+test("seoFindings: a well-made page passes all 12 checks; the details carry the numbers", () => {
+  const { X } = load();
+  const f = plain(X.seoFindings(SEO_GOOD));
+  assert.equal(f.length, 12);
+  assert.deepEqual(f.map((x) => x.name), ["title", "meta description", "canonical", "meta robots", "viewport", "html lang", "headings", "images", "links", "social cards", "structured data", "content"]);
+  assert.ok(f.every((x) => x.ok), JSON.stringify(f.filter((x) => !x.ok)));
+  assert.equal(f[0].detail, '"Beacon — page monitor and browser agent for teams" (49 chars)');
+  assert.equal(f[1].detail, '114 chars: "Beacon watches pages and sites for you: content changes, uptime and broken links, with notification…"', "the quoted description is cut at 100 chars");
+  assert.equal(f[2].detail, "https://site.example/page");
+  assert.equal(f[3].detail, "index, follow");
+  assert.equal(f[5].detail, "lang=en, 2 hreflang alternates");
+  assert.equal(f[6].detail, '1 h1: "Welcome to Beacon"; 3 h2s, 4 h3s');
+  assert.equal(f[7].detail, "4 images, all with alt");
+  assert.equal(f[8].detail, "20 http(s) links: 15 internal, 5 external, 2 nofollow");
+  assert.equal(f[9].detail, "Open Graph complete (title, description, image); Twitter card summary_large_image");
+  assert.equal(f[10].detail, "1 ld+json block: Organization, WebSite");
+  assert.equal(f[11].detail, "850 words of visible text");
+});
+
+test("seoFindings: every warning fires on a bad page — short title, missing description, canonical on another host, noindex, no viewport/lang, two h1, missing alt, no links, incomplete Open Graph, no ld+json, thin text", () => {
+  const { X } = load();
+  const f = plain(X.seoFindings(SEO_BAD));
+  assert.equal(f.length, 12);
+  assert.ok(f.every((x) => !x.ok), JSON.stringify(f.filter((x) => x.ok)));
+  assert.equal(f[0].detail, '"Home" (4 chars, short — aim for 30–60)');
+  assert.equal(f[1].detail, "missing");
+  assert.equal(f[2].detail, "https://other.example/bad — points to another host (other.example)");
+  assert.equal(f[3].detail, "noindex, nofollow — search engines are told not to index/follow this page");
+  assert.equal(f[4].detail, "no meta viewport — not mobile-friendly");
+  assert.equal(f[5].detail, "missing");
+  assert.equal(f[6].detail, '2 h1s — keep to one: "One", "Two"; 0 h2s, 0 h3s');
+  assert.equal(f[7].detail, "9 images, 7 without alt: a.png, b.png, c.png, d.png, e.png, …");
+  assert.equal(f[8].detail, "0 http(s) links: 0 internal, 0 external, 0 nofollow");
+  assert.equal(f[9].detail, "Open Graph missing og:description, og:image; Twitter card none");
+  assert.equal(f[10].detail, "none (no ld+json)");
+  assert.equal(f[11].detail, "120 words of visible text — thin, under 300");
+  // The in-between cases: a long title, a long description, no h1, a canonical without a host, an empty page object.
+  const long = plain(X.seoFindings({ ...SEO_GOOD, title: "x".repeat(61), description: "y".repeat(161), h1: [], h1Count: 0, canonical: "/page", canonicalHost: null }));
+  assert.deepEqual([long[0].ok, long[1].ok, long[2].ok, long[6].ok], [false, false, true, false]);
+  assert.match(long[0].detail, /\(61 chars, long — aim for 30–60\)$/);
+  assert.match(long[1].detail, /^161 chars, long — aim for 70–160: "y{99}…"$/);
+  assert.equal(long[6].detail, "0 h1s — add one; 3 h2s, 4 h3s");
+  const empty = plain(X.seoFindings({}));
+  assert.equal(empty.length, 12);
+  assert.deepEqual([empty[0].detail, empty[1].detail, empty[2].detail, empty[3].detail], ["missing", "missing", "missing", "none (indexable)"]);
+  assert.equal(empty[3].ok, true, "no robots meta is fine");
+});
+
+test("browser_check_seo: one injected read of the top frame, the report with ✓/⚠ lines and the verdict", async () => {
+  const { run, inTopCalls } = load({ page: (func) => (func === "readSeo" ? SEO_GOOD : null) });
+  const out = await run("browser_check_seo", {});
+  assert.deepEqual(inTopCalls, [{ func: "readSeo", args: [] }]);
+  const lines = out.split("\n");
+  assert.equal(lines[0], "SEO audit of https://site.example/page — 12 checks: 12 ok, 0 warnings.");
+  assert.equal(lines.length, 13);
+  assert.ok(lines.slice(1).every((l) => l.startsWith("✓ ")), out);
+  const bad = load({ page: (func) => (func === "readSeo" ? SEO_BAD : null) });
+  const report = await bad.run("browser_check_seo", {});
+  assert.equal(report.split("\n")[0], "SEO audit of https://site.example/bad — 12 checks: 0 ok, 12 warnings.");
+  assert.match(report, /\n⚠ title: "Home" \(4 chars, short — aim for 30–60\)\n⚠ meta description: missing\n/);
+  const mixed = load({ page: () => ({ ...SEO_GOOD, viewport: false }) });
+  assert.match(await mixed.run("browser_check_seo", {}), /12 checks: 11 ok, 1 warning\.\n/);
+  await assert.rejects(load({ page: null }).run("browser_check_seo", {}), /can't be automated/);
+});
+
+// ── browser_check_speed ────────────────────────────────────────────────────
+
+const PERF = {
+  url: "https://site.example/page", navType: "reload",
+  ttfb: 950.4, domInteractive: 800, dcl: 900.2, load: 1400, fp: 500, fcp: 520.6, lcp: 900,
+  docSize: 30 * 1024, resourceCount: 7,
+  resources: [
+    { name: "https://site.example/app.js", initiatorType: "script", duration: 820, transferSize: 310 * 1024, encodedBodySize: 900000 },
+    { name: "https://cdn.example/lib.min.js?v=2", initiatorType: "link", duration: 100, transferSize: 0, encodedBodySize: 0 },
+    { name: "https://site.example/style.css", initiatorType: "link", duration: 60, transferSize: 20 * 1024, encodedBodySize: 50000 },
+    { name: "https://site.example/hero.webp", initiatorType: "css", duration: 300, transferSize: 400 * 1024 },
+    { name: "https://site.example/fonts/inter.woff2", initiatorType: "css", duration: 120, transferSize: 90 * 1024 },
+    { name: "https://api.example/data", initiatorType: "fetch", duration: 450, transferSize: 5 * 1024 },
+    { name: "https://site.example/manifest.json", initiatorType: "other", duration: 10, transferSize: 1024 },
+  ],
+};
+
+test("speedReport: flags, timings in ms, resources grouped by initiator type / extension in kB, the 5 slowest", () => {
+  const { X } = load();
+  const lines = X.speedReport(PERF).split("\n");
+  assert.deepEqual(lines.slice(0, 5), [
+    "Page speed of https://site.example/page (reload) — 4 checks: 3 ok, 1 warning.",
+    "⚠ TTFB: 950 ms (over 800 ms)",
+    "✓ load: 1400 ms",
+    "✓ transfer: 856 kB; 1 cross-origin resource without a size (no Timing-Allow-Origin)",
+    "✓ requests: 8",
+  ]);
+  assert.equal(lines[5], "Timing: TTFB 950 ms · DOM interactive 800 ms · DOMContentLoaded 900 ms · load 1400 ms · first paint 500 ms · first contentful paint 521 ms · LCP 900 ms");
+  assert.equal(lines[6], "Resources: 7 + the document (30 kB), 856 kB in all: script 2 (310 kB), css 1 (20 kB), img 1 (400 kB), font 1 (90 kB), xhr/fetch 1 (5.0 kB), other 1 (1.0 kB)");
+  assert.deepEqual(lines.slice(7), [
+    "Slowest resources:",
+    "  820 ms  310 kB  https://site.example/app.js",
+    "  450 ms  5.0 kB  https://api.example/data",
+    "  300 ms  400 kB  https://site.example/hero.webp",
+    "  120 ms  90 kB  https://site.example/fonts/inter.woff2",
+    "  100 ms  0.0 kB  https://cdn.example/lib.min.js?v=2",
+  ]);
+  // Grouping: the initiator decides for xhr/fetch, the extension for fonts and images loaded from CSS, preloads by extension.
+  assert.deepEqual(PERF.resources.map(X.resourceGroup), ["script", "script", "css", "img", "font", "xhr/fetch", "other"]);
+  assert.equal(X.resourceGroup({ name: "https://x/bg.png", initiatorType: "css" }), "img");
+  assert.equal(X.resourceGroup({ name: "https://x/a.b.c/no-extension", initiatorType: "xmlhttprequest" }), "xhr/fetch");
+  assert.equal(X.resourceGroup({ name: "https://x/track", initiatorType: "beacon" }), "xhr/fetch");
+  assert.equal(X.resourceGroup({ name: "https://x/video.mp4", initiatorType: "video" }), "other");
+  assert.equal(X.resourceGroup({ name: "not a url", initiatorType: "img" }), "img");
+});
+
+test("speedReport: a heavy page trips load, transfer and request counts; a page still loading, without paints or LCP", () => {
+  const { X } = load();
+  const heavy = X.speedReport({
+    url: "https://heavy.example/", navType: "navigate", ttfb: 100, domInteractive: 2000, dcl: 2500, load: 5000, fp: 900, fcp: 950, lcp: 4100,
+    docSize: 0, resourceCount: 150,
+    resources: [1, 2, 3].map((i) => ({ name: `https://heavy.example/big${i}.jpg`, initiatorType: "img", duration: 1000 * i, transferSize: 1.5 * 1048576 })),
+  }).split("\n");
+  assert.deepEqual(heavy.slice(0, 5), [
+    "Page speed of https://heavy.example/ (navigate) — 4 checks: 1 ok, 3 warnings.",
+    "✓ TTFB: 100 ms",
+    "⚠ load: 5000 ms (over 3000 ms)",
+    "⚠ transfer: 4608 kB (over 3072 kB)",
+    "⚠ requests: 151 (over 100); the first 3 resources are detailed",
+  ]);
+  assert.equal(heavy[6], "Resources: 3 + the document (0.0 kB), 4608 kB in all: script 0 (0.0 kB), css 0 (0.0 kB), img 3 (4608 kB), font 0 (0.0 kB), xhr/fetch 0 (0.0 kB), other 0 (0.0 kB)");
+  assert.equal(heavy.length, 11, "three slowest lines");
+  const loading = X.speedReport({ url: "https://x.example/", ttfb: 200, domInteractive: 300, dcl: 0, load: 0, fp: null, fcp: null, lcp: null, docSize: 2048, resourceCount: 0, resources: [] }).split("\n");
+  assert.equal(loading[0], "Page speed of https://x.example/ (navigate) — 4 checks: 4 ok, 0 warnings.");
+  assert.equal(loading[2], "✓ load: load event not fired yet");
+  assert.equal(loading[5], "Timing: TTFB 200 ms · DOM interactive 300 ms · DOMContentLoaded 0 ms · load not yet · first paint n/a · first contentful paint n/a · LCP n/a");
+  assert.equal(loading.length, 7, "no slowest section without resources");
+});
+
+test("browser_check_speed: the Performance API is read once in the top frame (resource cap passed), the report comes back", async () => {
+  const { run, inTopCalls } = load({ page: (func) => (func === "readPerf" ? PERF : null) });
+  const out = await run("browser_check_speed", {});
+  assert.deepEqual(inTopCalls, [{ func: "readPerf", args: [500] }]);
+  assert.match(out, /^Page speed of https:\/\/site\.example\/page \(reload\) — 4 checks: 3 ok, 1 warning\.\n⚠ TTFB: 950 ms/);
+  await assert.rejects(load({ page: null }).run("browser_check_speed", {}), /can't be automated/);
+  await assert.rejects(load({ page: () => ({}) }).run("browser_check_speed", {}), /No timing data/);
+});
+
+// ── browser_check_sitemap ──────────────────────────────────────────────────
+
+test("parseSitemap: a urlset (entities, CDATA, duplicates, image:loc left out), a sitemapindex, namespaced tags, a text sitemap, garbage", () => {
+  const { X } = load();
+  const urlset = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
+  <url><loc>https://site.example/</loc><lastmod>2026-01-01</lastmod></url>
+  <url><loc> https://site.example/a?x=1&amp;y=2 </loc><image:image><image:loc>https://site.example/a.jpg</image:loc></image:image></url>
+  <url><loc><![CDATA[https://site.example/b]]></loc></url>
+  <url><loc>https://site.example/</loc></url>
+</urlset>`;
+  assert.deepEqual(plain(X.parseSitemap(urlset)), { index: false, locs: ["https://site.example/", "https://site.example/a?x=1&y=2", "https://site.example/b"] });
+  const index = `<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <sitemap><loc>https://site.example/sitemap-1.xml</loc></sitemap>
+  <sitemap>
+    <loc>https://site.example/sitemap-2.xml</loc>
+  </sitemap>
+</sitemapindex>`;
+  assert.deepEqual(plain(X.parseSitemap(index)), { index: true, locs: ["https://site.example/sitemap-1.xml", "https://site.example/sitemap-2.xml"] });
+  assert.deepEqual(plain(X.parseSitemap('<sm:urlset xmlns:sm="http://www.sitemaps.org/schemas/sitemap/0.9"><sm:url><sm:loc>https://s.example/n</sm:loc></sm:url></sm:urlset>')), { index: false, locs: ["https://s.example/n"] });
+  assert.deepEqual(plain(X.parseSitemap("https://t.example/1\n# comment\nhttps://t.example/2\r\n")), { index: false, locs: ["https://t.example/1", "https://t.example/2"] });
+  assert.deepEqual(plain(X.parseSitemap("<html><body>Not found</body></html>")), { index: false, locs: [] });
+  assert.deepEqual(plain(X.parseSitemap("")), { index: false, locs: [] });
+  assert.deepEqual(plain(X.parseSitemap(undefined)), { index: false, locs: [] });
+});
+
+test("parseRobots: Sitemap: lines (any case, deduplicated), Disallow rules with a path, comments ignored", () => {
+  const { X } = load();
+  const r = plain(X.parseRobots("User-agent: *\nDisallow: /admin # private\nDisallow:\nAllow: /\ndisallow: /tmp/\nSITEMAP: https://s.example/sitemap.xml\nSitemap: https://s.example/sitemap.xml\nSitemap: https://s.example/news.xml\n# Disallow: /not-a-rule\n"));
+  assert.deepEqual(r, { sitemaps: ["https://s.example/sitemap.xml", "https://s.example/news.xml"], disallow: 2 });
+  assert.deepEqual(plain(X.parseRobots("")), { sitemaps: [], disallow: 0 });
+});
+
+const SITEMAP_ROUTES = {
+  "https://site.example/robots.txt": { body: "User-agent: *\nDisallow: /admin\nDisallow: /tmp/\nDisallow:\nSitemap: https://site.example/sitemap-news.xml\n" },
+  "https://site.example/sitemap.xml": { headers: { "content-type": "application/xml" }, body: `<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+<sitemap><loc>https://site.example/sitemap-pages.xml</loc></sitemap>
+<sitemap><loc>https://site.example/sitemap-posts.xml</loc></sitemap>
+<sitemap><loc>https://site.example/sitemap-old.xml</loc></sitemap>
+</sitemapindex>` },
+  "https://site.example/sitemap-news.xml": { body: "<urlset><url><loc>https://site.example/news/1</loc></url><url><loc>https://site.example/news/2</loc></url></urlset>" },
+  "https://site.example/sitemap-pages.xml": { body: "<urlset>" + ["/", "/about", "/missing", "/moved"].map((p) => `<url><loc>https://site.example${p}</loc></url>`).join("") + "</urlset>" },
+  "https://site.example/sitemap-posts.xml": { body: "<urlset>" + Array.from({ length: 12 }, (_, i) => `<url><loc>https://site.example/posts/${i + 1}</loc></url>`).join("") + "</urlset>" },
+  "https://site.example/news/1": {}, "https://site.example/news/2": {},
+  "https://site.example/": {}, "https://site.example/about": {},
+  "https://site.example/missing": { status: 404 },
+  "https://site.example/moved": { redirectTo: "https://site.example/new" },
+  "https://site.example/posts/1": {}, "https://site.example/posts/2": {}, "https://site.example/posts/3": {}, "https://site.example/posts/4": {}, "https://site.example/posts/5": {},
+};
+
+test("browser_check_sitemap: robots.txt, the index and its nested sitemaps plus the one robots names, the URL list, the first 10 checked", async () => {
+  const { run, fetch } = load({ routes: SITEMAP_ROUTES });
+  const out = await run("browser_check_sitemap", {});
+  const lines = out.split("\n");
+  assert.deepEqual(lines.slice(0, 9), [
+    "Sitemap check of https://site.example:",
+    "robots.txt: 2 Disallow rules, 1 Sitemap: line (https://site.example/sitemap-news.xml)",
+    "Sitemaps: 4 found, 1 not readable:",
+    "  ✓ https://site.example/sitemap.xml  —  index of 3 sitemaps",
+    "  ✓ https://site.example/sitemap-news.xml  —  2 URLs",
+    "  ✓ https://site.example/sitemap-pages.xml  —  4 URLs",
+    "  ✓ https://site.example/sitemap-posts.xml  —  12 URLs",
+    "  ✗ https://site.example/sitemap-old.xml  —  HTTP 404",
+    "URLs listed: 18 — the first 10:",
+  ]);
+  assert.deepEqual(lines.slice(9, 19), ["https://site.example/news/1", "https://site.example/news/2", "https://site.example/", "https://site.example/about", "https://site.example/missing", "https://site.example/moved", "https://site.example/posts/1", "https://site.example/posts/2", "https://site.example/posts/3", "https://site.example/posts/4"].map((u) => "  " + u));
+  assert.equal(lines[19], "Checked the first 10: 8 ok, 1 redirected, 1 broken.");
+  assert.match(lines.slice(20).join("\n"), /^Broken:\n  ✗ 404  https:\/\/site\.example\/missing  —  \d+ ms\nRedirected:\n  ↪ 200  https:\/\/site\.example\/moved → https:\/\/site\.example\/new  —  \d+ ms$/);
+  // Texts are fetched with GET, the listed URLs checked with HEAD (the module's usual check), each sitemap once.
+  assert.deepEqual(fetch.calls.filter((c) => c.method === "GET").map((c) => c.url), ["https://site.example/robots.txt", "https://site.example/sitemap.xml", "https://site.example/sitemap-news.xml", "https://site.example/sitemap-pages.xml", "https://site.example/sitemap-posts.xml", "https://site.example/sitemap-old.xml"]);
+  assert.equal(fetch.calls.filter((c) => c.method === "HEAD").length, 10);
+  assert.equal(fetch.calls.filter((c) => c.url === "https://site.example/posts/5").length, 0, "only the first max URLs are checked");
+});
+
+test("browser_check_sitemap: max limits the checks, url picks the site or names a sitemap directly, a bad address is refused", async () => {
+  const { run, fetch } = load({ routes: SITEMAP_ROUTES });
+  let out = await run("browser_check_sitemap", { url: "site.example/some/page", max: 3 });
+  assert.match(out, /\nURLs listed: 18 — the first 10:\n/);
+  assert.match(out, /\nChecked the first 3: 3 ok, 0 redirected, 0 broken\.$/);
+  assert.equal(fetch.calls.filter((c) => c.method === "HEAD").length, 3);
+  fetch.calls.length = 0;
+  out = await run("browser_check_sitemap", { url: "https://site.example/sitemap-news.xml", max: 100 });
+  assert.match(out, /\nSitemaps: 4 found, 1 not readable:\n  ✓ https:\/\/site\.example\/sitemap-news\.xml  —  2 URLs\n  ✓ https:\/\/site\.example\/sitemap\.xml  —  index of 3 sitemaps\n/, "the address given comes first; named again by robots.txt, it is listed once");
+  assert.match(out, /\nChecked the first 18: /, "max is capped at 50; 18 are listed");
+  assert.equal(fetch.calls.filter((c) => c.url === "https://site.example/sitemap-news.xml").length, 1, "a sitemap named twice is read once");
+  await assert.rejects(run("browser_check_sitemap", { url: "ftp://site.example/" }), /Not an http\(s\) address/);
+});
+
+test("browser_check_sitemap: a missing robots.txt and sitemap are reported, not thrown; an unreachable robots.txt; a page instead of a sitemap", async () => {
+  const none = load({ routes: {} });
+  assert.equal(await none.run("browser_check_sitemap", { url: "https://nothing.example/" }), [
+    "Sitemap check of https://nothing.example:",
+    "robots.txt: missing (HTTP 404)",
+    "Sitemaps: 0 found, 1 not readable:",
+    "  ✗ https://nothing.example/sitemap.xml  —  HTTP 404",
+    "No sitemap to check — pass url with the sitemap's address if the site keeps it elsewhere.",
+  ].join("\n"));
+  const dead = load({ routes: { "https://dead.example/robots.txt": { fail: true }, "https://dead.example/sitemap.xml": { fail: true } } });
+  assert.equal(await dead.run("browser_check_sitemap", { url: "https://dead.example/" }), [
+    "Sitemap check of https://dead.example:",
+    "robots.txt: unreachable (Failed to fetch)",
+    "Sitemaps: 0 found, 1 not readable:",
+    "  ✗ https://dead.example/sitemap.xml  —  Failed to fetch",
+    "No sitemap to check — pass url with the sitemap's address if the site keeps it elsewhere.",
+  ].join("\n"));
+  const html = load({ routes: { "https://html.example/robots.txt": { body: "User-agent: *\nDisallow:\n" }, "https://html.example/sitemap.xml": { headers: { "content-type": "text/html; charset=utf-8" }, body: "<html><body>Soft 404</body></html>" } } });
+  const out = await html.run("browser_check_sitemap", { url: "https://html.example/" });
+  assert.match(out, /\nrobots\.txt: 0 Disallow rules, 0 Sitemap: lines\nSitemaps: 0 found, 1 not readable:\n  ✗ https:\/\/html\.example\/sitemap\.xml  —  not a sitemap \(text\/html\)\n/);
+  const gz = load({ routes: { "https://gz.example/robots.txt": { body: "Sitemap: https://gz.example/sitemap.xml.gz\n" }, "https://gz.example/sitemap.xml": { body: "<urlset><url><loc>https://gz.example/</loc></url></urlset>" }, "https://gz.example/": {} } });
+  assert.match(await gz.run("browser_check_sitemap", { url: "https://gz.example/" }), /\nSitemaps: 1 found, 1 not readable:\n  ✓ https:\/\/gz\.example\/sitemap\.xml  —  1 URL\n  ✗ https:\/\/gz\.example\/sitemap\.xml\.gz  —  compressed \(\.gz\) — not read\nURLs listed: 1:\n  https:\/\/gz\.example\/\nChecked the first 1: 1 ok, 0 redirected, 0 broken\.$/);
+});
+
+test("readSitemaps: an index with more than 5 nested sitemaps reads 5 and says how many were left", async () => {
+  const routes = { "https://big.example/sitemap.xml": { body: "<sitemapindex>" + Array.from({ length: 8 }, (_, i) => `<sitemap><loc>https://big.example/s${i}.xml</loc></sitemap>`).join("") + "</sitemapindex>" } };
+  for (let i = 0; i < 8; i++) routes[`https://big.example/s${i}.xml`] = { body: `<urlset><url><loc>https://big.example/p${i}</loc></url></urlset>` };
+  const { X } = load({ routes });
+  const r = plain(await X.readSitemaps(["https://big.example/sitemap.xml"]));
+  assert.equal(r.sitemaps.length, 6);
+  assert.deepEqual([r.sitemaps[0].index, r.sitemaps[0].count, r.sitemaps[0].skipped], [true, 8, 3]);
+  assert.deepEqual(r.locs, ["https://big.example/p0", "https://big.example/p1", "https://big.example/p2", "https://big.example/p3", "https://big.example/p4"]);
+  assert.match(X.formatSitemapReport({ origin: "https://big.example", robots: { ok: true, status: 200, sitemaps: [], disallow: 0 }, sitemaps: r.sitemaps, locs: r.locs, checked: [] }), /index of 8 sitemaps, 3 not read \(limit 5\)\n/);
 });

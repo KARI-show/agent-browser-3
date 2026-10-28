@@ -1,7 +1,8 @@
 // The "uptime" extra: the status mode of the watchers (browser/extension/automation.js, run in the
 // service worker with a fake fetch — baseline, flips, the history ring) and the tools, formatting and
 // ⏱ tab of browser/extras/uptime.js, against fakes of chrome.storage / alarms / tabs / notifications
-// and of the tool runtime. Same harness shape as tests/automation.test.mjs.
+// and of the tool runtime; the pause/resume tool and the history report (summarizeHistory on fixed
+// histories). Same harness shape as tests/automation.test.mjs.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -294,12 +295,12 @@ test("a brand without the feature gets nothing", () => {
   assert.equal(X.uptime, undefined);
 });
 
-test("registration: the three tools, the ⏱ tab on the watchers key, the Monitoring quick commands", () => {
+test("registration: the five tools, the ⏱ tab on the watchers key, the Monitoring quick commands", () => {
   const { T, X } = load();
-  assert.deepEqual(Object.keys(T.tools).sort(), ["browser_uptime_add", "browser_uptime_delete", "browser_uptime_list"]);
+  assert.deepEqual(Object.keys(T.tools).sort(), ["browser_uptime_add", "browser_uptime_delete", "browser_uptime_list", "browser_uptime_report", "browser_uptime_toggle"]);
   assert.deepEqual(plain(X.tabs.map((t) => [t.id, t.label, t.storageKeys])), [["uptime", "⏱ Uptime", ["agentWatchers"]]]);
-  assert.deepEqual(plain(X.commands.map((c) => [c.group, c.name, !!c.partial])), [["Monitoring", "Monitor this site's uptime", false], ["Monitoring", "Show my uptime monitors", false]]);
-  for (const c of X.commands) assert.match(c.prompt, /browser_uptime_(add|list)/);
+  assert.deepEqual(plain(X.commands.map((c) => [c.group, c.name, !!c.partial])), [["Monitoring", "Monitor this site's uptime", false], ["Monitoring", "Show my uptime monitors", false], ["Monitoring", "Uptime report", false]]);
+  for (const c of X.commands) assert.match(c.prompt, /browser_uptime_(add|list|report)/);
 });
 
 test("browser_uptime_add: a status watcher every 5 min expecting 200, the id in the answer; the current tab as the default URL; clamps", async () => {
@@ -489,4 +490,145 @@ test("the ⏱ tab: empty state, the list with dots and sparklines, Check now / P
   content = fakeEl("div");
   await tab.render(content, pctx);
   assert.match(textOf(content), /No uptime monitors yet\./);
+});
+
+// ── browser_uptime_toggle ──────────────────────────────────────────────────
+
+test("browser_uptime_toggle: pauses (the alarm goes) and resumes (the alarm is back) a monitor, flips without `enabled`, says when nothing changes; id required; page watchers refused", async () => {
+  const { run, data, alarms, A } = load();
+  const out = await run("browser_uptime_add", { url: "https://site.example/", name: "Site" });
+  const id = /id: (wch_\w+)/.exec(out)[1];
+  assert.ok(alarms.has("watch:" + id));
+  assert.equal(await run("browser_uptime_toggle", { id }), `Paused the uptime monitor 'Site' (${id}) — no checks or notifications until it is resumed (browser_uptime_toggle with enabled=true); the history is kept.`);
+  assert.equal(data.agentWatchers[id].enabled, false);
+  assert.equal(alarms.has("watch:" + id), false, "a paused monitor has no alarm, as the watcher machinery expects");
+  assert.equal(await run("browser_uptime_toggle", { id }), `Resumed the uptime monitor 'Site' (${id}) — checking https://site.example/ every 5 min, the next check within a minute.`);
+  assert.equal(data.agentWatchers[id].enabled, true);
+  assert.deepEqual(plain(alarms.get("watch:" + id)), { name: "watch:" + id, periodInMinutes: 5, delayInMinutes: 0.5 });
+  assert.match(await run("browser_uptime_toggle", { id, enabled: true }), /^The uptime monitor 'Site' \(wch_\w+\) was already running — checking https:\/\/site\.example\/ every 5 min/);
+  assert.equal(data.agentWatchers[id].enabled, true);
+  assert.match(await run("browser_uptime_toggle", { id, enabled: false }), /^Paused the uptime monitor 'Site'/);
+  assert.match(await run("browser_uptime_toggle", { id, enabled: false }), /^The uptime monitor 'Site' \(wch_\w+\) was already paused — no checks/);
+  assert.equal(data.agentWatchers[id].enabled, false);
+  assert.equal(alarms.has("watch:" + id), false);
+  assert.match(await run("browser_uptime_list", {}), /⏸ paused/);
+  await assert.rejects(run("browser_uptime_toggle", {}), /id is required/);
+  await A.watchCreate({ url: "https://page.example/", name: "Page" }, null);
+  const pageId = Object.keys(data.agentWatchers).find((k) => k !== id);
+  await assert.rejects(run("browser_uptime_toggle", { id: pageId }), /is a page watcher, not an uptime monitor/);
+  assert.equal(data.agentWatchers[pageId].enabled, true, "the page watcher is untouched");
+  await assert.rejects(run("browser_uptime_toggle", { id: "wch_nope" }), /No uptime monitor with id wch_nope/);
+});
+
+// ── summarizeHistory / browser_uptime_report ───────────────────────────────
+
+const MIN = 60000;
+/** A history entry `minAgo` minutes before `now`; a failed check has code 0 unless given. */
+const entry = (now, minAgo, ok, ms, code) => ({ at: now - minAgo * MIN, ok, ms, code: code === undefined ? (ok ? 200 : 0) : code });
+/** 12 checks over an hour: up, up, an outage spanning two checks (503 then a timeout), up, up, one timeout, then up. */
+const sampleHistory = (now) => [
+  entry(now, 60, true, 100), entry(now, 55, true, 120), entry(now, 50, false, 30, 503), entry(now, 45, false, 0), entry(now, 40, true, 90), entry(now, 35, true, 200),
+  entry(now, 30, false, 0), entry(now, 25, true, 110), entry(now, 20, true, 95), entry(now, 15, true, 130), entry(now, 10, true, 105), entry(now, 5, true, 115),
+];
+
+test("summarizeHistory: availability, latency avg/median/p95 of the answered checks, flips, outages (one spanning two samples), the longest, the last state", () => {
+  const { U } = load();
+  const now = 1700000000000;
+  const r = plain(U.summarizeHistory(sampleHistory(now), now - 2 * 3600000, now));
+  assert.deepEqual(r, {
+    checks: 12, up: 9, down: 3, availability: 75,
+    avgMs: 110, medianMs: 108, p95Ms: 200, // the 503 answered in 30 ms counts, the timeouts (code 0) do not
+    flips: 4, outages: 2,
+    longestOutage: { from: now - 50 * MIN, to: now - 40 * MIN, ms: 10 * MIN, checks: 2, ongoing: false },
+    last: { at: now - 5 * MIN, ok: true, code: 200, ms: 115 },
+    state: "up",
+  });
+  // Only the window counts: from 32 minutes ago there is one timeout, one flip, a 5 min outage.
+  const w = plain(U.summarizeHistory(sampleHistory(now), now - 32 * MIN, now));
+  assert.deepEqual([w.checks, w.up, w.down, w.availability, w.flips, w.outages], [6, 5, 1, 83.3, 1, 1]);
+  assert.deepEqual(w.longestOutage, { from: now - 30 * MIN, to: now - 25 * MIN, ms: 5 * MIN, checks: 1, ongoing: false });
+  assert.deepEqual([w.avgMs, w.medianMs, w.p95Ms], [111, 110, 130]);
+  // An outage that has not ended runs to nowTs and says so.
+  const down = plain(U.summarizeHistory([entry(now, 10, true, 100), entry(now, 5, false, 0), entry(now, 2, false, 0)], 0, now));
+  assert.deepEqual([down.checks, down.availability, down.flips, down.outages, down.state], [3, 33.3, 1, 1, "down"]);
+  assert.deepEqual(down.longestOutage, { from: now - 5 * MIN, to: null, ms: 5 * MIN, checks: 2, ongoing: true });
+  assert.deepEqual([down.avgMs, down.medianMs, down.p95Ms], [100, 100, 100]);
+  assert.deepEqual(down.last, { at: now - 2 * MIN, ok: false, code: 0, ms: 0 });
+  // All down and never answered: no latency.
+  const silent = plain(U.summarizeHistory([entry(now, 3, false, 0), entry(now, 1, false, 0)], 0, now));
+  assert.deepEqual([silent.availability, silent.avgMs, silent.medianMs, silent.p95Ms, silent.flips, silent.outages, silent.longestOutage.ms], [0, null, null, null, 0, 1, 3 * MIN]);
+  // Empty, undefined, or nothing inside the window.
+  const empty = { checks: 0, up: 0, down: 0, availability: null, avgMs: null, medianMs: null, p95Ms: null, flips: 0, outages: 0, longestOutage: null, last: null, state: "unknown" };
+  assert.deepEqual(plain(U.summarizeHistory([], 0, now)), empty);
+  assert.deepEqual(plain(U.summarizeHistory(undefined, 0, now)), empty);
+  assert.deepEqual(plain(U.summarizeHistory(sampleHistory(now), now - MIN, now)), empty);
+  // Odd count → the middle value is the median; p95 of one value is that value.
+  const odd = plain(U.summarizeHistory([entry(now, 3, true, 300), entry(now, 2, true, 100), entry(now, 1, true, 200)], 0, now));
+  assert.deepEqual([odd.avgMs, odd.medianMs, odd.p95Ms], [200, 200, 300]);
+  assert.equal(U.fmtDuration(30 * 1000), "< 1 min");
+  assert.equal(U.fmtDuration(5 * MIN), "5 min");
+  assert.equal(U.fmtDuration(60 * MIN), "1 h");
+  assert.equal(U.fmtDuration(90 * MIN), "1 h 30 min");
+  assert.equal(U.fmtDuration(25 * 60 * MIN), "1 d 1 h");
+  assert.equal(U.fmtDuration(48 * 60 * MIN), "2 d");
+  assert.match(U.stamp(now), /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
+});
+
+test("browser_uptime_report: a compact table per monitor over the window, one monitor by id, hours clamped, monitors without checks, no monitors", async () => {
+  const { run, data, A, U } = load();
+  await A.watchCreate({ url: "https://a.example/", mode: "status", name: "A", every: 5 }, null);
+  await A.watchCreate({ url: "https://b.example/", mode: "status", name: "B", every: 1 }, null);
+  await A.watchCreate({ url: "https://page.example/", selector: ".p", name: "Page" }, null);
+  const all = await A.loadWatchers();
+  const byName = (n) => Object.values(all).find((w) => w.name === n);
+  const now = Date.now();
+  byName("A").history = sampleHistory(now);
+  byName("B").history = [entry(now, 30 * 60, true, 50)]; // 30 h ago: outside the default window
+  byName("B").enabled = false;
+  await A.saveWatchers(all);
+  const idA = byName("A").id, idB = byName("B").id;
+  let lines = (await run("browser_uptime_report", {})).split("\n");
+  assert.match(lines[0], /^Uptime report, last 24 h \(2 monitors, since \d{4}-\d{2}-\d{2} \d{2}:\d{2}\):$/);
+  // A block per monitor (the two were created in the same millisecond, so their order is not fixed).
+  const block = (id) => { const i = lines.findIndex((l) => l.startsWith(id + "  ")); const j = lines.findIndex((l, k) => k > i && /^wch_/.test(l)); return lines.slice(i, j < 0 ? undefined : j); };
+  assert.deepEqual(block(idB), [`${idB}  B  |  https://b.example/  |  every 1 min  |  ⏸ paused`, "  no checks in the last 24 h (1 older in the history)."]);
+  assert.deepEqual(block(idA), [
+    `${idA}  A  |  https://a.example/  |  every 5 min`,
+    "  state       🟢 UP  ·  HTTP 200 in 115 ms  ·  5 min ago",
+    "  checks      12  ·  9 up, 3 down  ·  availability 75%",
+    "  latency     avg 110 ms  ·  median 108 ms  ·  p95 200 ms",
+    `  incidents   4 flips  ·  2 outages, longest 10 min (${U.stamp(now - 50 * MIN)} → ${U.stamp(now - 40 * MIN)})`,
+  ]);
+  assert.equal(lines.length, 8, "the page watcher is not reported");
+  // One monitor, a shorter window; a value below 1 is nonsense and means the default, like `every` in browser_uptime_add.
+  lines = (await run("browser_uptime_report", { id: idA, hours: 1 })).split("\n");
+  assert.match(lines[0], /^Uptime report, last 1 h \(1 monitor, since /);
+  assert.equal(lines.length, 6);
+  assert.match(await run("browser_uptime_report", { id: idA, hours: "0.5" }), /^Uptime report, last 24 h \(1 monitor/);
+  lines = (await run("browser_uptime_report", { id: idA, hours: 10000 })).split("\n");
+  assert.match(lines[0], /^Uptime report, last 720 h \(1 monitor/, "hours is capped at 720 (30 days)");
+  // B, resumed and with an outage still running.
+  const again = await A.loadWatchers();
+  again[idB].history = [entry(now, 10, true, 100), entry(now, 5, false, 0), entry(now, 2, false, 0)];
+  again[idB].enabled = true;
+  await A.saveWatchers(again);
+  lines = (await run("browser_uptime_report", { id: idB })).split("\n");
+  assert.deepEqual(lines.slice(1), [
+    `${idB}  B  |  https://b.example/  |  every 1 min`,
+    "  state       🔴 DOWN  ·  no answer (timeout or network error)  ·  2 min ago",
+    "  checks      3  ·  1 up, 2 down  ·  availability 33.3%",
+    "  latency     avg 100 ms  ·  median 100 ms  ·  p95 100 ms",
+    `  incidents   1 flip  ·  1 outage, longest 5 min (since ${U.stamp(now - 5 * MIN)}, still down)`,
+  ]);
+  // A monitor that never checked, and one whose checks never answered.
+  const fresh = await A.loadWatchers();
+  fresh[idB].history = [];
+  fresh[idA].history = [entry(now, 3, false, 0)];
+  await A.saveWatchers(fresh);
+  const out = await run("browser_uptime_report", {});
+  assert.match(out, /\n  no checks in the last 24 h — waiting for the first check\.(\n|$)/);
+  assert.match(out, /\n  latency     no answered check\n  incidents   0 flips  ·  1 outage, longest 3 min \(since .*, still down\)(\n|$)/);
+  await assert.rejects(run("browser_uptime_report", { id: "wch_nope" }), /No uptime monitor with id wch_nope/);
+  const empty = load();
+  assert.equal(await empty.run("browser_uptime_report", {}), "No uptime monitors. browser_uptime_add checks a site's HTTP status on a schedule and reports when it goes down or comes back.");
 });

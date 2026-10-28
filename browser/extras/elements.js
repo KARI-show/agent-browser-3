@@ -7,7 +7,8 @@
 //   { id, kind: "add",  name, position, corner?, selector?, html, css?, enabled, t }
 //   { id, kind: "edit", name, selector, text?, attrs?, style?, before: { text?, attrs?, style? }, enabled, t }
 //   { id, kind: "hide", name, selector, mode: "hide" | "remove", enabled, t }
-// capped at MAX_BYTES of JSON. Applying a host's list to its page is the content script's job
+//   { id, kind: "move", name, selector, targetSelector, position, from?: { parentSelector, nextSelector }, enabled, t }
+// (a duplicate is an "add" record named "copy of …" with the sanitised markup of the source) capped at MAX_BYTES of JSON. Applying a host's list to its page is the content script's job
 // (browser/extras/elements.cs.js, registered below): the panel injects that file into a page that was
 // open before the registration and calls window.__agentElementsCS.sync(list) — one copy of the logic,
 // idempotent, so the tool's own call and the content script's storage listener never add twice.
@@ -31,6 +32,9 @@
   var MAX_CSS = 10 * 1024;
   var MAX_BYTES = 300 * 1024;
   var POSITIONS = ["before", "after", "prepend", "append", "fixed"];
+  var MOVE_POSITIONS = ["before", "after", "prepend", "append"];
+  var EXPORT_FORMATS = ["markdown", "css", "patch"];
+  var MAX_COPIES = 10;
   var CORNERS = ["top", "bottom", "top-left", "top-right", "bottom-left", "bottom-right"];
   var ATTRS = ["href", "src", "alt", "title", "placeholder", "value"];
   var CLASS_ATTRS = ["addClass", "removeClass"];
@@ -186,6 +190,20 @@
     Object.keys(rep.unwrapped).forEach(function (t) { parts.push("<" + t + "> unwrapped"); });
     return parts.join(", ");
   }
+  /**
+   * The markup of a page element as a copy: sanitised like a fragment, with ids and agent marks dropped — a copy
+   * must not answer the original's selectors (#id) or pass for an agent element. → { html, words, text, ids }
+   */
+  function cloneHtml(html) {
+    var doc = new DOMParser().parseFromString("<!doctype html><html><body>" + String(html) + "</body></html>", "text/html");
+    var rep = sanitizeTree(doc.body);
+    var ids = 0;
+    Array.prototype.slice.call(doc.body.querySelectorAll("*")).forEach(function (el) {
+      if (el.hasAttribute("id")) { el.removeAttribute("id"); ids++; }
+      Array.prototype.slice.call(el.attributes || []).forEach(function (at) { if (/^data-agent-/i.test(at.name)) el.removeAttribute(at.name); });
+    });
+    return { html: doc.body.innerHTML, words: describeDropped(rep), text: short(doc.body.textContent, 60), ids: ids };
+  }
 
   /**
    * Scope a stylesheet to the element: every selector gets the element's attribute selector in front
@@ -294,9 +312,11 @@
       if (r.style) parts.push("style: " + short(r.style, 50));
     }
     if (r.kind === "hide") parts.push(r.mode === "remove" ? "removed from view and the accessibility tree" : "display: none");
+    if (r.kind === "move") parts.push("moved " + moveWords(r.position) + " " + (r.targetSelector || ""));
     return parts.join("; ");
   }
-  var KINDS = [["add", "Added"], ["edit", "Edited"], ["hide", "Hidden"]];
+  function moveWords(position) { return position === "prepend" ? "to the start of" : position === "append" ? "to the end of" : position || "after"; }
+  var KINDS = [["add", "Added"], ["edit", "Edited"], ["hide", "Hidden"], ["move", "Moved"]];
   function countsWords(list) {
     return KINDS.map(function (k) { var n = list.filter(function (r) { return r.kind === k[0]; }).length; return n ? n + " " + k[1].toLowerCase() : ""; }).filter(Boolean).join(", ");
   }
@@ -324,6 +344,62 @@
     return lines.join("\n");
   }
 
+  // ── Developer hand-off (browser_element_export) ──────────────────────────
+
+  function isoDate(ts) { return ts ? new Date(ts).toISOString().slice(0, 10) : ""; }
+  function kindLabel(kind) { return (KINDS.filter(function (k) { return k[0] === kind; })[0] || [kind, kind])[1]; }
+  function indented(lang, body) { return ["   ```" + lang].concat(String(body).replace(/```/g, "` ` `").split("\n").map(function (l) { return "   " + l; })).concat(["   ```"]); }
+  function attrWords(name, before, after) {
+    var was = before && name in before ? (before[name] === null ? "(none)" : JSON.stringify(before[name])) : "";
+    return "   - " + name + ": " + (was ? was + " → " : "") + JSON.stringify(after);
+  }
+  /**
+   * A site's records as a hand-off: "markdown" (a numbered list, one entry per record with what changed), "css" (a
+   * stylesheet of the hides and the inline style changes) or "patch" (the records as a JSON array, re-importable).
+   */
+  function exportEdits(records, format, site) {
+    var list = (records || []).slice();
+    format = format || "markdown";
+    if (EXPORT_FORMATS.indexOf(format) === -1) throw new Error("format must be one of " + EXPORT_FORMATS.join(", ") + ".");
+    if (format === "patch") return JSON.stringify(list, null, 2);
+    var off = list.filter(function (r) { return r.enabled === false; }).length;
+    if (format === "css") {
+      var css = ["/* Page edits for " + site + " — exported " + isoDate(Date.now()) + "; the hides and inline style changes" + (off ? ", " + off + " switched-off edit" + (off === 1 ? "" : "s") + " left out" : "") + " */"];
+      var other = 0;
+      list.forEach(function (r) {
+        if (r.enabled === false) return;
+        if (r.kind === "hide") css.push("", "/* Hidden: " + r.name + (r.mode === "remove" ? " (also hidden from assistive technology)" : "") + " */", r.selector + " { display: none !important; }");
+        else if (r.kind === "edit" && r.style) css.push("", "/* Edited: " + r.name + " */", r.selector + " { " + r.style + "; }");
+        else other++;
+      });
+      if (other) css.push("", "/* " + other + " edit" + (other === 1 ? "" : "s") + " (added, moved, text or attribute changes) cannot be written as CSS — see the markdown export */");
+      return css.join("\n");
+    }
+    var md = ["# Page edits for " + site + " (" + list.length + ")", "", "Saved edits, re-applied on every load of " + site + "; selectors are CSS in the top frame." + (off ? " " + off + " of them switched off." : ""), ""];
+    list.forEach(function (r, i) {
+      var b = r.before || {};
+      md.push((i + 1) + ". **" + kindLabel(r.kind) + "** " + r.name + (r.enabled === false ? " _(off)_" : "") + " — `" + (r.kind === "add" ? placeWords(r) : r.selector) + "`" + (r.t ? " · " + isoDate(r.t) : ""));
+      if (r.kind === "add") {
+        md = md.concat(indented("html", r.html || ""));
+        if (r.css) md = md.concat(indented("css", r.css));
+      } else if (r.kind === "edit") {
+        if (typeof r.text === "string") md.push("   - text: " + JSON.stringify(b.text == null ? "" : b.text) + " → " + JSON.stringify(r.text));
+        Object.keys(r.attrs || {}).forEach(function (k) {
+          if (k === "addClass") md.push("   - add class: " + r.attrs[k]);
+          else if (k === "removeClass") md.push("   - remove class: " + r.attrs[k]);
+          else md.push(attrWords(k, b.attrs, r.attrs[k]));
+        });
+        if (r.style) md.push("   - style: " + (b.style ? "`" + b.style + "` → " : "") + "`" + r.style + "`");
+      } else if (r.kind === "hide") {
+        md.push("   - " + (r.mode === "remove" ? "removed from view and the accessibility tree (display: none; hidden; aria-hidden)" : "display: none"));
+      } else if (r.kind === "move") {
+        md.push("   - moved " + moveWords(r.position) + " `" + r.targetSelector + "`" + (r.from ? " (was in `" + r.from.parentSelector + "`" + (r.from.nextSelector ? ", before `" + r.from.nextSelector + "`" : ", as the last child") + ")" : ""));
+      }
+      md.push("");
+    });
+    return md.join("\n").replace(/\n+$/, "") + "\n";
+  }
+
   // ── Page side (self-contained; injected with chrome.scripting.executeScript) ──
 
   function pageHasCS() { return !!window.__agentElementsCS; }
@@ -334,6 +410,8 @@
 
   // Find the element (by the snapshot's local index, or by a selector), derive a durable selector for it
   // and read what an edit is about to change (`want`: { text, attrs: [names], style }) so it can be undone.
+  // `want.from` adds the selectors of its parent and next sibling (where a move can put it back), `want.html`
+  // its markup (for a copy), `want.inside` (a selector) whether it sits in or is that element.
   function pageLocate(local, selector, want) {
     var el = null;
     if (local) {
@@ -352,56 +430,72 @@
     function esc(s) { return window.CSS && CSS.escape ? CSS.escape(s) : String(s).replace(/([^\w-])/g, "\\$1"); }
     function stableId(id) { return !!id && /^[A-Za-z][\w-]{0,40}$/.test(id) && !/\d{3,}|^(ember|react|radix|headlessui|mui|yui|ext|__)/i.test(id); }
     function stableClass(c) { return /^[A-Za-z][\w-]{1,40}$/.test(c) && !/\d{3,}|^(css|sc|jsx|svelte|emotion|chakra)-|^_|[0-9a-f]{8,}/i.test(c); }
-    function unique(sel, target) { try { var all = document.querySelectorAll(sel); return all.length === 1 && all[0] === target; } catch (_) { return false; } }
+    // `ignore` is an element left out of every count and match: the one about to move away, so the selectors of its
+    // neighbours hold once it is gone (the content script takes it out before it resolves them).
+    function others(nodes, ignore) { return Array.prototype.filter.call(nodes, function (c) { return !ignore || (c !== ignore && !ignore.contains(c)); }); }
+    function unique(sel, target, ignore) { try { var all = others(document.querySelectorAll(sel), ignore); return all.length === 1 && all[0] === target; } catch (_) { return false; } }
     var TEST_ATTRS = ["data-testid", "data-test", "data-cy", "data-qa"];
-    function siblingsLike(node, sel) { return Array.prototype.filter.call(node.parentElement.children, function (c) { try { return c.matches(sel); } catch (_) { return false; } }); }
+    function siblingsLike(node, sel, ignore) { return others(node.parentElement.children, ignore).filter(function (c) { try { return c.matches(sel); } catch (_) { return false; } }); }
+    function sameTag(node, ignore) { return others(node.parentElement.children, ignore).filter(function (c) { return c.localName === node.localName; }); }
     // One step of the path: an anchored selector (unique id, data-test attribute, agent id) or tag[.class][:nth-of-type].
-    function step(node) {
+    function step(node, ignore) {
       var agent = node.getAttribute("data-agent-element");
       if (agent) return { sel: '[data-agent-element="' + agent + '"]', root: true };
-      if (stableId(node.id) && unique("#" + esc(node.id), node)) return { sel: "#" + esc(node.id), root: true };
+      if (stableId(node.id) && unique("#" + esc(node.id), node, ignore)) return { sel: "#" + esc(node.id), root: true };
       for (var i = 0; i < TEST_ATTRS.length; i++) {
         var v = node.getAttribute(TEST_ATTRS[i]);
-        if (v && unique("[" + TEST_ATTRS[i] + '="' + v.replace(/["\\]/g, "\\$&") + '"]', node)) return { sel: "[" + TEST_ATTRS[i] + '="' + v.replace(/["\\]/g, "\\$&") + '"]', root: true };
+        if (v && unique("[" + TEST_ATTRS[i] + '="' + v.replace(/["\\]/g, "\\$&") + '"]', node, ignore)) return { sel: "[" + TEST_ATTRS[i] + '="' + v.replace(/["\\]/g, "\\$&") + '"]', root: true };
       }
       var tag = node.localName;
       var cls = (node.getAttribute("class") || "").split(/\s+/).filter(stableClass).slice(0, 2);
       var s = tag + (cls.length ? "." + cls.map(esc).join(".") : "");
-      if (node.parentElement && siblingsLike(node, s).length > 1) {
-        var same = Array.prototype.filter.call(node.parentElement.children, function (c) { return c.localName === tag; });
-        s += ":nth-of-type(" + (same.indexOf(node) + 1) + ")";
-      }
+      if (node.parentElement && siblingsLike(node, s, ignore).length > 1) s += ":nth-of-type(" + (sameTag(node, ignore).indexOf(node) + 1) + ")";
       return { sel: s, root: false };
     }
-    var parts = [], node = el, rooted = false, depth = 0;
-    while (node && node !== document.body && node !== document.documentElement && depth < 10) {
-      var st = step(node);
-      parts.unshift(st.sel);
-      if (st.root) { rooted = true; break; }
-      node = node.parentElement;
-      depth++;
-    }
-    if (!rooted) parts.unshift("body");
-    var sel = parts.join(" > ");
-    if (!unique(sel, el)) {
-      // Fall back to the plain positional path from <body>, which is unique by construction.
-      parts = []; node = el;
-      while (node && node !== document.body && node.parentElement) {
-        var same2 = Array.prototype.filter.call(node.parentElement.children, function (c) { return c.localName === node.localName; });
-        parts.unshift(node.localName + (same2.length > 1 ? ":nth-of-type(" + (same2.indexOf(node) + 1) + ")" : ""));
+    // The durable selector of `target`: anchored steps up to a root, else the positional path from <body>; "" when none is unique.
+    function durable(target, ignore) {
+      var parts = [], node = target, rooted = false, depth = 0;
+      while (node && node !== document.body && node !== document.documentElement && depth < 10) {
+        var st = step(node, ignore);
+        parts.unshift(st.sel);
+        if (st.root) { rooted = true; break; }
         node = node.parentElement;
+        depth++;
       }
-      sel = "body > " + parts.join(" > ");
-      if (!unique(sel, el)) return { error: "No selector finds that element again on this page — it is not inside <body>." };
+      if (!rooted) parts.unshift("body");
+      var sel = parts.join(" > ");
+      if (!unique(sel, target, ignore)) {
+        // Fall back to the plain positional path from <body>, which is unique by construction.
+        parts = []; node = target;
+        while (node && node !== document.body && node.parentElement) {
+          var same = sameTag(node, ignore);
+          parts.unshift(node.localName + (same.length > 1 ? ":nth-of-type(" + (same.indexOf(node) + 1) + ")" : ""));
+          node = node.parentElement;
+        }
+        sel = "body > " + parts.join(" > ");
+        if (!unique(sel, target, ignore)) return "";
+      }
+      return sel;
     }
+    var sel = durable(el, null);
+    if (!sel) return { error: "No selector finds that element again on this page — it is not inside <body>." };
     var r = el.getBoundingClientRect();
-    var out = { selector: sel, tag: el.localName, text: clean(el.innerText || el.textContent, 80), agentId: el.getAttribute("data-agent-element") || "", rect: { x: Math.round(r.left), y: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) } };
+    var out = { selector: sel, tag: el.localName, text: clean(el.innerText || el.textContent, 80), agentId: el.getAttribute("data-agent-element") || "", movedId: el.getAttribute("data-agent-moved") || "", rect: { x: Math.round(r.left), y: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) } };
     if (want) {
       var before = {};
       if (want.text) before.text = String(el.textContent || "").slice(0, 4000);
       if (want.attrs && want.attrs.length) { before.attrs = {}; want.attrs.forEach(function (a) { before.attrs[a] = el.hasAttribute(a) ? el.getAttribute(a) : null; }); }
       if (want.style) before.style = el.getAttribute("style") || "";
       out.before = before;
+      if (want.from) {
+        var parent = el.parentElement, next = el.nextSibling;
+        while (next && next.nodeType !== 1) next = next.nextSibling;
+        var parentSel = parent === document.body ? "body" : parent ? durable(parent, el) : "";
+        var nextSel = next ? durable(next, el) : "";
+        if (parentSel) out.from = { parentSelector: parentSel, nextSelector: nextSel };
+      }
+      if (want.html) out.html = String(el.outerHTML || "");
+      if (want.inside) { try { var outer = document.querySelector(want.inside); out.inside = !!outer && (outer === el || outer.contains(el)); } catch (_) { out.inside = false; } }
     }
     return out;
   }
@@ -468,16 +562,25 @@
   }
   function defaultName(kind, t) { return describeTarget(t); }
 
-  /** Add a record: apply it on the tab (when on that host), then save. Throws when its place is not on the page. */
-  async function commitAdd(host, tab, rec, all) {
-    var list = (all[host] || []).concat([rec]);
+  /** Why the page could not apply `rec` according to the content script's report, or "" when it did. */
+  function notApplied(rec, rep) {
+    if (!rep) return "";
+    function has(k) { return (rep[k] || []).indexOf(rec.id) !== -1; }
+    if (rec.kind === "add" && has("missingAnchor")) return "The place for it was not found on the page (" + rec.selector + ") — call browser_read_page and try another ref or selector.";
+    if ((rec.kind === "edit" && has("missing")) || (rec.kind === "move" && has("missingMove"))) return "The element was not found again by its selector (" + rec.selector + ") — call browser_read_page and try again.";
+    if (rec.kind === "move" && has("missingTarget")) return "The target was not found on the page (" + rec.targetSelector + ") or sits inside the element — call browser_read_page and try another target.";
+    return "";
+  }
+  /** Add records: apply them on the tab (when on that host), then save. Throws when a place is not on the page. */
+  async function commitRecords(host, tab, recs, all) {
+    var list = (all[host] || []).concat(recs);
     var rep = await applyOnTab(host, tab, list);
-    if (rep && rec.kind === "add" && rep.missingAnchor.indexOf(rec.id) !== -1) throw new Error("The place for it was not found on the page (" + rec.selector + ") — call browser_read_page and try another ref or selector.");
-    if (rep && rec.kind === "edit" && rep.missing.indexOf(rec.id) !== -1) throw new Error("The element was not found again by its selector (" + rec.selector + ") — call browser_read_page and try again.");
+    recs.forEach(function (rec) { var why = notApplied(rec, rep); if (why) throw new Error(why); });
     all[host] = list;
     await save(all);
     return rep;
   }
+  function commitAdd(host, tab, rec, all) { return commitRecords(host, tab, [rec], all); }
   /** Undo records on the page (disabled copies in the list) and drop them from storage. */
   async function dropRecords(host, tab, all, ids) {
     var list = all[host] || [];
@@ -572,7 +675,8 @@
     if (persist) rep = await commitAdd(host, tab, rec, all);
     else {
       rep = await applyOnTab(host, tab, (all[host] || []).concat([rec]));
-      if (rep && rep.missing.indexOf(rec.id) !== -1) throw new Error("The element was not found again by its selector (" + rec.selector + ") — call browser_read_page and try again.");
+      var why = notApplied(rec, rep);
+      if (why) throw new Error(why);
     }
     return text(
       "Edited " + describeTarget(t) + " (" + t.selector + ") on " + host + ": " + changeWords(rec) + "." + styleWords +
@@ -620,6 +724,97 @@
     );
   });
 
+  T.register("browser_element_move", async function (a) {
+    a = a || {};
+    var position = a.position || "after";
+    if (MOVE_POSITIONS.indexOf(position) === -1) throw new Error("position must be one of " + MOVE_POSITIONS.join(", ") + ".");
+    var hasTarget = (a.target !== undefined && a.target !== null) || (a.targetSelector != null && String(a.targetSelector).trim());
+    if (!hasTarget) throw new Error("Give target (a ref from browser_read_page) or targetSelector of the element it moves next to or into.");
+    var tab = await H.currentTab();
+    var host = siteOf(null, tab.url);
+    var all = await load();
+    var t = await locate(tab, a, { from: true });
+    if (t.agentId) throw new Error("That element was added by browser_element_add (" + t.agentId + ") — forget it and add it again where you want it.");
+    // Moved before: that move is dropped (the element goes back) and the new one starts from the original place.
+    var prev = t.movedId ? findRecord((all[host] || []).filter(function (r) { return r.kind === "move"; }), { id: t.movedId }) : null;
+    if (prev) {
+      await dropRecords(host, tab, all, [prev.id]);
+      t = await locate(tab, { selector: prev.selector }, { from: true });
+      if (!t.from && prev.from) t.from = prev.from;
+    }
+    var tt = await locate(tab, { ref: a.target, selector: a.targetSelector }, { inside: t.selector });
+    if (tt.inside) throw new Error("The target " + describeTarget(tt) + " (" + tt.selector + ") is the element itself or sits inside it — pick a target outside it.");
+    var rec = { id: newId(all), kind: "move", name: short(a.name, 60) || (prev && prev.name) || defaultName("move", t), selector: t.selector, targetSelector: tt.selector, position: position, enabled: true, t: Date.now() };
+    if (t.from) rec.from = t.from;
+    var persist = a.persist !== false;
+    var rep;
+    if (persist) rep = await commitAdd(host, tab, rec, all);
+    else {
+      rep = await applyOnTab(host, tab, (all[host] || []).concat([rec]));
+      var why = notApplied(rec, rep);
+      if (why) throw new Error(why);
+    }
+    return text(
+      "Moved " + describeTarget(t) + " (" + t.selector + ") " + moveWords(position) + " " + describeTarget(tt) + " (" + tt.selector + ") on " + host + "." +
+      (persist ? " Saved as " + rec.id + ": " + SAVED_WORDS : " This visit only (persist=false), nothing saved. Check it with browser_screenshot.") +
+      (rec.from ? "" : " Its original place could not be recorded, so forgetting the move puts it back on the next reload.") +
+      (rep === null ? notHereWords(host, tab) : "")
+    );
+  });
+
+  T.register("browser_element_duplicate", async function (a) {
+    a = a || {};
+    var count = a.count === undefined || a.count === null ? 1 : Number(a.count);
+    if (!(count >= 1 && count <= MAX_COPIES) || count !== Math.floor(count)) throw new Error("count must be a whole number from 1 to " + MAX_COPIES + ".");
+    var position = a.position || "after";
+    if (position !== "after" && position !== "before") throw new Error("position must be after or before.");
+    var tab = await H.currentTab();
+    var host = siteOf(null, tab.url);
+    var t = await locate(tab, a, { html: true });
+    var markup = t.html || "";
+    if (markup.length > MAX_HTML) throw new Error("The element's markup is " + kb(markup.length) + "; the limit is " + kb(MAX_HTML) + " — copy a smaller element.");
+    var clean = cloneHtml(markup);
+    if (!clean.html.trim()) throw new Error("Nothing is left of the element after sanitising" + (clean.words ? " (dropped: " + clean.words + ")" : "") + " — it has no static markup to copy.");
+    var all = await load();
+    // A copy of an agent element keeps its scoped css, re-scoped to the copy's id.
+    var source = t.agentId ? findRecord(all[host] || [], { id: t.agentId }) : null;
+    var base = short(a.name, 60) || describeTarget(t);
+    var recs = [], now = Date.now();
+    for (var i = 0; i < count; i++) {
+      var id;
+      do { id = newId(all); } while (recs.some(function (r) { return r.id === id; }));
+      var rec = { id: id, kind: "add", name: short("copy of " + base + (count > 1 ? " (" + (i + 1) + ")" : ""), 70), position: position, selector: t.selector, html: clean.html, enabled: true, t: now };
+      if (source && source.css) rec.css = source.css.split('[data-agent-element="' + source.id + '"]').join('[data-agent-element="' + id + '"]');
+      recs.push(rec);
+    }
+    var persist = a.persist !== false;
+    var rep;
+    if (persist) rep = await commitRecords(host, tab, recs, all);
+    else {
+      rep = await applyOnTab(host, tab, (all[host] || []).concat(recs));
+      recs.forEach(function (r) { var why = notApplied(r, rep); if (why) throw new Error(why); });
+    }
+    var n = recs.length;
+    var dropped = [clean.words, clean.ids ? clean.ids + " id" + (clean.ids === 1 ? "" : "s") : ""].filter(Boolean).join(", ");
+    return text(
+      "Added " + n + " cop" + (n === 1 ? "y" : "ies") + " of " + describeTarget(t) + " (" + t.selector + ") " + position + " it on " + host + " — " + recs.map(function (r) { return r.id; }).join(", ") + ", each carrying data-agent-element." +
+      (dropped ? " Dropped from the copies: " + dropped + "." : "") +
+      (persist ? " Saved for this site: " + SAVED_WORDS : " This visit only (persist=false), nothing saved. Check it with browser_screenshot.") +
+      (rep === null ? notHereWords(host, tab) : "")
+    );
+  });
+
+  T.register("browser_element_export", async function (a) {
+    a = a || {};
+    var format = a.format || "markdown";
+    if (EXPORT_FORMATS.indexOf(format) === -1) throw new Error("format must be one of " + EXPORT_FORMATS.join(", ") + ".");
+    var host = a.site ? siteOf(a.site, "") : siteOf(null, (await H.currentTab()).url);
+    var all = await load();
+    var list = all[host] || [];
+    if (!list.length) return text("No saved edits for " + host + " — nothing to export.");
+    return text(exportEdits(list, format, host));
+  });
+
   T.register("browser_element_list", async function (a) {
     a = a || {};
     var all = await load();
@@ -649,12 +844,13 @@
     if (!rec) throw new Error((a.id ? "No edit with id " + a.id : a.name ? "No edit named '" + a.name + "'" : "Give id or name of the edit, or all=true") + (a.id || a.name ? " on " + host + ". browser_element_list shows them." : "."));
     var rep = await dropRecords(host, tab, all, [rec.id]);
     var left = (all[host] || []).length;
-    return text("Forgot " + quote(rec.name) + " (" + rec.id + ", " + rec.kind + ") on " + host + (rep === null ? "." + notHereWords(host, tab) : " and undid it on the page.") + " " + left + " edit" + (left === 1 ? "" : "s") + " left for this site.");
+    var stuck = rep && rec.kind === "move" && (rep.stuck || []).indexOf(rec.id) !== -1;
+    return text("Forgot " + quote(rec.name) + " (" + rec.id + ", " + rec.kind + ") on " + host + (rep === null ? "." + notHereWords(host, tab) : stuck ? " — its original place is not on the page any more; reload to put the element back." : " and undid it on the page.") + " " + left + " edit" + (left === 1 ? "" : "s") + " left for this site.");
   });
 
   // ── 🧱 Elements tab of the 🧩 panel ──────────────────────────────────────
 
-  var KIND_ICON = { add: "➕", edit: "✏️", hide: "🙈" };
+  var KIND_ICON = { add: "➕", edit: "✏️", hide: "🙈", move: "↕️" };
 
   async function tabAndHost(ctx) {
     try {
@@ -787,7 +983,9 @@
     { group: "Design", icon: "🔠", name: "Replace the hero text with…",
       prompt: "Replace the main heading (hero text) of this page with browser_element_edit, keep the change for this site, take a screenshot to check it, and use this text: ", partial: true },
     { group: "Design", icon: "🧱", name: "Show this site's edits",
-      prompt: "List the saved edits for this site with browser_element_list and explain each in one line — what it changes and where." }
+      prompt: "List the saved edits for this site with browser_element_list and explain each in one line — what it changes and where." },
+    { group: "Design", icon: "📦", name: "Hand-off of this site's edits",
+      prompt: "Export the saved edits of this site for a developer with browser_element_export (format markdown) and show me the document as it is; then say in one line whether the css format would carry them as a stylesheet (it covers hides and style changes, not added or moved elements)." }
   );
 
   // ── The content script: registered once, persists across sessions ────────
@@ -808,12 +1006,12 @@
 
   /** The pure parts and the page-side functions, for tests and other modules. */
   X.elements = {
-    KEY: KEY, CS_ID: CS_ID, CS_FILE: CS_FILE, MAX_HTML: MAX_HTML, MAX_CSS: MAX_CSS, MAX_BYTES: MAX_BYTES, POSITIONS: POSITIONS, CORNERS: CORNERS, PRESETS: PRESETS,
+    KEY: KEY, CS_ID: CS_ID, CS_FILE: CS_FILE, MAX_HTML: MAX_HTML, MAX_CSS: MAX_CSS, MAX_BYTES: MAX_BYTES, MAX_COPIES: MAX_COPIES, POSITIONS: POSITIONS, MOVE_POSITIONS: MOVE_POSITIONS, EXPORT_FORMATS: EXPORT_FORMATS, CORNERS: CORNERS, PRESETS: PRESETS,
     hostOf: hostOf, siteOf: siteOf, newId: newId, escapeHtml: escapeHtml, sizeOf: sizeOf,
-    safeUrl: safeUrl, splitTop: splitTop, safeDeclarations: safeDeclarations, sanitizeTree: sanitizeTree, sanitizeHtml: sanitizeHtml, describeDropped: describeDropped, scopeCss: scopeCss,
-    fgFor: fgFor, presetHtml: presetHtml, formatList: formatList, changeWords: changeWords, placeWords: placeWords,
+    safeUrl: safeUrl, splitTop: splitTop, safeDeclarations: safeDeclarations, sanitizeTree: sanitizeTree, sanitizeHtml: sanitizeHtml, cloneHtml: cloneHtml, describeDropped: describeDropped, scopeCss: scopeCss,
+    fgFor: fgFor, presetHtml: presetHtml, formatList: formatList, changeWords: changeWords, placeWords: placeWords, exportEdits: exportEdits,
     pageLocate: pageLocate, pageSync: pageSync, pageHasCS: pageHasCS,
-    load: load, save: save, locate: locate, applyOnTab: applyOnTab, commitAdd: commitAdd, dropRecords: dropRecords, setEnabled: setEnabled,
+    load: load, save: save, locate: locate, applyOnTab: applyOnTab, commitAdd: commitAdd, commitRecords: commitRecords, notApplied: notApplied, dropRecords: dropRecords, setEnabled: setEnabled,
     registered: registered, render: renderTab,
   };
 })();

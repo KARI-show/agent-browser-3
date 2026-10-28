@@ -140,11 +140,14 @@ test("orbit: the 🧩 panel has the Clips and Sessions tabs, the quick commands 
     ["Research", "Clip the selection", false],
     ["Research", "Clip the key facts of this page", false],
     ["Research", "Export my clips as Markdown", false],
+    ["Research", "Search my clips", true],
+    ["Research", "Cite this page", false],
     ["Tabs", "Save this window's tabs as a session", true],
     ["Tabs", "Restore a session", true],
     ["Tabs", "Close the duplicates in this window", false],
+    ["Tabs", "Add this tab to a session", true],
   ]);
-  const expected = ["browser_clip_delete", "browser_clip_export", "browser_clip_list", "browser_clip_save", "browser_session_delete", "browser_session_list", "browser_session_restore", "browser_session_save"];
+  const expected = ["browser_clip_cite", "browser_clip_delete", "browser_clip_export", "browser_clip_list", "browser_clip_save", "browser_clip_search", "browser_clip_update", "browser_session_add", "browser_session_delete", "browser_session_list", "browser_session_restore", "browser_session_save", "browser_session_tidy"];
   assert.deepEqual(seen.registered, expected);
   assert.deepEqual(seen.declared, expected, "the built-in agent is offered exactly the registered extra tools");
   assert.deepEqual(seen.helpers, ["function", "function"]);

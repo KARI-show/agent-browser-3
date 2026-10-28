@@ -1,6 +1,7 @@
 // Tab sessions (browser/extras/sessions.js) against fakes of chrome.storage / tabs / windows and of
 // the tool registry: which tabs a save keeps, replace-by-name, list, restore into a new or the current
-// window (pinned and active state, the fallbacks), delete, the cap, and the 🗂 tab.
+// window (pinned and active state, the fallbacks), delete, adding tabs to a session, the tidy-up of
+// duplicate tabs or a site's tabs, the cap, and the 🗂 tab.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
@@ -23,10 +24,11 @@ function fakeBrowser() {
     { id: 4, windowId: 1, url: "https://b.example/two?x=1", title: "Two", pinned: false, active: true },
     { id: 5, windowId: 1, url: "about:blank", title: "", pinned: false, active: false },
   ]);
-  const calls = { windowsCreate: [], tabsCreate: [], tabsUpdate: [], messages: [] };
+  const calls = { windowsCreate: [], tabsCreate: [], tabsUpdate: [], tabsRemove: [], messages: [] };
   const all = () => [...windows.values()].flatMap((w) => w.tabs);
   function makeTab(windowId, o) {
-    const t = { id: nextTab++, windowId, url: o.url, title: "", pinned: !!o.pinned, active: !!o.active };
+    // A title can be given here (chrome.tabs.create takes none) so tidy's report has something to show.
+    const t = { id: nextTab++, windowId, url: o.url, title: o.title || "", pinned: !!o.pinned, active: !!o.active };
     windows.get(windowId).tabs.push(t);
     return t;
   }
@@ -56,6 +58,15 @@ function fakeBrowser() {
         if (props.active) windows.get(t.windowId).tabs.forEach((x) => (x.active = false));
         Object.assign(t, props);
         return plain(t);
+      },
+      async remove(ids) {
+        for (const id of [].concat(ids)) {
+          calls.tabsRemove.push(id);
+          const t = all().find((x) => x.id === id);
+          if (!t) throw new Error("No tab with id: " + id);
+          const w = windows.get(t.windowId);
+          w.tabs.splice(w.tabs.indexOf(t), 1);
+        }
       },
     },
     windows: {
@@ -211,11 +222,13 @@ test("sessions: the 🗂 tab and the Tabs quick commands", async () => {
     ["Tabs", "Save this window's tabs as a session", true],
     ["Tabs", "Restore a session", true],
     ["Tabs", "Close the duplicates in this window", false],
+    ["Tabs", "Add this tab to a session", true],
   ]);
   assert.match(X.commands[0].prompt, /browser_session_save.*named: $/);
   assert.match(X.commands[1].prompt, /browser_session_restore.*named: $/);
-  assert.match(X.commands[2].prompt, /browser_tabs[\s\S]*browser_close_tab/);
-  assert.doesNotMatch(X.commands[2].prompt, /browser_session_/, "closing duplicates needs no session tool");
+  assert.match(X.commands[2].prompt, /browser_session_tidy/);
+  assert.doesNotMatch(X.commands[2].prompt, /browser_close_tab/, "closing duplicates is one tool call now");
+  assert.match(X.commands[3].prompt, /browser_session_add.*named: $/);
 
   const dom = fakeDom();
   const render = () => X.tabs[0].render(dom.content, dom.ctx);
@@ -265,4 +278,118 @@ test("sessions: the 🗂 tab and the Tabs quick commands", async () => {
   await settle();
   assert.deepEqual(sessions(data).map((s) => s.name), ["From the chat", "Session " + new Date().toLocaleDateString()]);
   assert.deepEqual(dom.statuses.at(-1), { text: "Deleted.", kind: "good" });
+});
+
+test("sessions: browser_session_add puts the current tab, or the whole window, into a saved session without repeats", async () => {
+  const { tools, data, chrome, T } = load();
+  await assert.rejects(tools.browser_session_add({}), /Give id or name \(see browser_session_list\)\./);
+  await tools.browser_session_save({ name: "S" });
+  const id = sessions(data)[0].id;
+  await assert.rejects(tools.browser_session_add({ name: "nope" }), /^Error: No session named 'nope'\. Saved: 'S'\.$/);
+  // The agent's tab (4) is in the session already.
+  assert.equal(outText(await tools.browser_session_add({ name: "s" })), "Nothing added to session 'S' (1 skipped, already in it) — still 2 tabs.");
+  const three = await chrome.tabs.create({ windowId: 1, url: "https://c.example/three", title: "Three", active: false });
+  T.current = three.id;
+  assert.equal(
+    outText(await tools.browser_session_add({ id })),
+    "Added 1 tab to session 'S' — now 3 tabs.\n  1. 📌 One — https://a.example/one\n  2. Two — https://b.example/two?x=1  (active)\n  3. Three — https://c.example/three"
+  );
+  assert.deepEqual(plain(sessions(data)[0].tabs[2]), { url: "https://c.example/three", title: "Three", pinned: false, active: false }, "an added tab is never the session's active one");
+  assert.equal(sessions(data)[0].id, id, "the id survives");
+  // A browser page can't be added; `all` takes every website tab of the window, skipping what is there (and repeats in the window).
+  const internal = await chrome.tabs.create({ windowId: 1, url: "chrome://settings/", active: false });
+  T.current = internal.id;
+  await assert.rejects(tools.browser_session_add({ id }), /^Error: The current tab \(chrome:\/\/settings\/\) is a browser page a session can't reopen — switch to the website tab to add, or pass all\.$/);
+  await chrome.tabs.create({ windowId: 1, url: "https://d.example/four", title: "Four", active: false });
+  await chrome.tabs.create({ windowId: 1, url: "https://d.example/four", title: "Four again", active: false });
+  assert.equal(
+    outText(await tools.browser_session_add({ id, all: true })),
+    "Added 1 tab to session 'S' (3 skipped, already in it) — now 4 tabs.\n  1. 📌 One — https://a.example/one\n  2. Two — https://b.example/two?x=1  (active)\n  3. Three — https://c.example/three\n  4. Four — https://d.example/four"
+  );
+  assert.equal(outText(await tools.browser_session_add({ id, all: true })), "Nothing added to session 'S' (5 skipped, already in it) — still 4 tabs.");
+  assert.match(outText(await tools.browser_session_list({})), /^Sessions \(1\):\n  ses_[a-z0-9]{6}  S  \|  4 tabs  \|  saved just now\n    One; Two; Three; … \+1 more$/);
+  // A session that grows moves to the top of the list; a window without website tabs has nothing to add.
+  await tools.browser_session_save({ name: "Newer" });
+  assert.deepEqual(sessions(data).map((s) => s.name), ["Newer", "S"]);
+  const five = await chrome.tabs.create({ windowId: 1, url: "https://e.example/five", title: "Five", active: false });
+  T.current = five.id;
+  assert.match(outText(await tools.browser_session_add({ name: "S" })), /^Added 1 tab to session 'S' — now 5 tabs\./);
+  assert.deepEqual(sessions(data).map((s) => [s.name, s.tabs.length]), [["S", 5], ["Newer", 5]]);
+  const w = await chrome.windows.create({ url: ["chrome://settings/"] });
+  T.current = w.tabs[0].id;
+  await assert.rejects(tools.browser_session_add({ name: "S", all: true }), /No website tabs to add in this window\./);
+  // The pure helper: repeats within the batch collapse, the time moves only when something was added.
+  const r = S_add(load().S, { id: "x", name: "n", t: 1, tabs: [ONE] }, [ONE, TWO, TWO], 99);
+  assert.deepEqual(plain(r), { session: { id: "x", name: "n", t: 99, tabs: [ONE, { ...TWO, active: false }] }, added: [{ ...TWO, active: false }], skipped: 1 });
+  assert.equal(S_add(load().S, { id: "x", name: "n", t: 1, tabs: [ONE] }, [ONE], 99).session.t, 1);
+});
+const S_add = (S, session, tabs, now) => S.addToSession(session, tabs, now);
+
+test("sessions: duplicateTabs picks what tidy closes — one of each address stays, protected tabs never go", () => {
+  const { S } = load();
+  const tabs = [
+    { id: 1, index: 0, url: "https://a.example/x", title: "A", pinned: true, active: false },
+    { id: 2, index: 1, url: "https://a.example/x#top", title: "A again", pinned: false, active: false },
+    { id: 3, index: 2, url: "https://b.example/y", title: "B", pinned: false, active: false },
+    { id: 4, index: 3, url: "https://b.example/y", title: "B again", pinned: false, active: true },
+    { id: 5, index: 4, url: "https://c.example/z", title: "C", pinned: false, active: false },
+    { id: 6, index: 5, url: "https://c.example/z", title: "C again", pinned: false, active: false },
+    { id: 7, index: 6, url: "https://c.example/z?v=2", title: "C other", pinned: false, active: false },
+    { id: 8, index: 7, url: OWN + "sidepanel.html", title: "Panel", pinned: false, active: false },
+    { id: 9, index: 8, url: OWN + "sidepanel.html", title: "Panel 2", pinned: false, active: false },
+    { id: 10, index: 9, url: "", title: "", pinned: false, active: false },
+  ];
+  const ids = (opts) => S.duplicateTabs(tabs, opts).map((t) => t.id);
+  // 2 repeats the pinned 1 (the #fragment is ignored); 3 repeats the active 4 and goes; of 5 and 6 the earliest stays;
+  // 7 differs in its query; the panel's pages never go.
+  assert.deepEqual(ids({ ownOrigin: OWN }), [2, 3, 6]);
+  assert.deepEqual(ids({ ownOrigin: OWN, keep: [3, 6] }), [2, 5], "kept ids (the agent's tab) stay; their earlier twins go instead");
+  assert.deepEqual(ids({}), [2, 3, 6, 9], "without ownOrigin the panel's second page is a repeat like any other");
+  assert.deepEqual(S.duplicateTabs([tabs[5], tabs[4]], {}).map((t) => t.id), [6], "window order decides which is the earliest, not array order");
+  // By host: every tab of that site but the protected ones; www. and case are ignored.
+  assert.deepEqual(ids({ host: "www.C.example", ownOrigin: OWN }), [5, 6, 7]);
+  assert.deepEqual(ids({ host: "b.example" }), [3]);
+  assert.deepEqual(ids({ host: "a.example" }), [2]);
+  assert.deepEqual(ids({ host: "nope.example" }), []);
+  assert.deepEqual(S.duplicateTabs([], {}), []);
+  assert.equal(S.pageKey("https://a.example/x#top"), "https://a.example/x");
+});
+
+test("sessions: browser_session_tidy closes the duplicates (dry run first) or a site's tabs; never the active, pinned or panel tabs", async () => {
+  const { tools, chrome, windows, calls, T } = load();
+  await chrome.tabs.create({ windowId: 1, url: "https://a.example/one#section", title: "One again", active: false }); // repeats the pinned tab 3
+  await chrome.tabs.create({ windowId: 1, url: "https://b.example/two?x=1", title: "Two again", active: false }); // repeats the active tab 4
+  await chrome.tabs.create({ windowId: 1, url: "https://c.example/three", title: "Three", active: false });
+  await chrome.tabs.create({ windowId: 1, url: "https://c.example/three", title: "Three again", active: false });
+  await chrome.tabs.create({ windowId: 1, url: OWN + "sidepanel.html", active: false }); // a second page of the extension
+  const w1 = () => windows.get(1).tabs;
+  assert.equal(w1().length, 10);
+  const going = "  • One again — https://a.example/one#section\n  • Two again — https://b.example/two?x=1\n  • Three again — https://c.example/three";
+  assert.equal(outText(await tools.browser_session_tidy({ dryRun: true })), "Would close 3 tabs (duplicate tabs; dry run, nothing closed):\n" + going + "\n7 tabs would remain.");
+  assert.deepEqual(calls.tabsRemove, []);
+  assert.equal(w1().length, 10);
+  assert.equal(outText(await tools.browser_session_tidy({})), "Closed 3 tabs (duplicate tabs):\n" + going + "\n7 tabs remain in the window.");
+  assert.deepEqual(w1().map((t) => t.title), ["New Tab", "Orbit", "One", "Two", "", "Three", ""]);
+  assert.equal(outText(await tools.browser_session_tidy({})), "No duplicate tabs to close in this window (7 tabs; the active tab, pinned tabs and the panel are never closed).");
+  // The tab the agent works in stays even when it is not the window's active one: its earlier twin goes instead.
+  const copy = await chrome.tabs.create({ windowId: 1, url: "https://c.example/three", title: "Agent's copy", active: false });
+  T.current = copy.id;
+  assert.equal(outText(await tools.browser_session_tidy({})), "Closed 1 tab (duplicate tabs):\n  • Three — https://c.example/three\n7 tabs remain in the window.");
+  assert.ok(w1().some((t) => t.id === copy.id));
+  T.current = 4;
+  // By host: every tab of that site but the protected ones; a full address or www. is tolerated.
+  await chrome.tabs.create({ windowId: 1, url: "https://www.c.example/four", title: "Four", active: false });
+  assert.equal(
+    outText(await tools.browser_session_tidy({ host: "https://www.c.example/", dryRun: true })),
+    "Would close 2 tabs (tabs of www.c.example; dry run, nothing closed):\n  • Agent's copy — https://c.example/three\n  • Four — https://www.c.example/four\n6 tabs would remain."
+  );
+  assert.equal(outText(await tools.browser_session_tidy({ host: "a.example" })), "No tabs of a.example to close in this window (8 tabs; the active tab, pinned tabs and the panel are never closed).");
+  assert.equal(outText(await tools.browser_session_tidy({ host: "b.example" })), "No tabs of b.example to close in this window (8 tabs; the active tab, pinned tabs and the panel are never closed).");
+  assert.match(outText(await tools.browser_session_tidy({ host: "c.example" })), /^Closed 2 tabs \(tabs of c\.example\):\n  • Agent's copy — https:\/\/c\.example\/three\n  • Four — https:\/\/www\.c\.example\/four\n6 tabs remain in the window\.$/);
+  assert.deepEqual(w1().map((t) => t.url), ["chrome://newtab/", OWN + "sidepanel.html", "https://a.example/one", "https://b.example/two?x=1", "about:blank", OWN + "sidepanel.html"]);
+  assert.equal(calls.tabsRemove.length, 6);
+  // Without an agent tab the panel's window is tidied.
+  T.noTab = true;
+  await chrome.tabs.create({ windowId: 1, url: "https://a.example/one", title: "One again", active: false });
+  assert.match(outText(await tools.browser_session_tidy({})), /^Closed 1 tab \(duplicate tabs\):\n  • One again — https:\/\/a\.example\/one\n6 tabs remain/);
 });

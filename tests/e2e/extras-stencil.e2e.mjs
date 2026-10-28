@@ -152,7 +152,7 @@ after(async () => {
 
 // ── The panel: tabs, quick commands, tools, the content script ─────────────
 
-test("stencil's panel has the 🧱 Elements and 📐 Overlay tabs, the Design commands, nine tools registered and declared, and the content script registered", { skip }, async () => {
+test("stencil's panel has the 🧱 Elements and 📐 Overlay tabs, the Design commands, fourteen tools registered and declared, and the content script registered", { skip }, async () => {
   const seen = await inPanel(`chrome.scripting.getRegisteredContentScripts().then((scripts) => ({
     brand: AGENT_BRAND.id,
     tabs: AgentExtras.tabs.map((t) => t.id),
@@ -171,11 +171,12 @@ test("stencil's panel has the 🧱 Elements and 📐 Overlay tabs, the Design co
   const ownLabels = ["🧩 Recipes", "🧠 Memory", "🧱 Elements", "📐 Overlay"];
   assert.deepEqual(seen.labels.filter((l) => ownLabels.includes(l)), ownLabels, "the built-in tabs of the brand's features, then the extras'");
   const ownCommands = [
-    ["Design", "Add a note to this page", true], ["Design", "Hide this element…", false], ["Design", "Replace the hero text with…", true], ["Design", "Show this site's edits", false],
+    ["Design", "Add a note to this page", true], ["Design", "Hide this element…", false], ["Design", "Replace the hero text with…", true], ["Design", "Show this site's edits", false], ["Design", "Hand-off of this site's edits", false],
     ["Design", "Show a 12-column grid", false], ["Design", "Measure the spacing between these two elements", true], ["Design", "Mark up this page for review", false],
+    ["Design", "Compare with a design image", true], ["Design", "Preview at phone width", false],
   ];
   assert.deepEqual(seen.commands.filter((c) => ownCommands.some((o) => o[1] === c[1])), ownCommands);
-  const tools = ["browser_element_add", "browser_element_edit", "browser_element_hide", "browser_element_list", "browser_element_forget", "browser_overlay_grid", "browser_overlay_measure", "browser_overlay_note", "browser_overlay_clear"];
+  const tools = ["browser_element_add", "browser_element_edit", "browser_element_hide", "browser_element_list", "browser_element_forget", "browser_element_move", "browser_element_duplicate", "browser_element_export", "browser_overlay_grid", "browser_overlay_measure", "browser_overlay_note", "browser_overlay_clear", "browser_overlay_image", "browser_overlay_viewport"];
   assert.deepEqual(seen.registered.sort(), tools.slice().sort());
   assert.deepEqual(seen.declared.sort(), tools.slice().sort(), "the built-in agent declares the same tools");
   assert.ok(seen.autoBtn, "the 🧩 button is there");

@@ -1,7 +1,9 @@
 // The identity report (browser/extras/audit.js) against fakes of chrome.* and the tools runtime: the
 // verdict line, the consistency warnings (device profile vs. the page, client hints vs. the User-Agent),
 // the report's formatting, what the extension side adds (cookie count, profile label, proxy — never
-// values or credentials), the 🪪 tab and the quick commands.
+// values or credentials), the exit check (a faked trace endpoint, the expected proxy, country vs language
+// and time zone), the leak check (WebRTC candidates, time zone, languages, geometry, webdriver, client
+// hints on fixed page data), the 🪪 tab and the quick commands.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -231,11 +233,318 @@ test("audit: the 🪪 tab shows the highlighted verdict, the report, Refresh / C
   assert.equal(dom.buttons(content, "📋 Copy")[0].disabled, true);
 });
 
-test("audit: tool and quick commands are registered under their names and group", () => {
+// ── The exit check ──
+
+const TRACE = ["fl=123f45", "h=www.cloudflare.com", "ip=203.0.113.9", "ts=1760000000.123", "visit_scheme=https", "uag=" + WIN_UA, "colo=LHR", "sliver=none", "http=http/2", "loc=GB", "tls=TLSv1.3", "sni=plaintext", "warp=off", "gateway=off", "rbi=off", "kex=X25519", ""].join("\n");
+const PROXY_EXP = { type: "http", host: "1.2.3.4", port: 8080 };
+const APPLIED = { available: true, mode: "fixed_servers", control: "controlled_by_this_extension", server: "http://1.2.3.4:8080" };
+
+/** A fetch for the trace endpoint: state.body, state.status, state.fail (a TypeError), state.hang (never answers, honours the abort signal); every call recorded. */
+function fakeFetch(state = {}) {
+  const fetch = async (url, options = {}) => {
+    fetch.calls.push({ url, ...options });
+    if (state.fail) throw new TypeError("Failed to fetch");
+    if (state.hang) return new Promise((_, reject) => { options.signal?.addEventListener("abort", () => reject(Object.assign(new Error("The user aborted a request."), { name: "AbortError" }))); });
+    const status = state.status || 200;
+    return { ok: status >= 200 && status < 300, status, text: async () => state.body ?? TRACE };
+  };
+  fetch.calls = [];
+  return fetch;
+}
+
+test("audit: parseTrace reads the key=value lines of a trace", () => {
+  const { U } = setup();
+  const t = U.parseTrace(TRACE);
+  assert.deepEqual([t.ip, t.loc, t.colo, t.tls, t.http, t.uag, t.warp], ["203.0.113.9", "GB", "LHR", "TLSv1.3", "http/2", WIN_UA, "off"]);
+  assert.deepEqual(plain(U.parseTrace("ip = 1.2.3.4 \r\njunk\n=nokey\nloc=\n")), { ip: "1.2.3.4", loc: "" }, "trimmed; lines without a key are ignored");
+  assert.deepEqual(plain(U.parseTrace("")), {});
+  assert.deepEqual(plain(U.parseTrace(undefined)), {});
+  assert.deepEqual([U.langCountry("en-GB"), U.langCountry("de-DE"), U.langCountry("zh-Hans-CN"), U.langCountry("en"), U.langCountry("es-419"), U.langCountry("")], ["GB", "DE", "CN", "", "", ""]);
+  assert.deepEqual([U.tzCountry("Europe/London"), U.tzCountry("America/New_York"), U.tzCountry("Asia/Tokyo"), U.tzCountry("Etc/UTC"), U.tzCountry("")], ["GB", "US", "JP", "", ""]);
+  assert.deepEqual(plain(U.parseLangs("de-DE,de;q=0.9,en;q=0.8")), ["de-DE", "de", "en"]);
+});
+
+test("audit: assessExit compares the exit with the expected route and the profile's country hints", () => {
+  const { U } = setup();
+  const trace = U.parseTrace(TRACE);
+  // Direct, nothing to compare.
+  let a = U.assessExit(trace, { proxy: null, source: "no proxy configured", applied: NO_PROXY, languages: [], timezone: "", latency: 412 });
+  assert.equal(a.verdict, "Exit 203.0.113.9 (GB) direct — no profile hints to compare");
+  assert.deepEqual(plain(a.lines), [
+    "Expected route: direct (no proxy configured)",
+    "Exit: 203.0.113.9 · country GB · Cloudflare LHR · 412 ms round trip",
+    "Connection: TLS TLSv1.3 · HTTP http/2 · User-Agent " + WIN_UA,
+    "✓ No proxy configured: the exit is this machine's own address",
+  ]);
+  assert.deepEqual(plain([a.reached, a.warnings, a.advice]), [true, [], []]);
+  // Through the expected proxy, country agreeing with language and time zone: consistent.
+  a = U.assessExit(trace, { proxy: PROXY_EXP, source: "device profile 'Work'", applied: APPLIED, languages: ["en-GB", "en"], timezone: "Europe/London", latency: 90 });
+  assert.equal(a.verdict, "Exit 203.0.113.9 (GB) through http://1.2.3.4:8080 — consistent with the profile's language en-GB and time zone Europe/London");
+  assert.deepEqual(plain(a.lines).slice(3), [
+    "✓ Fetched through the browser's proxy settings (http://1.2.3.4:8080)",
+    "✓ Exit country GB agrees with the profile language en-GB",
+    "✓ Exit country GB agrees with the profile time zone Europe/London",
+  ]);
+  assert.equal(a.lines[0], "Expected route: through http://1.2.3.4:8080 (device profile 'Work')");
+  // A German profile leaving through the US: advice, not an error.
+  a = U.assessExit({ ip: "198.51.100.1", loc: "us" }, { proxy: PROXY_EXP, source: "the proxy setting", applied: APPLIED, languages: ["de-DE", "de", "en"], timezone: "Europe/Berlin" });
+  assert.equal(a.verdict, "Exit 198.51.100.1 (US) through http://1.2.3.4:8080 — advice: language de-DE suggests DE; time zone Europe/Berlin suggests DE");
+  assert.deepEqual(plain(a.advice), ["language de-DE suggests DE", "time zone Europe/Berlin suggests DE"]);
+  assert.deepEqual(plain(a.warnings), []);
+  assert.match(a.lines[3], /^⚠ Exit country US while the profile language is de-DE \(DE\) — advice, not an error: a site may find the pair odd; use a proxy in DE or a profile language for US$/);
+  assert.match(a.lines[4], /^⚠ Exit country US while the profile time zone is Europe\/Berlin \(DE\) — advice, not an error: use a proxy in DE or a profile for US$/);
+  assert.equal(a.lines[1], "Exit: 198.51.100.1 · country US", "no colo, no latency: nothing invented");
+  // A proxy that is expected but not applied is a warning; the proxy's own address as the exit is noted.
+  a = U.assessExit(trace, { proxy: PROXY_EXP, source: "device profile 'Work'", applied: NO_PROXY, languages: ["en-GB"], timezone: "" });
+  assert.equal(a.verdict, "Exit 203.0.113.9 (GB) through http://1.2.3.4:8080 — 1 warning: no proxy applied");
+  assert.match(a.lines[3], /^⚠ A proxy is expected \(through http:\/\/1\.2\.3\.4:8080\) but the browser applies none \(mode "system"\) — the exit above is the real address$/);
+  a = U.assessExit({ ip: "1.2.3.4", loc: "GB" }, { proxy: PROXY_EXP, applied: APPLIED, languages: ["de-DE"], timezone: "" });
+  assert.ok(a.lines.includes("✓ The exit IP is the proxy's own address"));
+  assert.equal(a.verdict, "Exit 1.2.3.4 (GB) through http://1.2.3.4:8080 — advice: language de-DE suggests DE");
+  // Hints that name no country, a trace without one, a SOCKS proxy.
+  a = U.assessExit({ ip: "203.0.113.9", loc: "GB" }, { proxy: null, applied: NO_PROXY, languages: ["en"], timezone: "Etc/UTC" });
+  assert.equal(a.verdict, "Exit 203.0.113.9 (GB) direct — no profile hints to compare");
+  assert.ok(a.lines.includes("Profile language en names no country — not compared with the exit"));
+  assert.ok(a.lines.includes("Profile time zone Etc/UTC — country not known to this check, not compared"));
+  a = U.assessExit({ ip: "203.0.113.9" }, { proxy: null, applied: NO_PROXY, languages: ["en-GB"], timezone: "Europe/London" });
+  assert.equal(a.verdict, "Exit 203.0.113.9 direct — no profile hints to compare");
+  assert.ok(a.lines.includes("The trace gave no country — language and time zone not compared"));
+  assert.equal(U.assessExit({}, { proxy: { type: "socks5", host: "proxy.example", port: 1080 } }).lines[0], "Expected route: through socks5://proxy.example:1080");
+  // Unreachable: reported, with the route it was tried through.
+  a = U.assessExit(null, { proxy: PROXY_EXP, source: "device profile 'Work'", applied: APPLIED, error: "timed out after 10 s" });
+  assert.equal(a.verdict, "The exit could not be reached through the current proxy (timed out after 10 s)");
+  assert.deepEqual(plain(a.lines), ["Expected route: through http://1.2.3.4:8080 (device profile 'Work')", "⚠ The exit could not be reached through the current proxy (http://1.2.3.4:8080): timed out after 10 s — browsing through it fails too; check host, port and credentials."]);
+  assert.equal(a.reached, false);
+  a = U.assessExit(null, { proxy: { type: "socks5", host: "h", port: 1 }, error: "Failed to fetch" });
+  assert.match(a.lines[1], /, and the local agent host for SOCKS5\.$/);
+  a = U.assessExit(null, { proxy: null, error: "Failed to fetch" });
+  assert.equal(a.verdict, "The exit could not be reached (Failed to fetch)");
+  assert.match(a.lines[1], /^⚠ The exit could not be reached \(Failed to fetch\) — no proxy is configured, so the machine itself seems offline or the endpoint is blocked\.$/);
+});
+
+test("audit: browser_identity_proxy fetches the trace from the panel and grades the exit against the expected proxy — never thrown, never credentials", async () => {
+  const state = {};
+  const fetch = fakeFetch(state);
+  const { run, local, session, chrome, U } = setup({ globals: { fetch, AbortController } });
+  let out = await run("browser_identity_proxy", {});
+  assert.deepEqual(fetch.calls.map((c) => [c.url, c.cache, c.credentials, !!c.signal]), [["https://www.cloudflare.com/cdn-cgi/trace", "no-store", "omit", true]], "one uncached, cookie-less GET with an abort signal");
+  assert.match(out, /^Exit check \(https:\/\/www\.cloudflare\.com\/cdn-cgi\/trace, fetched by the extension through the browser's proxy settings\)\nVerdict: Exit 203\.0\.113\.9 \(GB\) direct — no profile hints to compare\nExpected route: direct \(no proxy configured\)\nExit: 203\.0\.113\.9 · country GB · Cloudflare LHR · \d+ ms round trip\n/);
+  assert.match(out, /^✓ No proxy configured: the exit is this machine's own address$/m);
+
+  // The active profile's proxy is the expectation; its language is the hint; the password never shows.
+  local.agentProfiles = { prof_1: { name: "Work", lang: "en-GB,en;q=0.9", proxy: { enabled: true, type: "http", host: "1.2.3.4", port: 8080, username: "user", password: "hunter2" } } };
+  local.agentActiveProfile = "prof_1";
+  chrome.proxy.value = { value: { mode: "fixed_servers", rules: { singleProxy: { scheme: "http", host: "1.2.3.4", port: 8080 } } }, levelOfControl: "controlled_by_this_extension" };
+  out = await run("browser_identity_proxy", {});
+  assert.match(out, /^Verdict: Exit 203\.0\.113\.9 \(GB\) through http:\/\/1\.2\.3\.4:8080 — consistent with the profile's language en-GB$/m);
+  assert.match(out, /^Expected route: through http:\/\/1\.2\.3\.4:8080 \(device profile 'Work'\)$/m);
+  assert.match(out, /^✓ Fetched through the browser's proxy settings \(http:\/\/1\.2\.3\.4:8080\)$/m);
+  assert.doesNotMatch(out, /hunter2|user/);
+
+  // The tab's window carries a device profile: its time zone and languages win over the active profile's language.
+  session["agentDeviceWindow:1"] = { ...CFG, langs: ["de-DE", "de"] };
+  out = await run("browser_identity_proxy", {});
+  assert.match(out, /^Verdict: Exit 203\.0\.113\.9 \(GB\) through http:\/\/1\.2\.3\.4:8080 — advice: language de-DE suggests DE; time zone America\/New_York suggests US$/m);
+  assert.match(out, /^⚠ Exit country GB while the profile language is de-DE \(DE\) — advice, not an error/m);
+  delete session["agentDeviceWindow:1"];
+
+  // A profile without a proxy of its own runs over the global setting; the setting off means direct.
+  local.agentProfiles.prof_1.proxy = { enabled: false, host: "" };
+  local.agentProxy = { enabled: true, type: "socks5", host: "exit.example", port: 1080, username: "u", password: "p" };
+  chrome.proxy.value = { value: { mode: "fixed_servers", rules: { singleProxy: { scheme: "socks5", host: "127.0.0.1", port: 40123 } } }, levelOfControl: "controlled_by_this_extension" };
+  out = await run("browser_identity_proxy", {});
+  assert.match(out, /^Expected route: through socks5:\/\/exit\.example:1080 \(the proxy setting — profile 'Work' has none of its own\)$/m);
+  assert.match(out, /^✓ Fetched through the browser's proxy settings \(socks5:\/\/127\.0\.0\.1:40123\)$/m, "the loopback forwarder counts as applied");
+  assert.doesNotMatch(out, /\bu:|\bp\b|password/);
+  local.agentProxy.enabled = false;
+  chrome.proxy.value = { value: { mode: "system" }, levelOfControl: "controllable_by_this_extension" };
+  out = await run("browser_identity_proxy", {});
+  assert.match(out, /^Expected route: direct \(no proxy configured — profile 'Work' has none\)$/m);
+  // Expected but not applied: a warning, not advice.
+  local.agentProxy.enabled = true;
+  out = await run("browser_identity_proxy", {});
+  assert.match(out, /^Verdict: Exit 203\.0\.113\.9 \(GB\) through socks5:\/\/exit\.example:1080 — 1 warning: no proxy applied$/m);
+
+  // A network failure is a report, not an exception; so is an HTTP error.
+  state.fail = true;
+  out = await run("browser_identity_proxy", {});
+  assert.match(out, /^Verdict: The exit could not be reached through the current proxy \(Failed to fetch\)\nExpected route: through socks5:\/\/exit\.example:1080/m);
+  assert.match(out, /^⚠ The exit could not be reached through the current proxy \(socks5:\/\/exit\.example:1080\): Failed to fetch — browsing through it fails too; check host, port and credentials, and the local agent host for SOCKS5\.$/m);
+  state.fail = false;
+  state.status = 503;
+  assert.match(await run("browser_identity_proxy", {}), /^Verdict: The exit could not be reached through the current proxy \(HTTP 503\)$/m);
+  state.status = 0;
+  // The timeout aborts the request (a short one here; the tool uses 10 s).
+  state.hang = true;
+  assert.equal(U.TRACE_TIMEOUT, 10000);
+  const t = await U.fetchTrace(5);
+  assert.deepEqual([t.trace, t.error], [null, "timed out after 0.005 s"]);
+  assert.ok(fetch.calls.at(-1).signal.aborted);
+});
+
+// ── The leak check ──
+
+const MDNS = "candidate:1 1 udp 2122260223 a1b2c3d4-1234-5678-9abc-def012345678.local 54321 typ host generation 0 ufrag abcd network-cost 999";
+const WINTER = Date.UTC(2026, 0, 15, 12); // standard time everywhere in the test zones: offsets are fixed
+/** What probeLeaks() returns on a clean Windows desktop presenting profile "Work" (America/New_York, en-US). */
+const CLEAN = {
+  url: "http://localhost:4000/", title: "Whoami", now: WINTER,
+  userAgent: WIN_UA, uaData: { brands: ["Chromium 136", "Google Chrome 136", "Not.A/Brand 99"], platform: "Windows", mobile: false }, platform: "Win32",
+  language: "en-US", languages: ["en-US", "en"], timeZone: "America/New_York", tzOffset: 300,
+  screen: { width: 2560, height: 1440, availWidth: 2560, availHeight: 1400 }, dpr: 1, inner: { width: 1600, height: 900 }, outer: { width: 1616, height: 1000 },
+  webdriver: false, hardwareConcurrency: 24, deviceMemory: 32, plugins: 5, doNotTrack: null, maxTouchPoints: 0,
+  webrtc: { supported: true, candidates: [MDNS], error: "" },
+};
+const EXPECT = { label: "Windows 11 — i7-13700K / RTX 4060", profile: "Work", timezone: "America/New_York", languages: ["en-US", "en"] };
+/** The same machine with the real network and time zone showing through, automation visible, a stripped build. */
+const LEAKY = {
+  ...CLEAN, timeZone: "Europe/Berlin", tzOffset: -60, language: "en-US", languages: ["de-DE", "de"], webdriver: true, plugins: 0, deviceMemory: null,
+  webrtc: { supported: true, candidates: [
+    "candidate:1 1 udp 2122260223 192.168.1.5 54321 typ host generation 0",
+    "candidate:2 1 udp 1686052607 203.0.113.7 54321 typ srflx raddr 192.168.1.5 rport 54321 generation 0",
+    "candidate:3 1 udp 2122197247 fe80::1c2b:3d4e:5f60:7a8b 54322 typ host generation 0",
+    MDNS,
+  ], error: "" },
+};
+
+test("audit: leakFindings — a clean desktop passes every check, a leaking one is named in the verdict", () => {
+  const { U } = setup();
+  const clean = U.leakFindings(CLEAN, EXPECT);
+  assert.deepEqual(plain(clean.risks), []);
+  assert.equal(clean.verdict, "No risks found: WebRTC, time zone, languages, geometry, hardware and client hints look consistent");
+  assert.deepEqual(plain(clean.lines), [
+    "✓ WebRTC: 1 host candidate, all behind mDNS .local names — no raw IP",
+    "✓ Time zone America/New_York (UTC−5), Date offset agrees, matches the device profile 'Windows 11 — i7-13700K / RTX 4060'",
+    "✓ Languages en-US, en — navigator.language agrees, matches the device profile 'Windows 11 — i7-13700K / RTX 4060'",
+    "✓ Geometry plausible: screen 2560×1440 · window 1600×900 in 1616×1000 · pixel ratio 1",
+    "✓ navigator.webdriver: false",
+    "✓ Hardware: 24 CPU threads · 32 GB memory",
+    "✓ Plugins: 5",
+    "✓ Do Not Track: unset (the common default)",
+    "✓ Client hints (Chromium 136, Google Chrome 136, Not.A/Brand 99 · Windows) agree with the User-Agent",
+    "✓ Touch points: 0 on a desktop User-Agent",
+  ]);
+  const leaky = U.leakFindings(LEAKY, EXPECT);
+  assert.equal(leaky.verdict, "6 risks: WebRTC exposes 192.168.1.5, 203.0.113.7, fe80::1c2b:3d4e:5f60:7a8b; time zone Europe/Berlin while the profile says America/New_York; language en-US vs languages[0] de-DE; navigator.webdriver is true; deviceMemory missing; no plugins on desktop Chrome");
+  assert.equal(leaky.lines[0], "⚠ WebRTC exposes 192.168.1.5 (private, host), 203.0.113.7 (public, srflx), fe80::1c2b:3d4e:5f60:7a8b (private, host) in its ICE candidates — a site reads these without asking; Chrome normally hides local addresses behind mDNS .local names");
+  assert.equal(leaky.lines[1], "⚠ Time zone Europe/Berlin while the device profile 'Windows 11 — i7-13700K / RTX 4060' says America/New_York");
+  assert.equal(leaky.lines[2], "⚠ navigator.language is en-US but navigator.languages starts with de-DE — an override applied to one and not the other");
+  assert.equal(leaky.lines[4], "⚠ navigator.webdriver is true — the page can tell automation is attached");
+  assert.equal(leaky.lines[5], "⚠ deviceMemory is missing on a Chromium User-Agent — Chrome always reports it");
+  assert.equal(leaky.lines[6], "⚠ navigator.plugins is empty — desktop Chrome lists its PDF viewers; headless and stripped builds show none");
+  assert.equal(leaky.lines.filter((l) => l.startsWith("⚠")).length, 6, "every ⚠ is a risk, nothing else is");
+  // The verdict's shape with two risks.
+  const two = U.leakFindings({ ...CLEAN, timeZone: "Europe/Berlin", tzOffset: -60, webrtc: { supported: true, candidates: ["candidate:1 1 udp 2122260223 192.168.1.5 54321 typ host generation 0"], error: "" } }, EXPECT);
+  assert.equal(two.verdict, "2 risks: WebRTC exposes 192.168.1.5; time zone Europe/Berlin while the profile says America/New_York");
+  // Without a profile only the page's own consistency counts.
+  const alone = U.leakFindings({ ...CLEAN, timeZone: "Europe/Berlin", tzOffset: -60, language: "de-DE", languages: ["de-DE", "de"] }, {});
+  assert.deepEqual(plain(alone.risks), []);
+  assert.equal(alone.lines[1], "✓ Time zone Europe/Berlin (UTC+1), Date offset agrees");
+  assert.equal(alone.lines[2], "✓ Languages de-DE, de — navigator.language agrees");
+  // Profile language differing from a consistent page.
+  assert.deepEqual(plain(U.leakFindings({ ...CLEAN, language: "de-DE", languages: ["de-DE", "de"] }, EXPECT).risks), ["language de-DE while the profile says en-US"]);
+});
+
+test("audit: leakFindings — the single checks", () => {
+  const { U } = setup();
+  const risks = (over, exp = EXPECT) => plain(U.leakFindings({ ...CLEAN, ...over }, exp).risks);
+  const line = (over, i, exp = EXPECT) => U.leakFindings({ ...CLEAN, ...over }, exp).lines[i];
+  // WebRTC: no API, no candidates, an error, only mDNS.
+  assert.equal(line({ webrtc: { supported: false, candidates: [], error: "" } }, 0), "✓ WebRTC: RTCPeerConnection is not available in this page — nothing to leak");
+  assert.equal(line({ webrtc: { supported: true, candidates: [], error: "" } }, 0), "✓ WebRTC: no ICE candidates gathered in 2 s — nothing exposed");
+  assert.equal(line({ webrtc: { supported: true, candidates: [], error: "blocked" } }, 0), "✓ WebRTC: no ICE candidates gathered in 2 s (blocked) — nothing exposed");
+  assert.equal(line({ webrtc: undefined }, 0), "✓ WebRTC: RTCPeerConnection is not available in this page — nothing to leak");
+  assert.deepEqual(plain(U.webrtcLeaks(["candidate:1 1 udp 1 10.0.0.2 1 typ host", "candidate:2 1 tcp 1 10.0.0.2 2 typ host tcptype active", "candidate:3 1 udp 1 2001:db8::1 3 typ host", "garbage", MDNS])),
+    [{ address: "10.0.0.2", scope: "private", type: "host" }, { address: "2001:db8::1", scope: "public", type: "host" }], "deduplicated, scoped, .local names ignored");
+  assert.deepEqual(plain(U.candidateAddress("candidate:1 1 udp 2122260223 192.168.1.5 54321 typ host generation 0")), { address: "192.168.1.5", type: "host" });
+  assert.deepEqual(plain(U.candidateAddress("")), { address: "", type: "" });
+  // Time zone: a half-applied override (Intl says one zone, Date another offset), an unknown zone, none at all.
+  assert.deepEqual(risks({ timeZone: "America/New_York", tzOffset: -60 }), ["time zone America/New_York vs Date offset UTC+1"]);
+  assert.equal(line({ timeZone: "America/New_York", tzOffset: -60 }, 1), "⚠ Time zone America/New_York (UTC−5) but Date reports UTC+1 — a zone override that reached Intl and not Date");
+  assert.deepEqual([U.zoneOffset("America/New_York", WINTER), U.zoneOffset("Europe/Berlin", WINTER), U.zoneOffset("Asia/Kolkata", WINTER), U.zoneOffset("Etc/UTC", WINTER), U.zoneOffset("Mars/Olympus", WINTER)], [300, -60, -330, 0, null]);
+  assert.equal(line({ timeZone: "Mars/Olympus", tzOffset: 0 }, 1, {}), "✓ Time zone Mars/Olympus (UTC) — a zone this check does not know, offset not compared");
+  assert.deepEqual(risks({ timeZone: "", tzOffset: 300 }), ["no time zone"]);
+  // Languages.
+  assert.deepEqual(risks({ language: "", languages: [] }), ["no languages"]);
+  assert.deepEqual(risks({ language: "en-us", languages: ["en-US"] }), [], "case does not matter");
+  assert.deepEqual(risks({ language: "en-US", languages: [] }), [], "an empty languages list is not a contradiction");
+  // Geometry.
+  assert.deepEqual(risks({ inner: { width: 3000, height: 900 } }), ["viewport larger than the screen"]);
+  assert.deepEqual(risks({ outer: { width: 800, height: 600 } }), ["viewport larger than its window"]);
+  assert.deepEqual(risks({ screen: { width: 1280, height: 800, availWidth: 1400, availHeight: 800 }, inner: { width: 1000, height: 700 }, outer: { width: 1000, height: 700 } }), ["avail larger than the screen"]);
+  assert.deepEqual(risks({ dpr: 0 }), ["no devicePixelRatio"]);
+  assert.deepEqual(risks({ screen: null }), ["no screen size"]);
+  assert.deepEqual(risks({ outer: null }), [], "no outer size: not compared");
+  // webdriver, hardware, plugins, DNT.
+  assert.deepEqual(risks({ webdriver: null }), []);
+  assert.equal(line({ webdriver: null }, 4), "✓ navigator.webdriver: not set");
+  assert.deepEqual(risks({ hardwareConcurrency: null }), ["hardwareConcurrency missing"]);
+  assert.deepEqual(risks({ userAgent: "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0", uaData: null, platform: "Linux x86_64", deviceMemory: null, plugins: 0 }, {}), [], "Firefox exposes neither deviceMemory nor plugins — not a risk");
+  assert.equal(line({ userAgent: "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0", uaData: null, platform: "Linux x86_64", deviceMemory: null }, 5, {}), "✓ Hardware: 24 CPU threads · memory not exposed (normal outside Chromium)");
+  assert.equal(line({ plugins: null }, 6), "✓ Plugins: navigator.plugins not available");
+  assert.equal(line({ doNotTrack: "1" }, 7), "✓ Do Not Track: 1 — a rarer setting, part of the fingerprint");
+  // Client hints vs the User-Agent: platform, mobile flag, version.
+  assert.deepEqual(risks({ uaData: { ...CLEAN.uaData, platform: "Linux" } }), ["client hints Linux vs User-Agent Windows"]);
+  assert.deepEqual(risks({ uaData: { ...CLEAN.uaData, mobile: true } }), ["client hints mobile vs User-Agent desktop", "mobile User-Agent without touch"], "a mobile hint on a desktop UA with no touch points: both checks speak up");
+  assert.deepEqual(risks({ uaData: { ...CLEAN.uaData, brands: ["Chromium 131", "Google Chrome 131", "Not.A/Brand 99"] } }), ["client hints version 131 vs User-Agent 136"]);
+  assert.equal(line({ uaData: null }, 8), "✓ Client hints: none (not a Chromium browser, or hints are off)");
+  // Touch points vs the User-Agent.
+  const PHONE = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Mobile Safari/537.36";
+  const phone = { userAgent: PHONE, uaData: { brands: ["Chromium 136", "Google Chrome 136"], platform: "Android", mobile: true }, platform: "Linux armv8l", plugins: 0, maxTouchPoints: 5 };
+  assert.deepEqual(risks(phone, {}), []);
+  assert.equal(line(phone, 9, {}), "✓ Touch points: 5 on a mobile User-Agent");
+  assert.equal(line(phone, 6, {}), "✓ Plugins: 0 (mobile browsers list none)");
+  assert.deepEqual(risks({ ...phone, maxTouchPoints: 0 }, {}), ["mobile User-Agent without touch"]);
+  assert.deepEqual(risks({ maxTouchPoints: 10 }), [], "a Windows touch laptop is fine");
+  assert.equal(line({ maxTouchPoints: 10 }, 9), "✓ Touch points: 10 (a touch laptop)");
+  const MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
+  assert.deepEqual(risks({ userAgent: MAC, uaData: { ...CLEAN.uaData, platform: "macOS" }, platform: "MacIntel", maxTouchPoints: 5 }, {}), ["macOS desktop with touch points"]);
+  assert.deepEqual(risks({ maxTouchPoints: null }), []);
+  assert.equal(line({ maxTouchPoints: null }, 9), "✓ Touch points: unknown on a desktop User-Agent");
+});
+
+test("audit: browser_identity_leaks injects one self-contained probe into the page's MAIN world and compares with the window's profile", async () => {
+  const { run, log, session, local, chrome, U } = setup();
+  chrome.scripting.result = (o) => (o.func.name === "probeLeaks" ? LEAKY : PAGE);
+  const src = U.probeLeaks.toString();
+  assert.doesNotMatch(src, /\b(H|T|X|WEBRTC_WAIT|TRACE_URL|osOfUa|plural)\b/, "the injected function closes over nothing of the module");
+  assert.match(src, /RTCPeerConnection[\s\S]*iceServers: \[\][\s\S]*onicecandidate[\s\S]*setTimeout\(finish, 2000\)/, "host candidates only, cut off after 2 s");
+  let out = await run("browser_identity_leaks", {});
+  assert.deepEqual(log.scripts, [{ tabId: 5, world: "MAIN", func: "probeLeaks" }], "what the site itself sees");
+  assert.equal(out.split("\n").slice(0, 4).join("\n"), [
+    "Leak check for http://localhost:4000/ (Whoami)",
+    "Verdict: 5 risks: WebRTC exposes 192.168.1.5, 203.0.113.7, fe80::1c2b:3d4e:5f60:7a8b; language en-US vs languages[0] de-DE; navigator.webdriver is true; deviceMemory missing; no plugins on desktop Chrome",
+    "Compared with: no device profile on this window — the page's own consistency only",
+    "⚠ WebRTC exposes 192.168.1.5 (private, host), 203.0.113.7 (public, srflx), fe80::1c2b:3d4e:5f60:7a8b (private, host) in its ICE candidates — a site reads these without asking; Chrome normally hides local addresses behind mDNS .local names",
+  ].join("\n"));
+  assert.match(out, /^✓ Time zone Europe\/Berlin \(UTC\+1\), Date offset agrees$/m, "without a profile the page's zone is only checked against itself");
+  assert.doesNotMatch(out, /s3cr3t|alice/);
+  // The window's device config: its time zone, and the owning profile's language when the config carries none.
+  session["agentDeviceWindow:1"] = CFG;
+  local.agentProfiles = { prof_1: { name: "Work", lang: "en-US,en;q=0.9", proxy: { enabled: true, host: "1.2.3.4", port: 8080, username: "user", password: "hunter2" } } };
+  out = await run("browser_identity_leaks", {});
+  assert.match(out, /^Verdict: 6 risks: WebRTC exposes [^;]+; time zone Europe\/Berlin while the profile says America\/New_York; language en-US vs languages\[0\] de-DE; /m);
+  assert.match(out, /^Compared with: device profile 'Windows 11 — i7-13700K \/ RTX 4060' \(Work\), time zone America\/New_York, language en-US$/m);
+  assert.doesNotMatch(out, /hunter2|ANGLE/);
+  chrome.scripting.result = (o) => (o.func.name === "probeLeaks" ? CLEAN : PAGE);
+  out = await run("browser_identity_leaks", {});
+  assert.match(out, /^Verdict: No risks found: /m);
+  assert.doesNotMatch(out, /^⚠/m);
+  // A page that cannot be scripted, and one that does not answer.
+  chrome.scripting.throws = new Error("Cannot access a chrome:// URL");
+  await assert.rejects(run("browser_identity_leaks", {}), /can't be inspected — navigate to a regular website first\. \(Cannot access a chrome:\/\/ URL\)/);
+  chrome.scripting.throws = null;
+  chrome.scripting.result = null;
+  await assert.rejects(run("browser_identity_leaks", {}), /The page did not answer/);
+});
+
+test("audit: tools and quick commands are registered under their names and group", () => {
   const { T, X } = setup();
-  assert.deepEqual(Object.keys(T.registered), ["browser_identity_report"]);
+  assert.deepEqual(Object.keys(T.registered), ["browser_identity_report", "browser_identity_proxy", "browser_identity_leaks"]);
   const mine = X.commands.filter((c) => c.group === "Accounts");
-  assert.deepEqual(mine.map((c) => c.name), ["What does this site see?", "Check my identity before signing in"]);
+  assert.deepEqual(mine.map((c) => c.name), ["What does this site see?", "Check my identity before signing in", "Check my exit IP", "Leak check this tab"]);
   assert.match(mine[1].prompt, /browser_identity_report[\s\S]*compare it with the device profile and proxy[\s\S]*mismatch/);
+  assert.match(mine[2].prompt, /browser_identity_proxy[\s\S]*exit/);
+  assert.match(mine[3].prompt, /browser_identity_leaks[\s\S]*⚠/);
   for (const c of mine) assert.ok(c.icon && !c.partial, c.name);
 });

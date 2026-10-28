@@ -32,10 +32,16 @@
     return null;
   }
 
-  /** The CSS text to inject for a page on `host`: the enabled overrides of "*" first, then the host's own. */
+  // An @import statement at the start of an override (quote-aware: a Google Fonts URL may hold ';'). Same as the panel's.
+  var LEADING_IMPORT = /^@import\s+url\(\s*(?:"[^"]*"|'[^']*'|[^)]*)\s*\)\s*;\s*/i;
+
+  /**
+   * The CSS text to inject for a page on `host`: the enabled overrides of "*" first, then the host's own —
+   * after the @imports the overrides start with, which a browser honours only before every other rule.
+   */
   function cssFor(all, host) {
     host = normHost(host);
-    var parts = [];
+    var imports = [], parts = [];
     var sites = host && host !== "*" ? ["*", host] : ["*"];
     sites.forEach(function (site) {
       var group = siteGroup(all, site);
@@ -43,10 +49,12 @@
       Object.keys(group).sort().forEach(function (name) {
         var o = group[name];
         if (!o || o.enabled === false || typeof o.css !== "string" || !o.css.trim()) return;
-        parts.push("/* " + (site === "*" ? "every site" : site) + " · " + String(name).replace(/\*\//g, "* /") + " */\n" + o.css.trim());
+        var css = o.css.trim(), m;
+        while ((m = LEADING_IMPORT.exec(css))) { if (imports.indexOf(m[0].trim()) === -1) imports.push(m[0].trim()); css = css.slice(m[0].length); }
+        parts.push("/* " + (site === "*" ? "every site" : site) + " · " + String(name).replace(/\*\//g, "* /") + " */\n" + css);
       });
     });
-    return parts.join("\n\n");
+    return (imports.length ? imports.join("\n") + "\n\n" : "") + parts.join("\n\n");
   }
 
   /**

@@ -3,8 +3,9 @@
 // through the styles extra's overrides (the same agentSiteStyles key, name "theme:<mode>"), so a theme
 // persists like any other override and shows up in the 🎨 tab. Built into extras.js only for brands that
 // switch the feature on (which need "styles" too — browser/brand.mjs FEATURE_REQUIRES); the tools are
-// declared in browser/host/extras/palette.ts. Also adds the 🧪 Palette tab of the 🧩 panel and the
-// "Design" quick commands. styles.js is concatenated before this file (OPT_IN_FEATURES order), so
+// declared in browser/host/extras/palette.ts. Colour harmonies of an accent (browser_palette_harmony:
+// wheel rotations, tints, shades, each with its contrast) come from the same colour maths. Also adds the
+// 🧪 Palette tab of the 🧩 panel and the "Design" quick commands. styles.js is concatenated before this file (OPT_IN_FEATURES order), so
 // AgentExtras.styles is defined by now.
 //
 // Page-side functions are injected with chrome.scripting.executeScript, so each is self-contained (no
@@ -557,6 +558,62 @@
     return Object.keys(group).filter(function (n) { return n.indexOf(THEME_PREFIX) === 0; }).map(function (n) { return { name: n, mode: n.slice(THEME_PREFIX.length), enabled: group[n].enabled !== false }; });
   }
 
+  // ── Harmonies (pure) ─────────────────────────────────────────────────────
+
+  function mix(hex, toward, k) { var c = parseColor(hex), t = parseColor(toward); return toHex({ r: c.r + (t.r - c.r) * k, g: c.g + (t.g - c.g) * k, b: c.b + (t.b - c.b) * k }); }
+  /**
+   * The harmonies of a colour, as hex: rotations of its hue on the HSL wheel (complementary 180°, split
+   * ±150°, analogous ±30°, triadic ±120°, tetradic 90°/180°/270°), five tints mixed toward white and five
+   * shades toward black (the hue kept, each step lighter / darker than the last). Throws when the colour
+   * cannot be parsed.
+   */
+  function harmony(color) {
+    var hex = normalizeColor(color);
+    if (!hex || hex === "transparent") throw new Error("'" + color + "' is not a colour — use #rrggbb, rgb() or hsl().");
+    var h = hslOf(hex);
+    function rot(d) { return hslHex(h.h + d, h.s, h.l); }
+    function ramp(toward) { var out = []; for (var i = 1; i <= 5; i++) out.push(mix(hex, toward, i / 6)); return out; }
+    return { base: hex, hsl: h, complementary: rot(180), split: [rot(150), rot(210)], analogous: [rot(-30), rot(30)], triadic: [rot(120), rot(240)], tetradic: [rot(90), rot(180), rot(270)], tints: ramp("#ffffff"), shades: ramp("#000000") };
+  }
+  /** The page's accent the way the themes pick it → { hex, from }, or null when nothing coloured stands out. */
+  function accentOf(p) {
+    function vivid(hex) { if (!hex || hex === "transparent") return false; var h = hslOf(hex); return !grey(h) && h.l > 8 && h.l < 92; }
+    if (p.button && vivid(p.button.bg)) return { hex: p.button.bg, from: "its button colour" };
+    if (vivid(p.themeColor)) return { hex: p.themeColor, from: "its theme-color" };
+    if (vivid(p.link)) return { hex: p.link, from: "its link colour" };
+    var cands = (p.bg || []).concat(p.text || []).filter(function (c) { return vivid(c.hex); });
+    return cands.length ? { hex: cands[0].hex, from: "its most used saturated colour" } : null;
+  }
+  function pad(s, n) { s = String(s); while (s.length < n) s += " "; return s; }
+  function ratioMark(hex, bg) { var r = contrastRatio(hex, bg); return r.toFixed(2) + ":1 " + (r >= 4.5 ? "✓ AA" : r >= 3 ? "⚠ large only" : "⚠"); }
+  /** The harmonies as CSS variables on :root, ready to paste. */
+  function harmonyVars(hm) {
+    var lines = [":root {", "  --accent: " + hm.base + ";", "  --accent-2: " + hm.complementary + "; /* complementary */", "  --accent-3: " + hm.split[0] + "; /* split-complementary */", "  --accent-4: " + hm.split[1] + ";"];
+    hm.analogous.forEach(function (x, i) { lines.push("  --accent-analogous-" + (i + 1) + ": " + x + ";"); });
+    hm.triadic.forEach(function (x, i) { lines.push("  --accent-triad-" + (i + 1) + ": " + x + ";"); });
+    hm.tetradic.forEach(function (x, i) { lines.push("  --accent-tetrad-" + (i + 1) + ": " + x + ";"); });
+    hm.tints.forEach(function (x, i) { lines.push("  --accent-tint-" + (i + 1) + ": " + x + ";"); });
+    hm.shades.forEach(function (x, i) { lines.push("  --accent-shade-" + (i + 1) + ": " + x + ";"); });
+    lines.push("  --on-accent: " + readableOn(hm.base) + "; /* text on the accent */", "}");
+    return lines.join("\n");
+  }
+  /** The browser_palette_harmony report: every colour with its contrast against `bg`, then the variables. */
+  function formatHarmony(hm, bg, words) {
+    var lines = ["Harmonies of " + hm.base + " (hue " + hm.hsl.h + "°, " + hm.hsl.s + "% saturation, " + Math.round(hm.hsl.l) + "% lightness)" + (words || "") + ", contrast against " + bg + ":"];
+    function row(label, list) { lines.push("  " + pad(label, 21) + list.map(function (x) { return x + " " + ratioMark(x, bg); }).join("   ")); }
+    row("base", [hm.base]);
+    row("complementary", [hm.complementary]);
+    row("split-complementary", hm.split);
+    row("analogous (±30°)", hm.analogous);
+    row("triadic", hm.triadic);
+    row("tetradic", hm.tetradic);
+    row("tints → white", hm.tints);
+    row("shades → black", hm.shades);
+    if (hm.hsl.s < 10) lines.push("  (a grey has no hue, so the rotations repeat it — pass a saturated colour)");
+    lines.push("", "✓ AA = 4.5:1 or more, fine for text; ⚠ large only = 3:1 or more, fine for large text (24px, or 18.66px bold), icons and borders; ⚠ = below 3:1, decorative use only.", "", harmonyVars(hm));
+    return lines.join("\n");
+  }
+
   // ── Doing it: extract, contrast, theme (shared by the tools and the tab) ───
 
   async function extract() {
@@ -630,6 +687,30 @@
       ? "Previewing the " + MODES[r.mode].toLowerCase() + " theme in the current tab (not saved — it goes with the next load; call again without preview to keep it)."
       : "Saved the " + MODES[r.mode].toLowerCase() + " theme as override '" + r.name + "' for " + r.site + " (" + (r.size / 1024).toFixed(1) + " KB)" + (r.replaced.length ? ", replacing " + r.replaced.join(", ") : "") + (r.applied ? "; applied in the current tab" : "") + ". The site keeps it until browser_style_remove or mode=off.";
     return text(head + "\nMapping:\n" + formatMapping(r.mapping) + "\nCheck it with browser_screenshot; fix a spot with a browser_style_apply rule.");
+  });
+
+  T.register("browser_palette_harmony", async function (a) {
+    a = a || {};
+    var base, bg, words = "";
+    // The given colours are checked before the page is read: a bad argument should not cost a page walk.
+    if (a.color) {
+      base = normalizeColor(a.color);
+      if (!base || base === "transparent") throw new Error("'" + a.color + "' is not a colour — use #rrggbb, rgb() or hsl().");
+    }
+    if (a.background) {
+      bg = normalizeColor(a.background);
+      if (!bg || bg === "transparent") throw new Error("'" + a.background + "' is not a colour — use #rrggbb, rgb() or hsl().");
+    }
+    var p = null, pageErr = "";
+    if (!base || !bg) { try { p = await extract(); } catch (e) { pageErr = String((e && e.message) || e); } }
+    if (!base) {
+      if (!p) throw new Error("Couldn't read the page's palette (" + pageErr + ") — pass color.");
+      var acc = accentOf(p);
+      if (!acc) throw new Error("No accent stands out on this page (no coloured buttons, theme-color or links) — pass color.");
+      base = acc.hex; words = " — the page's accent (" + acc.from + ")";
+    }
+    if (!bg) bg = p ? p.body.bg : "#ffffff";
+    return text(formatHarmony(harmony(base), bg, words) + (!a.background && !p ? "\n(the page could not be read: " + pageErr + "; measured against white)" : ""));
   });
 
   // ── The 🧪 Palette tab ───────────────────────────────────────────────────
@@ -735,7 +816,8 @@
   globalThis.AgentExtras.commands.push(
     { group: "Design", icon: "🧪", name: "What colours and fonts does this page use?", prompt: "What colours and fonts does this page use? Extract its palette (browser_palette_extract) and describe it: the main text and background colours, the accent, the font families and the type scale, the spacing rhythm — in a few lines, then the CSS variables block." },
     { group: "Design", icon: "🔍", name: "Check this page's contrast", prompt: "Check this page's text contrast against WCAG 2 AA (browser_palette_contrast). List what fails with the ratio and where it is, and propose a fix for each (a colour of the same hue that passes) — apply the fixes as style overrides only if I ask." },
-    { group: "Design", icon: "🌙", name: "Dark theme for this site", prompt: "Give this site a dark theme: build it from the page's own palette with browser_palette_theme mode=dark (it is saved as the site's 'theme:dark' override and kept), take a screenshot, and fix anything that stayed light or became unreadable with targeted browser_style_apply rules — never an invert filter on the whole page, images must stay as they are." }
+    { group: "Design", icon: "🌙", name: "Dark theme for this site", prompt: "Give this site a dark theme: build it from the page's own palette with browser_palette_theme mode=dark (it is saved as the site's 'theme:dark' override and kept), take a screenshot, and fix anything that stayed light or became unreadable with targeted browser_style_apply rules — never an invert filter on the whole page, images must stay as they are." },
+    { group: "Design", icon: "🎯", name: "Colour harmonies from this site's accent", prompt: "Take this site's accent colour and show me its harmonies (browser_palette_harmony with no arguments picks the accent and the background from the page): complementary, split-complementary, analogous, triadic, tetradic, tints and shades, each with its contrast against the page background. Recommend one for a hover state and one for a secondary button, and give me the :root variables block." }
   );
 
   // ── Exports: the pure parts, for tests and other modules ──────────────────
@@ -747,6 +829,7 @@
     summarizePalette: summarizePalette, formatPalette: formatPalette, cssVariables: cssVariables,
     evaluateContrast: evaluateContrast, formatContrast: formatContrast, suggestText: suggestText,
     tokensFor: tokensFor, mapBg: mapBg, mapText: mapText, mapBorder: mapBorder, themeCss: themeCss, formatMapping: formatMapping, themesOf: themesOf,
+    harmony: harmony, accentOf: accentOf, harmonyVars: harmonyVars, formatHarmony: formatHarmony, mix: mix,
     extract: extract, contrast: contrast, applyTheme: applyTheme,
     pageExtractPalette: pageExtractPalette, pageContrast: pageContrast,
   };

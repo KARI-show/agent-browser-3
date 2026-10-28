@@ -12,7 +12,8 @@ export const palette: ExtraFeature = {
   prompt: `## Palette
 - browser_palette_extract reads what the page is made of: text, background and border colours with counts, font families with their sizes and weights (the type scale), the most common spacings, the theme colour and the colour variables on :root. Use it to answer "what colours / fonts does this site use", to pick colours that fit the site before writing an override, and before building a theme; as="css" gives the colours as CSS variables to paste.
 - browser_palette_contrast checks the visible text against WCAG 2 AA (4.5:1, 3:1 for large text) and lists the failing styles with the text, the ratio, a selector and both colours. Fix one with a browser_style_apply rule for that selector and check again; ratios over background images are approximate.
-- browser_palette_theme builds a dark, sepia, high-contrast or custom theme from the extracted palette — the common backgrounds and text colours are mapped to counterparts and color-scheme is set; it is not an invert filter, so images stay as they are — and saves it as the site's "theme:<mode>" override (persistent, listed by browser_style_list and in the 🎨 tab). One theme per site: a new one replaces the earlier; preview=true applies it without saving; mode="off" removes the site's theme.`,
+- browser_palette_theme builds a dark, sepia, high-contrast or custom theme from the extracted palette — the common backgrounds and text colours are mapped to counterparts and color-scheme is set; it is not an invert filter, so images stay as they are — and saves it as the site's "theme:<mode>" override (persistent, listed by browser_style_list and in the 🎨 tab). One theme per site: a new one replaces the earlier; preview=true applies it without saving; mode="off" removes the site's theme.
+- browser_palette_harmony builds colour harmonies from one colour (default: the page's accent — its button, theme-color or link colour — against its background): complementary, split-complementary, analogous, triadic, tetradic, a tint ramp and a shade ramp, each with its WCAG contrast against the background, plus a :root variables block. Use it to pick a hover, button or accent colour that fits the site before writing an override or a custom theme.`,
   tools: [
     {
       name: "browser_palette_extract",
@@ -65,6 +66,22 @@ export const palette: ExtraFeature = {
           .describe("mode=custom: colour tokens — bg, surface, text, muted, link, accent, accentText, border (hex or rgb()); scheme: 'dark' | 'light'"),
         preview: z.boolean().optional().describe("Apply in the current tab without saving (default false)"),
         site: z.string().optional().describe("Host the theme belongs to (default: the current tab's)"),
+      },
+    },
+    {
+      name: "browser_palette_harmony",
+      feature: "palette",
+      readOnly: true,
+      description:
+        "Colour harmonies of a colour, as hex: complementary, split-complementary (2), analogous (2, ±30°), " +
+        "triadic (2), tetradic (3), a tint ramp (5 steps toward white) and a shade ramp (5 steps toward black), " +
+        "each with its WCAG 2 contrast ratio against the background (✓ AA at 4.5:1 for text, ⚠ below it, with " +
+        "the 3:1 large-text/UI mark), plus a ready :root { --accent… } variables block. Without color it takes " +
+        "the current page's accent (its button background, theme-color or link colour, whichever stands out); " +
+        "without background, the page's body background.",
+      shape: {
+        color: z.string().optional().describe("The base colour: hex, rgb() or hsl() (default: the page's accent)"),
+        background: z.string().optional().describe("The background the ratios are measured against (default: the page's background)"),
       },
     },
   ],

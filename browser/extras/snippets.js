@@ -1,8 +1,9 @@
 // Extra feature "snippets" (side panel): texts the user saved — a signature, a standard reply, an
 // address, a form answer — inserted into forms and editors, with {{placeholders}} filled at insert
-// time. Stored in chrome.storage.local under one key (capped). Built into extras.js only for brands
-// that switch the feature on; the tools are declared in browser/host/extras/snippets.ts. Also adds
-// the ✂️ Snippets tab of the 🧩 panel and two "Writing" quick commands.
+// time, and edited in place (browser_snippet_update keeps the id and the history). Stored in
+// chrome.storage.local under one key (capped). Built into extras.js only for brands that switch the
+// feature on; the tools are declared in browser/host/extras/snippets.ts. Also adds the ✂️ Snippets
+// tab of the 🧩 panel and two "Writing" quick commands.
 //
 // Page-side functions are injected with chrome.scripting.executeScript, so each is self-contained
 // (no closures over this file). The tab's DOM is built with ctx.el, never innerHTML: snippet texts
@@ -131,6 +132,43 @@
     var s = findSnippet(list, a);
     await store(list.filter(function (x) { return x.id !== s.id; }));
     return s;
+  }
+
+  /**
+   * Edit a snippet in place (newName, text, tags — at least one) → { snippet, changes }. The id, the
+   * creation date and the use count stay; a rename to a name another snippet has is refused.
+   */
+  async function updateSnippet(a) {
+    a = a || {};
+    if (a.newName === undefined && a.text === undefined && a.tags === undefined) throw new Error("Nothing to change — pass newName, text or tags.");
+    var list = await load();
+    var s = findSnippet(list, a);
+    var next = Object.assign({}, s), changes = [];
+    if (a.newName !== undefined) {
+      var name = String(a.newName || "").replace(/\s+/g, " ").trim().slice(0, 60);
+      if (!name) throw new Error("newName must not be empty.");
+      var clash = list.filter(function (x) { return x.id !== s.id && x.name.toLowerCase() === name.toLowerCase(); })[0];
+      if (clash) throw new Error("Another snippet is already named '" + clash.name + "' (id " + clash.id + ") — pick a different name, or delete that one first.");
+      if (name !== s.name) { next.name = name; changes.push("renamed '" + s.name + "' → '" + name + "'"); }
+    }
+    if (a.text !== undefined) {
+      var body = String(a.text == null ? "" : a.text);
+      if (!body.trim()) throw new Error("text must not be empty — browser_snippet_delete removes a snippet.");
+      if (body.length > MAX_TEXT) throw new Error("The snippet is too long (" + body.length + " chars; the limit is " + MAX_TEXT + ").");
+      if (body !== s.text) {
+        var ph = placeholders(body);
+        next.text = body;
+        changes.push("text " + s.text.length + " → " + body.length + " chars" + (ph.length ? " (placeholders: " + ph.join(", ") + ")" : ""));
+      }
+    }
+    if (a.tags !== undefined) {
+      var tags = normTags(a.tags);
+      if (tags.join(",") !== (s.tags || []).join(",")) { next.tags = tags; changes.push("tags " + ((s.tags || []).join(", ") || "none") + " → " + (tags.join(", ") || "none")); }
+    }
+    if (!changes.length) return { snippet: s, changes: [] };
+    next.updated = Date.now();
+    await store(list.map(function (x) { return x.id === s.id ? next : x; }));
+    return { snippet: next, changes: changes };
   }
 
   async function bumpUse(id) {
@@ -262,6 +300,12 @@
     return text("Inserted snippet '" + s.name + "' (" + r.filled.length + " chars) " + r.how + ".");
   });
 
+  T.register("browser_snippet_update", async function (a) {
+    var r = await updateSnippet(a);
+    if (!r.changes.length) return text("Snippet '" + r.snippet.name + "' (id " + r.snippet.id + ") already has these values — nothing changed.");
+    return text("Updated snippet '" + r.snippet.name + "' (id " + r.snippet.id + "): " + r.changes.join("; ") + ".");
+  });
+
   T.register("browser_snippet_delete", async function (a) {
     var s = await deleteSnippet(a);
     return text("Deleted snippet '" + s.name + "'.");
@@ -390,6 +434,7 @@
     findSnippet: findSnippet,
     load: load,
     saveSnippet: saveSnippet,
+    updateSnippet: updateSnippet,
     deleteSnippet: deleteSnippet,
     insertSnippet: insertSnippet,
     pageInsertAtCaret: pageInsertAtCaret,

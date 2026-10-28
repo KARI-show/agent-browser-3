@@ -154,7 +154,7 @@ after(async () => {
 
 // ── The panel: tabs, quick commands, tools, the content script ─────────────
 
-test("palette's panel has the 🎨 Styles and 🧪 Palette tabs, six Design commands, seven tools registered and declared, and the content script registered", { skip }, async () => {
+test("palette's panel has the 🎨 Styles and 🧪 Palette tabs, the Design commands, twelve tools registered and declared, and the content script registered", { skip }, async () => {
   const seen = await inPanel(`({
     brand: AGENT_BRAND.id,
     tabs: AgentExtras.tabs.map((t) => [t.id, t.label, t.storageKeys]),
@@ -175,7 +175,7 @@ test("palette's panel has the 🎨 Styles and 🧪 Palette tabs, six Design comm
     ["Design", "What colours and fonts does this page use?", false], ["Design", "Check this page's contrast", false], ["Design", "Dark theme for this site", false],
   ];
   assert.deepEqual(seen.commands.filter((c) => ownCommands.some((o) => o[1] === c[1])), ownCommands);
-  const tools = ["browser_palette_contrast", "browser_palette_extract", "browser_palette_theme", "browser_style_apply", "browser_style_inspect", "browser_style_list", "browser_style_remove"];
+  const tools = ["browser_palette_contrast", "browser_palette_extract", "browser_palette_harmony", "browser_palette_theme", "browser_style_apply", "browser_style_export", "browser_style_font", "browser_style_import", "browser_style_inspect", "browser_style_list", "browser_style_preset", "browser_style_remove"];
   assert.deepEqual(seen.registered, tools);
   assert.deepEqual(seen.declared, tools, "the built-in agent declares the same tools");
   assert.deepEqual(seen.extraObjects, ["object", "object"]);

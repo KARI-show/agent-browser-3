@@ -1,6 +1,7 @@
 // Fakes for unit-testing the Palette brand's extras (tests/styles.test.mjs, tests/palette.test.mjs) in
 // node: a chrome with storage.local (+ onChanged) / tabs / scripting (executeScript answers by the
-// injected function's name and records the call; registerContentScripts is recorded), the
+// injected function's name and records the call; registerContentScripts is recorded) / downloads
+// (download records the call and hands out ids), the
 // AgentBrowserTools registry with its helpers (refTarget included) and run(), an AgentExtras registry,
 // the brand flag, a tiny DOM stand-in for the 🧩 tab's ctx.el — and a fake document + MutationObserver
 // for the content script (browser/extras/styles.cs.js). Same approach as tests/mocks/extras-quill.mjs.
@@ -16,6 +17,8 @@ export function fakeChrome({ url = "https://www.example.com/page?x=1" } = {}) {
   const listeners = [];
   // scripting.results[funcName] = value | (…args) => value — what the injected function "returns".
   const scripting = { results: {}, calls: [], registered: [], fail: null };
+  // downloads.calls = [{ url, filename, conflictAction }]; downloads.fail = a message makes the next download throw.
+  const downloads = { calls: [], fail: null, nextId: 41 };
   const chrome = {
     storage: {
       local: {
@@ -61,8 +64,15 @@ export function fakeChrome({ url = "https://www.example.com/page?x=1" } = {}) {
       },
     },
     runtime: { getURL: (p) => "chrome-extension://abc/" + p },
+    downloads: {
+      async download(o) {
+        downloads.calls.push(plain(o));
+        if (downloads.fail) throw new Error(downloads.fail);
+        return downloads.nextId++;
+      },
+    },
   };
-  return { chrome, data, scripting, listeners };
+  return { chrome, data, scripting, listeners, downloads };
 }
 
 /** AgentBrowserTools as browserTools.js exposes it to the extras, over the fake chrome. */

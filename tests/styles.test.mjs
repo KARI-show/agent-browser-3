@@ -1,7 +1,7 @@
 // Site styles (browser/extras/styles.js and its content script browser/extras/styles.cs.js) against fakes
 // of chrome.storage / tabs / scripting and the tool registry: the pure helpers (hosts, the cascade,
-// CSS validation), browser_style_apply / list / remove / inspect, the 🎨 tab, the content-script
-// registration — and the content script itself against a fake document: what it injects for a host
+// CSS validation), browser_style_apply / list / remove / inspect, the presets, the fonts override, the
+// UserCSS export and import, the 🎨 tab, the content-script registration — and the content script itself against a fake document: what it injects for a host
 // and for "*", what it ignores, how it follows storage changes and keeps its element last in <head>.
 // The page-side functions run for real in tests/e2e/extras-palette.e2e.mjs.
 import { test } from "node:test";
@@ -13,21 +13,26 @@ import { fakeCtx, fakeDom, loadContentScript, loadExtras, plain, runTool, settle
 const load = (opts) => loadExtras({ ids: ["styles"], features: { styles: true }, ...(opts || {}) });
 const stored = (data) => data.agentSiteStyles || {};
 
-test("loads only for a brand with the feature; registers four tools, the 🎨 tab, three Design commands and the content script once", async () => {
+test("loads only for a brand with the feature; registers eight tools, the 🎨 tab, seven Design commands and the content script once", async () => {
   const off = load({ features: { styles: false, palette: true } });
   assert.deepEqual(off.T.names, []);
   assert.deepEqual(off.tabs, []);
   assert.equal(off.S, undefined);
 
   const { T, tabs, commands, S, scripting } = load();
-  assert.deepEqual(T.names, ["browser_style_inspect", "browser_style_apply", "browser_style_list", "browser_style_remove"]);
+  assert.deepEqual(T.names, ["browser_style_inspect", "browser_style_apply", "browser_style_list", "browser_style_remove", "browser_style_preset", "browser_style_font", "browser_style_export", "browser_style_import"]);
   assert.equal(tabs[0].label, "🎨 Styles");
   assert.deepEqual(plain(tabs[0].storageKeys), ["agentSiteStyles"]);
   assert.deepEqual(commands.map((c) => [c.group, c.name, !!c.partial]), [
     ["Design", "Make this page easier to read", false], ["Design", "Hide the distractions on this page", false], ["Design", "Show this site's style overrides", false],
+    ["Design", "Reading mode for this site", false], ["Design", "Dyslexia-friendly text", false], ["Design", "Change the site's fonts", true], ["Design", "Export my styles for Stylus", false],
   ]);
   for (const c of commands.slice(0, 2)) { assert.match(c.prompt, /browser_style_inspect/); assert.match(c.prompt, /browser_style_apply/); assert.match(c.prompt, /consent/i); }
   assert.match(commands[2].prompt, /browser_style_list/);
+  assert.match(commands[3].prompt, /browser_style_preset preset=reading/);
+  assert.match(commands[4].prompt, /browser_style_preset preset=dyslexia/);
+  assert.match(commands[5].prompt, /browser_style_font.*to: $/);
+  assert.match(commands[6].prompt, /browser_style_export with save=true/);
   assert.equal(await S.ready, true);
   assert.deepEqual(scripting.registered, [{ id: "extras-styles", js: ["extras-styles.cs.js"], matches: ["http://*/*", "https://*/*"], runAt: "document_start", persistAcrossSessions: true }]);
   // A second panel load finds it registered and does not register twice.
@@ -290,6 +295,294 @@ test("the 🎨 tab: lists the site's and the global overrides with pause / edit 
   assert.deepEqual(ctx.prompts, []);
 });
 
+// A parser stand-in that takes every "property: value" declaration (the real one also knows the values).
+class LenientSheet {
+  constructor() { this.cssRules = []; }
+  insertRule(rule, i) {
+    if (/^@import/.test(rule)) throw new Error("Can't insert @import rules into a constructed stylesheet.");
+    if (!/^[^{]+\{[^]*\}$/.test(rule.trim())) throw new Error("Failed to execute 'insertRule' on 'CSSStyleSheet': Failed to parse the rule '" + rule + "'.");
+    const body = rule.slice(rule.indexOf("{") + 1, rule.lastIndexOf("}"));
+    const style = { props: {}, getPropertyValue(p) { return this.props[p] || ""; } };
+    for (const d of body.split(";")) { const m = /^\s*([-\w]+)\s*:\s*(\S[^]*)$/.exec(d); if (m) style.props[m[1]] = m[2].trim(); }
+    style.length = Object.keys(style.props).length;
+    this.cssRules.splice(i, 0, { style });
+  }
+}
+
+test("presets: every preset validates (structure, and with a parser), browser_style_preset keeps one 'Preset: …' override per site, replaces it with another, resumes a paused one, off removes it", async () => {
+  const { T, S, data, scripting } = load({ globals: { CSSStyleSheet: LenientSheet } });
+  assert.deepEqual(Object.keys(S.PRESETS), ["reading", "focus", "compact", "dyslexia", "print"]);
+  assert.deepEqual(plain(S.PRESET_NAMES), ["reading", "focus", "compact", "dyslexia", "print"]);
+  for (const [name, css] of Object.entries(S.PRESETS)) {
+    const v = S.validateCss(css);
+    assert.equal(v.ok, true, name + ": " + v.error);
+    assert.ok(v.rules >= 8, name + " has rules");
+    assert.ok(css.length < S.MAX_CSS / 4, name + " is small");
+    assert.equal(load().S.validateCss(css).ok, true, name + " without a parser");
+  }
+  for (const re of [/^html \{ font-size: 18px !important; \}$/m, /max-width: 68ch/, /line-height: 1\.7/, /\[class\*="sidebar"\][^\n]*\[class\*="promo"\][^\n]*\[class\*="newsletter"\][^\n]*\{ display: none !important; \}/, /^\*, \*::before, \*::after \{ animation: none !important; \}$/m]) assert.match(S.PRESETS.reading, re);
+  assert.doesNotMatch(S.PRESETS.reading, /cookie|consent|login|sign/i, "consent and security UI are never hidden");
+  assert.ok(S.PRESETS.focus.startsWith(S.PRESETS.reading), "focus builds on reading");
+  assert.match(S.PRESETS.focus, /^img, video, iframe, embed, object \{ opacity: 0\.35 !important; \}\nimg:hover[^\n]* \{ opacity: 1 !important; \}$/m);
+  assert.match(S.PRESETS.focus, /^header, footer, nav, [^\n]*\[class\*="sticky"\][^\n]* \{ position: static !important; \}$/m);
+  assert.match(S.PRESETS.compact, /^html \{ font-size: 13px !important; \}$/m);
+  assert.match(S.PRESETS.compact, /line-height: 1\.35/);
+  assert.match(S.PRESETS.compact, /^h1 \{ font-size: 1\.6em !important; \}$/m);
+  for (const re of [/Verdana/, /letter-spacing: 0\.05em/, /word-spacing: 0\.1em/, /line-height: 1\.8/, /text-align: left/, /#fbf7ef/, /color: #222222/, /^a \{ text-decoration: underline !important; \}$/m]) assert.match(S.PRESETS.dyslexia, re);
+  for (const re of [/background-color: #ffffff !important; color: #000000 !important/, /^nav, aside, footer, video, iframe[^\n]* \{ display: none !important; \}$/m, /a\[href\^="http"\]::after \{ content: " \(" attr\(href\) "\)"/, /position: static !important/]) assert.match(S.PRESETS.print, re);
+
+  await assert.rejects(T.run("browser_style_preset", { preset: "neon" }), /preset must be one of reading, focus, compact, dyslexia, print — or off/);
+  await assert.rejects(T.run("browser_style_preset", {}), /preset must be one of/);
+  assert.equal(await runTool(T, "browser_style_preset", { preset: "off" }), "No preset is on for example.com. Presets: reading, focus, compact, dyslexia, print.");
+  const on = await runTool(T, "browser_style_preset", { preset: "reading" });
+  const readingRules = S.validateCss(S.PRESETS.reading).rules;
+  assert.match(on, new RegExp("^Preset 'reading' is on for example\\.com — override 'Preset: reading' \\(\\d\\.\\d KB, " + readingRules + " rules\\)\\. Applied in the current tab; the site keeps it until browser_style_preset preset=off \\(or browser_style_remove\\)\\. Check it with browser_screenshot"));
+  assert.match(on, /Other presets: focus, compact, dyslexia, print\.$/);
+  assert.deepEqual(Object.keys(stored(data)["example.com"]), ["Preset: reading"]);
+  assert.equal(stored(data)["example.com"]["Preset: reading"].css, S.PRESETS.reading);
+  assert.equal(scripting.calls.at(-1).func, "pageApplyStyles");
+  assert.match(scripting.calls.at(-1).args[0], /^\/\* example\.com · Preset: reading \*\/\n\/\* Reading:/);
+
+  // Another preset replaces it, applying twice keeps one, other overrides stay.
+  await runTool(T, "browser_style_apply", { name: "wider", css: "main { max-width: 90ch }" });
+  assert.match(await runTool(T, "browser_style_preset", { preset: "focus" }), /^Preset 'focus' is on for example\.com — override 'Preset: focus' \(\d\.\d KB, \d+ rules, replacing reading\)\. Applied/);
+  assert.deepEqual(Object.keys(stored(data)["example.com"]).sort(), ["Preset: focus", "wider"]);
+  assert.match(await runTool(T, "browser_style_preset", { preset: "focus" }), /^Preset 'focus' is on for example\.com — override 'Preset: focus' \(\d\.\d KB, \d+ rules, refreshed\)\./);
+  assert.deepEqual(Object.keys(stored(data)["example.com"]).sort(), ["Preset: focus", "wider"]);
+  assert.equal(Object.keys(stored(data)["example.com"]).filter((n) => n.startsWith("Preset: ")).length, 1, "one preset at a time");
+  assert.deepEqual(plain(S.presetsOf(stored(data), "example.com")), [{ name: "Preset: focus", preset: "focus", enabled: true }]);
+  // A paused preset comes back on when it is applied again.
+  stored(data)["example.com"]["Preset: focus"].enabled = false;
+  await runTool(T, "browser_style_preset", { preset: "focus" });
+  assert.equal(stored(data)["example.com"]["Preset: focus"].enabled, true);
+  // Another site by name; off removes the preset and nothing else.
+  assert.match(await runTool(T, "browser_style_preset", { preset: "print", site: "www.Other.com" }), /^Preset 'print' is on for other\.com — override 'Preset: print' \([^)]*\)\. Saved; it applies on other\.com \(the current tab is example\.com\)/);
+  assert.deepEqual(Object.keys(stored(data)["other.com"]), ["Preset: print"]);
+  assert.equal(await runTool(T, "browser_style_preset", { preset: "off" }), "Preset focus is off for example.com (override 'Preset: focus' removed; its other overrides are untouched). The current tab is updated.");
+  assert.deepEqual(Object.keys(stored(data)["example.com"]), ["wider"]);
+  assert.deepEqual(scripting.calls.at(-1).args, ["/* example.com · wider */\nmain { max-width: 90ch }", "data-agent-styles"]);
+});
+
+test("fontCss / browser_style_font: !important family rules for body text, headings and code, a base size, a Google Fonts @import at the top that the validator lets through and the cascade hoists; other @imports stay refused", async () => {
+  const { T, S, data, scripting } = load();
+  assert.throws(() => S.fontCss({}), /Nothing to set — pass body, headings or code/);
+  assert.throws(() => S.fontCss({ size: 9 }), /size must be a base font size between 12 and 24/);
+  assert.throws(() => S.fontCss({ size: 25 }), /between 12 and 24/);
+  assert.throws(() => S.fontCss({ googleFont: "Inter; evil" }), /googleFont must be a Google Fonts family name/);
+  const css = S.fontCss({ body: "Georgia, serif", headings: "'Helvetica Neue', sans-serif", code: "'JetBrains Mono', monospace", size: 18 });
+  assert.equal(css, [
+    "/* Fonts */",
+    "body, p, li, dd, dt, td, th, blockquote, figcaption, label, legend, summary, caption, input, select, textarea, button { font-family: Georgia, serif !important; }",
+    "h1, h2, h3, h4, h5, h6 { font-family: 'Helvetica Neue', sans-serif !important; }",
+    "code, pre, kbd, samp, var, tt { font-family: 'JetBrains Mono', monospace !important; }",
+    "html { font-size: 18px !important; }",
+  ].join("\n"));
+  assert.deepEqual(plain(S.validateCss(css)), { ok: true, rules: 4 });
+  assert.equal(S.fontCss({ size: 16 }), "/* Fonts */\nhtml { font-size: 16px !important; }");
+  // A value cannot end the declaration or the rule early: the override stays one rule.
+  const sneaky = S.fontCss({ body: "Georgia; } body { display: none" });
+  assert.equal(sneaky.split("\n").length, 2);
+  assert.deepEqual(plain(S.validateCss(sneaky)), { ok: true, rules: 1 });
+  assert.doesNotMatch(sneaky, /\{ display/);
+  // Google Fonts: the @import first, the family for body and headings unless they are given.
+  const g = S.fontCss({ googleFont: " Source  Serif 4 ", headings: "Inter, sans-serif" });
+  assert.equal(g, [
+    '@import url("https://fonts.googleapis.com/css2?family=Source+Serif+4&display=swap");',
+    "/* Fonts — Source Serif 4 from Google Fonts */",
+    'body, p, li, dd, dt, td, th, blockquote, figcaption, label, legend, summary, caption, input, select, textarea, button { font-family: "Source Serif 4", sans-serif !important; }',
+    "h1, h2, h3, h4, h5, h6 { font-family: Inter, sans-serif !important; }",
+  ].join("\n"));
+  assert.deepEqual(plain(S.fontOptions({ googleFont: "Inter" })), { body: "Inter, sans-serif", headings: "Inter, sans-serif", code: "", size: null, googleFont: "Inter" });
+  assert.deepEqual(plain(S.validateCss(g)), { ok: true, rules: 2 }, "the Google Fonts import passes; rules counted without it");
+  assert.equal(load({ globals: { CSSStyleSheet: LenientSheet } }).S.validateCss(g).ok, true, "the @import is not handed to a constructed sheet (which refuses it)");
+  assert.match(S.validateCss('h1 { color: red }\n@import url("https://fonts.googleapis.com/css2?family=Inter&display=swap");').error, /The @import must come before the other rules/);
+  assert.match(S.validateCss('@import url("https://evil.example/x.css");\nh1 { color: red }').error, /@import is not allowed .* The one exception is a Google Fonts stylesheet/);
+  assert.match(S.validateCss('@import url("http://fonts.googleapis.com/css2?family=Inter");\nh1 { color: red }').error, /@import is not allowed/, "https only");
+  assert.match(S.validateCss('@import url("https://fonts.googleapis.com.evil.example/css2?family=Inter");\nh1 { color: red }').error, /@import is not allowed/);
+
+  // The tool: saved as 'Fonts' (the same name replaces), applied; the cascade puts the @import first even when other overrides sort before it.
+  await runTool(T, "browser_style_apply", { name: "A big text", css: "body { font-size: 20px }" });
+  await runTool(T, "browser_style_apply", { name: "global", css: "body { margin: 0 }", site: "*" });
+  await assert.rejects(T.run("browser_style_font", {}), /Nothing to set/);
+  const out = await runTool(T, "browser_style_font", { googleFont: "Inter", code: "monospace", size: 17 });
+  assert.match(out, /^Saved the 'Fonts' override for example\.com \(\d+ B\): body text → Inter, sans-serif; headings → Inter, sans-serif; code → monospace; base size → 17px\. 'Inter' is loaded with an @import from fonts\.googleapis\.com at the top of the override — a site's Content-Security-Policy can block that import, in which case the fallback fonts show/);
+  assert.match(out, /Applied in the current tab; the site keeps it until browser_style_remove name=Fonts\.$/);
+  assert.ok(stored(data)["example.com"].Fonts.css.startsWith('@import url("https://fonts.googleapis.com/css2?family=Inter&display=swap");\n'));
+  const injected = scripting.calls.at(-1).args[0];
+  assert.equal(injected, [
+    '@import url("https://fonts.googleapis.com/css2?family=Inter&display=swap");',
+    "",
+    "/* every site · global */", "body { margin: 0 }", "",
+    "/* example.com · A big text */", "body { font-size: 20px }", "",
+    "/* example.com · Fonts */", "/* Fonts — Inter from Google Fonts */",
+    "body, p, li, dd, dt, td, th, blockquote, figcaption, label, legend, summary, caption, input, select, textarea, button { font-family: Inter, sans-serif !important; }",
+    "h1, h2, h3, h4, h5, h6 { font-family: Inter, sans-serif !important; }",
+    "code, pre, kbd, samp, var, tt { font-family: monospace !important; }",
+    "html { font-size: 17px !important; }",
+  ].join("\n"), "the @import is hoisted above every override");
+  assert.match(await runTool(T, "browser_style_font", { body: "Georgia, serif" }), /^Replaced the 'Fonts' override for example\.com \(\d+ B\): body text → Georgia, serif\. Applied in the current tab/);
+  assert.doesNotMatch(stored(data)["example.com"].Fonts.css, /@import/);
+  assert.doesNotMatch(scripting.calls.at(-1).args[0], /@import/);
+  await runTool(T, "browser_style_font", { headings: "Inter", site: "*" });
+  assert.match(stored(data)["*"].Fonts.css, /^\/\* Fonts \*\/\nh1, h2, h3, h4, h5, h6 \{ font-family: Inter !important; \}$/);
+});
+
+test("toUserCss / browser_style_export: a UserCSS document with a header and one @-moz-document block per site (regexp for '*'), paused overrides commented out, @imports hoisted; format css is plain; save writes <site or all>-styles.user.css to Downloads", async () => {
+  const { T, S, data, downloads } = load();
+  await assert.rejects(T.run("browser_style_export", {}), /No style overrides saved yet — nothing to export/);
+  const t = Date.UTC(2026, 9, 26, 12);
+  data.agentSiteStyles = {
+    "example.com": {
+      "wider article": { css: "main article {\n  max-width: 70ch;\n}", enabled: true, t },
+      "hide sidebar": { css: "aside { display: none } /* gone */", enabled: false, t },
+      Fonts: { css: '@import url("https://fonts.googleapis.com/css2?family=Inter&display=swap");\nbody { font-family: Inter, sans-serif !important; }', enabled: true, t },
+    },
+    "*": { "big text": { css: "body { font-size: 18px }", enabled: true, t } },
+  };
+  const doc = S.toUserCss(data.agentSiteStyles, "", "usercss");
+  assert.equal(doc, [
+    "/* ==UserStyle==",
+    "@name           all sites — site styles",
+    "@namespace      agent-site-styles",
+    "@version        1.0.0",
+    "@description    4 overrides for all sites: big text, Fonts, hide sidebar, wider article",
+    "==/UserStyle== */",
+    "",
+    '@import url("https://fonts.googleapis.com/css2?family=Inter&display=swap");',
+    "",
+    '@-moz-document regexp(".*") {',
+    "  /* big text — saved 2026-10-26 */",
+    "  body { font-size: 18px }",
+    "}",
+    "",
+    '@-moz-document domain("example.com") {',
+    "  /* Fonts — saved 2026-10-26 */",
+    "  body { font-family: Inter, sans-serif !important; }",
+    "",
+    "  /* hide sidebar — saved 2026-10-26 — paused */",
+    "  /*",
+    "  aside { display: none } /* gone * /",
+    "  */",
+    "",
+    "  /* wider article — saved 2026-10-26 */",
+    "  main article {",
+    "    max-width: 70ch;",
+    "  }",
+    "}",
+  ].join("\n"));
+  assert.equal(await runTool(T, "browser_style_export", {}), doc);
+  // One site, plain CSS: no header, no blocks, the import still first.
+  const css = S.toUserCss(data.agentSiteStyles, "www.Example.com", "css");
+  assert.equal(css, [
+    '@import url("https://fonts.googleapis.com/css2?family=Inter&display=swap");',
+    "",
+    "/* ── example.com ── */",
+    "/* Fonts — saved 2026-10-26 */",
+    "body { font-family: Inter, sans-serif !important; }",
+    "",
+    "/* hide sidebar — saved 2026-10-26 — paused */",
+    "/*",
+    "aside { display: none } /* gone * /",
+    "*/",
+    "",
+    "/* wider article — saved 2026-10-26 */",
+    "main article {",
+    "  max-width: 70ch;",
+    "}",
+  ].join("\n"));
+  assert.equal(await runTool(T, "browser_style_export", { site: "example.com", format: "css" }), css);
+  assert.match(await runTool(T, "browser_style_export", { site: "*" }), /^\/\* ==UserStyle==\n@name           every site — site styles\n[^]*@description    1 override for every site: big text\n==\/UserStyle== \*\/\n\n@-moz-document regexp\("\.\*"\) \{\n  \/\* big text — saved 2026-10-26 \*\/\n  body \{ font-size: 18px \}\n\}$/);
+  await assert.rejects(T.run("browser_style_export", { site: "nothing.example" }), /No style overrides for nothing\.example — nothing to export\. browser_style_list shows the sites that have some\./);
+  // The export round-trips through the parser.
+  assert.deepEqual(plain(S.parseUserCss(doc).map((e) => e.site)), ["*", "example.com"]);
+
+  // save: a data: URL to Downloads, the id reported.
+  const saved = await runTool(T, "browser_style_export", { save: true });
+  assert.match(saved, /^Saved all-styles\.user\.css to Downloads \(download id 41, \d+ B\): every site \(1\), example\.com \(3\)\. It installs in Stylus \(Manage → Import/);
+  assert.deepEqual(downloads.calls.map((c) => [c.filename, c.conflictAction]), [["all-styles.user.css", "uniquify"]]);
+  assert.equal(decodeURIComponent(downloads.calls[0].url.replace(/^data:text\/css;charset=utf-8,/, "")), doc);
+  assert.match(await runTool(T, "browser_style_export", { site: "example.com", format: "css", save: true }), /^Saved example\.com-styles\.css to Downloads \(download id 42, \d+ B\): example\.com \(3\)\. Plain CSS with a comment per override\.$/);
+  assert.equal(S.exportFilename("*", "usercss"), "every-site-styles.user.css");
+  downloads.fail = "Invalid filename";
+  await assert.rejects(T.run("browser_style_export", { save: true }), /Invalid filename/);
+  // A build without the downloads permission says so and keeps the text route.
+  const noDl = load();
+  delete noDl.chrome.downloads;
+  await runTool(noDl.T, "browser_style_apply", { name: "x", css: "h1 { color: red }" });
+  await assert.rejects(noDl.T.run("browser_style_export", { save: true }), /cannot save files \(no downloads permission\) — call again without save/);
+  assert.match(await runTool(noDl.T, "browser_style_export", {}), /@-moz-document domain\("example\.com"\)/);
+});
+
+test("parseUserCss / browser_style_import: a two-domain document goes to its sites (the header dropped, @imports put back), plain CSS takes the site, a broken block is reported and the others are saved", async () => {
+  const { T, S, data, scripting } = load();
+  const imp = '@import url("https://fonts.googleapis.com/css2?family=Inter&display=swap");\n';
+  const doc = [
+    "/* ==UserStyle==", "@name x", "@version 1.0.0", "==/UserStyle== */", "",
+    imp.trim(), "",
+    '@-moz-document domain("example.com"), domain("www.Other.com") {',
+    "  /* wider */",
+    "  main article {",
+    "    max-width: 70ch;",
+    "  }",
+    "}", "",
+    '@-moz-document url-prefix("https://docs.example.org/guide/") {',
+    "  h1 { color: red }",
+    "}", "",
+    '@-moz-document regexp(".*") {', "  body { font-size: 18px }", "}",
+    "", "/* a stray comment */",
+    '@-moz-document regexp("https?://.*gov/.*") {', "  p { color: blue }", "}",
+  ].join("\n");
+  assert.deepEqual(plain(S.parseUserCss(doc)), [
+    { site: "example.com", css: imp + "/* wider */\nmain article {\n  max-width: 70ch;\n}", prelude: 'domain("example.com"), domain("www.Other.com")' },
+    { site: "other.com", css: imp + "/* wider */\nmain article {\n  max-width: 70ch;\n}", prelude: 'domain("example.com"), domain("www.Other.com")' },
+    { site: "docs.example.org", css: imp + "h1 { color: red }", prelude: 'url-prefix("https://docs.example.org/guide/")' },
+    { site: "*", css: imp + "body { font-size: 18px }", prelude: 'regexp(".*")' },
+    { site: "", css: imp + "p { color: blue }", prelude: 'regexp("https?://.*gov/.*")' },
+  ]);
+  assert.deepEqual(plain(S.preludeSites('domain("A.com"), url("https://b.com/x"), regexp("^.*$"), domain("A.com")')), ["a.com", "b.com", "*"]);
+  // Plain CSS is one entry without a site; a header-only text is nothing; rules outside the blocks go to every site.
+  assert.deepEqual(plain(S.parseUserCss("h1 { color: red }\n/* c */\np { margin: 0 }")), [{ site: "", css: "h1 { color: red }\n/* c */\np { margin: 0 }" }]);
+  assert.deepEqual(plain(S.parseUserCss("/* ==UserStyle==\n@name x\n==/UserStyle== */\n\n/* only comments */")), []);
+  assert.deepEqual(plain(S.parseUserCss('body { margin: 0 }\n@-moz-document domain("a.com") { a::after { content: "}" } }')), [{ site: "a.com", css: 'a::after { content: "}" }', prelude: 'domain("a.com")' }, { site: "*", css: "body { margin: 0 }" }]);
+
+  await assert.rejects(T.run("browser_style_import", {}), /css is required/);
+  await assert.rejects(T.run("browser_style_import", { css: "/* nothing */" }), /No CSS rules found/);
+  const out = await runTool(T, "browser_style_import", { css: doc });
+  assert.match(out, /^Imported 4 overrides named 'Imported' \(the current tab is updated\):\n  example\.com: saved override 'Imported' \(\d+ B, 1 rule\)\n  other\.com: saved override 'Imported' \(\d+ B, 1 rule\)\n  docs\.example\.org: saved override 'Imported' \(\d+ B, 1 rule\)\n  every site: saved override 'Imported' \(\d+ B, 1 rule\)\n  skipped the block for regexp\("https\?:\/\/\.\*gov\/\.\*"\): no site — pass site, or use @-moz-document domain\("…"\) blocks\nThe sites keep them until browser_style_remove\.$/);
+  assert.deepEqual(Object.keys(stored(data)).sort(), ["*", "docs.example.org", "example.com", "other.com"]);
+  assert.equal(stored(data)["example.com"].Imported.css, imp + "/* wider */\nmain article {\n  max-width: 70ch;\n}");
+  assert.equal(stored(data)["*"].Imported.css, imp + "body { font-size: 18px }");
+  assert.equal(scripting.calls.at(-1).func, "pageApplyStyles");
+  assert.equal(scripting.calls.at(-1).args[0].split("\n\n")[0], imp.trim(), "the import is hoisted once");
+  assert.equal((scripting.calls.at(-1).args[0].match(/@import/g) || []).length, 1);
+  // With site, a block without a known site goes there too.
+  const withSite = await runTool(T, "browser_style_import", { css: '@-moz-document regexp("x") { p { color: blue } }', site: "gov.example", name: "blue" });
+  assert.match(withSite, /^Imported 1 override named 'blue'[^]*\n  gov\.example: saved override 'blue' \(17 B, 1 rule\)\n/);
+
+  // Plain CSS: the current tab's site (or site) under a name; the same name replaces.
+  assert.match(await runTool(T, "browser_style_import", { css: "h1 { color: red }", name: "Headline" }), /^Imported 1 override named 'Headline' \(the current tab is updated\):\n  example\.com: saved override 'Headline' \(17 B, 1 rule\)\nThe sites keep them/);
+  assert.match(await runTool(T, "browser_style_import", { css: "h1 { color: green }", name: "Headline", site: "www.Other.com" }), /other\.com: saved override 'Headline'/);
+  assert.match(await runTool(T, "browser_style_import", { css: "h1 { color: blue }", name: "Headline", site: "www.Other.com" }), /other\.com: replaced override 'Headline'/);
+  assert.equal(stored(data)["other.com"].Headline.css, "h1 { color: blue }");
+  // No website tab and no site: plain CSS cannot be placed.
+  T.noTab = true;
+  await assert.rejects(T.run("browser_style_import", { css: "h1 { color: red }" }), /Nothing was imported:\n  skipped the plain CSS: no site — pass site/);
+  T.noTab = false;
+  // One broken block is reported, the other is saved.
+  const mixed = '@-moz-document domain("a.com") {\n  color: red\n}\n@-moz-document domain("b.com") {\n  h2 { color: blue }\n}';
+  assert.equal(await runTool(T, "browser_style_import", { css: mixed }), [
+    "Imported 1 override named 'Imported' (the current tab is updated):",
+    "  b.com: saved override 'Imported' (18 B, 1 rule)",
+    '  a.com: refused the block for domain("a.com") — Text outside a rule: "color: red" — every declaration needs a selector and braces, e.g. h1 { color: red }',
+    "The sites keep them until browser_style_remove.",
+  ].join("\n"));
+  assert.equal(stored(data)["a.com"], undefined);
+  assert.equal(stored(data)["b.com"].Imported.css, "h2 { color: blue }");
+  // Everything broken (a block that never closes): an error with the reasons, nothing saved.
+  await assert.rejects(T.run("browser_style_import", { css: '@-moz-document domain("c.com") {\n  h1 { color: red' }), /Nothing was imported:\n  c\.com: refused the block for domain\("c\.com"\) — Missing '\}' — 1 block is not closed$/);
+  assert.equal(stored(data)["c.com"], undefined);
+});
+
 // ── The content script ───────────────────────────────────────────────────────
 
 const STORE = {
@@ -374,4 +667,19 @@ test("content script: start() is a factory a test (or another document) can driv
   assert.match(styleEl(cs.doc).textContent, /h1 \{ color: red \}/);
   applier.apply("");
   assert.equal(styleEl(cs.doc), null);
+});
+
+test("content script: the @import an override starts with is hoisted above every override, once, the same as the panel's cascade", async () => {
+  const store = {
+    "example.com": { Fonts: { css: '@import url("https://fonts.googleapis.com/css2?family=Inter&display=swap");\nbody { font-family: Inter }', enabled: true, t: 1 }, A: { css: "h1 { color: red }", enabled: true, t: 1 } },
+    "*": { g: { css: '@import url("https://fonts.googleapis.com/css2?family=Inter&display=swap");\nbody { margin: 0 }', enabled: true, t: 1 } },
+  };
+  const cs = loadContentScript({ hostname: "example.com", data: { agentSiteStyles: store } });
+  await settle();
+  const expected = '@import url("https://fonts.googleapis.com/css2?family=Inter&display=swap");\n\n/* every site · g */\nbody { margin: 0 }\n\n/* example.com · A */\nh1 { color: red }\n\n/* example.com · Fonts */\nbody { font-family: Inter }';
+  assert.equal(styleEl(cs.doc).textContent, expected);
+  assert.equal(load().S.cssFor(store, "example.com"), expected, "the panel builds the same text");
+  await cs.change({ "example.com": { Fonts: { css: store["example.com"].Fonts.css, enabled: false, t: 2 }, A: store["example.com"].A } });
+  await settle();
+  assert.equal(styleEl(cs.doc).textContent, "/* example.com · A */\nh1 { color: red }", "a paused override takes its import with it");
 });

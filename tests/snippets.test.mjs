@@ -1,5 +1,5 @@
 // Text snippets (browser/extras/snippets.js) against fakes of chrome.storage / tabs / scripting and
-// the tool runtime: placeholder parsing and filling, save/list/insert/delete, the cap, insertion
+// the tool runtime: placeholder parsing and filling, save/list/update/insert/delete, the cap, insertion
 // through browser_type (ref) or at the caret of the focused field (inTop), the ✂️ tab and the
 // "Writing" quick commands. The page-side insertion runs in tests/e2e/extras-quill.e2e.mjs.
 import { test } from "node:test";
@@ -9,13 +9,13 @@ import { fakeCtx, fakeDom, loadExtra, runTool } from "./mocks/extras-quill.mjs";
 const load = (opts) => loadExtra("snippets", opts);
 const plain = (x) => JSON.parse(JSON.stringify(x)); // values made inside the vm have another realm's prototypes
 
-test("loads only for a brand with the feature; registers four tools, the tab (re-rendered on its storage key) and two partial commands", () => {
+test("loads only for a brand with the feature; registers five tools, the tab (re-rendered on its storage key) and two partial commands", () => {
   const off = load({ features: { snippets: false, rewrite: true } });
   assert.deepEqual(off.T.names, []);
   assert.equal(off.X, undefined);
 
   const { T, tab, commands, X } = load();
-  assert.deepEqual(T.names, ["browser_snippet_save", "browser_snippet_list", "browser_snippet_insert", "browser_snippet_delete"]);
+  assert.deepEqual(T.names, ["browser_snippet_save", "browser_snippet_list", "browser_snippet_insert", "browser_snippet_update", "browser_snippet_delete"]);
   assert.equal(tab.label, "✂️ Snippets");
   assert.deepEqual(plain(tab.storageKeys), [X.KEY]);
   assert.deepEqual(commands.map((c) => [c.group, c.name, c.partial]), [["Writing", "Save the selection as a snippet", true], ["Writing", "Insert a snippet", true]]);
@@ -211,4 +211,41 @@ test("the ✂️ tab: add form, list with Insert / Copy / Delete, placeholders a
   assert.deepEqual(data[X.KEY], []);
   assert.deepEqual(ctx.statuses.at(-1), { text: "Deleted 'Greeting'.", kind: "good" });
   assert.equal(T.calls.length, 0, "the tab works on storage directly, nothing lands in the recipe trace");
+});
+
+test("update: edits text, name and tags in place keeping id, created and uses; says what changed; a rename onto another snippet's name is refused", async () => {
+  const { T, data, X } = load();
+  await runTool(T, "browser_snippet_save", { name: "Greeting", text: "Hi {{name}}!", tags: ["mail"] });
+  await runTool(T, "browser_snippet_save", { name: "Address", text: "12 Quill Lane" });
+  const id = data[X.KEY][0].id, created = data[X.KEY][0].created;
+  data[X.KEY][0].uses = 4;
+  let out = await runTool(T, "browser_snippet_update", { name: "greeting", text: "Dear {{name}}, thanks for {{what}}." });
+  assert.equal(out, `Updated snippet 'Greeting' (id ${id}): text 12 → 35 chars (placeholders: name, what).`);
+  assert.equal(data[X.KEY][0].id, id);
+  assert.equal(data[X.KEY][0].created, created);
+  assert.equal(data[X.KEY][0].uses, 4, "the history survives");
+  assert.ok(data[X.KEY][0].updated >= created);
+  assert.equal(data[X.KEY][0].text, "Dear {{name}}, thanks for {{what}}.");
+  assert.deepEqual(data[X.KEY][0].tags, ["mail"], "tags stay unless given");
+
+  out = await runTool(T, "browser_snippet_update", { id, newName: "Thanks", tags: "support, #Mail" });
+  assert.equal(out, `Updated snippet 'Thanks' (id ${id}): renamed 'Greeting' → 'Thanks'; tags mail → support, mail.`);
+  assert.deepEqual(data[X.KEY][0].tags, ["support", "mail"]);
+  assert.equal(data[X.KEY].length, 2);
+  assert.equal(await runTool(T, "browser_snippet_update", { id, tags: [] }), `Updated snippet 'Thanks' (id ${id}): tags support, mail → none.`);
+  assert.equal(await runTool(T, "browser_snippet_update", { id, newName: "Thanks", tags: [] }), `Snippet 'Thanks' (id ${id}) already has these values — nothing changed.`);
+  // The same name in another case is still this snippet, not a clash.
+  assert.equal(await runTool(T, "browser_snippet_update", { id, newName: "THANKS" }), `Updated snippet 'THANKS' (id ${id}): renamed 'Thanks' → 'THANKS'.`);
+
+  await assert.rejects(T.run("browser_snippet_update", { id, newName: "address" }), /Another snippet is already named 'Address' \(id snp_\w{6}\) — pick a different name, or delete that one first\./);
+  assert.equal(data[X.KEY][0].name, "THANKS", "a refused rename changes nothing");
+  await assert.rejects(T.run("browser_snippet_update", { id }), /Nothing to change — pass newName, text or tags\./);
+  await assert.rejects(T.run("browser_snippet_update", { text: "x" }), /name or id is required/);
+  await assert.rejects(T.run("browser_snippet_update", { name: "nope", text: "x" }), /No snippet named 'nope'/);
+  await assert.rejects(T.run("browser_snippet_update", { id: "snp_nope", text: "x" }), /No snippet with id snp_nope/);
+  await assert.rejects(T.run("browser_snippet_update", { id, text: "  " }), /text must not be empty/);
+  await assert.rejects(T.run("browser_snippet_update", { id, newName: " " }), /newName must not be empty/);
+  await assert.rejects(T.run("browser_snippet_update", { id, text: "y".repeat(X.MAX_TEXT + 1) }), /too long/);
+  assert.equal(data[X.KEY][0].text, "Dear {{name}}, thanks for {{what}}.");
+  assert.match(await runTool(T, "browser_snippet_list", {}), /- THANKS  \(id snp_\w{6}; placeholders: name, what\)/);
 });

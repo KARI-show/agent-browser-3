@@ -1,13 +1,14 @@
 // Layout overlays (browser/extras/overlay.js) against fakes of chrome, the tool runtime and a small DOM: the
-// grid geometry, the measurement math and alignment hints, note numbering, the four tools' reports and what
-// they draw, and the 📐 tab. The real page is exercised in tests/e2e/extras-stencil.e2e.mjs.
+// grid geometry, the measurement math and alignment hints, note numbering, the six tools' reports and what
+// they draw (the design image through a fake <img> loader, the viewport resize through a fake chrome.windows),
+// and the 📐 tab. The real page is exercised in tests/e2e/extras-stencil.e2e.mjs.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 const plain = (x) => (x === undefined ? undefined : JSON.parse(JSON.stringify(x))); // values made inside the vm have another realm's prototypes
 const eq = (a, b, msg) => assert.deepEqual(plain(a), plain(b), msg);
 import { fakeCtx, fakeDocument, loadExtra, runTool, settle } from "./mocks/extras-stencil.mjs";
 
-const PAGE_FNS = ["pageRects", "pageOverlayGrid", "pageDrawMeasure", "pageOverlayNotes", "pageOverlayNote", "pageOverlayNoteRemove", "pageOverlayClear"];
+const PAGE_FNS = ["pageRects", "pageOverlayGrid", "pageDrawMeasure", "pageOverlayNotes", "pageOverlayNote", "pageOverlayNoteRemove", "pageOverlayClear", "pageOverlayImage"];
 
 /** The module over a fake page whose two boxes have the known geometry (A 200×100 at 100,100; B 150×100 at 340,100). */
 function setup(opts = {}) {
@@ -21,22 +22,41 @@ function setup(opts = {}) {
   w.scrollX = 0; w.scrollY = 0; w.innerWidth = 1440; w.innerHeight = 900;
   w.__agentRefs = [page.querySelector("a")];
   for (const fn of PAGE_FNS) m.scripting.results[fn] = (...a) => m.X[fn](...a);
+  // The page's viewport as the fake window gives it: 16 px of chrome beside the page (scrollbar, side panel), 120 px above.
+  m.scripting.results.pageViewportInfo = () => { const win = m.chrome.windows.list[1]; return { innerWidth: win.width - 16, innerHeight: win.height - 120, outerWidth: win.width, outerHeight: win.height, dpr: 2 }; };
   return { ...m, page, w };
+}
+/** <img> elements made in `page` "load" on the next tick with the natural size `sizes(url)` gives, fail when it gives none, or never answer when it gives "never". */
+function imageLoader(page, sizes) {
+  const create = (page._createElement = page._createElement || page.createElement);
+  page.createElement = (name) => {
+    const n = create(name);
+    if (name === "img") Object.defineProperty(n, "src", { get() { return n.getAttribute("src"); }, set(v) {
+      n.setAttribute("src", v);
+      const s = sizes(v);
+      if (s === "never") return;
+      setTimeout(() => { if (!s) { if (n.onerror) n.onerror(); } else { n.naturalWidth = s[0]; n.naturalHeight = s[1]; if (n.onload) n.onload(); } }, 0);
+    } });
+    return n;
+  };
 }
 const overlay = (page) => page.documentElement.querySelector("[data-agent-overlay]");
 
-test("loads only for a brand with the feature; registers four tools, the 📐 tab and three Design commands", () => {
+test("loads only for a brand with the feature; registers six tools, the 📐 tab and five Design commands", () => {
   const off = loadExtra("overlay", { features: { overlay: false, elements: true } });
   eq(off.T.names, []);
   assert.equal(off.X, undefined);
   const m = loadExtra("overlay");
-  eq(m.T.names, ["browser_overlay_grid", "browser_overlay_measure", "browser_overlay_note", "browser_overlay_clear"]);
+  eq(m.T.names, ["browser_overlay_grid", "browser_overlay_measure", "browser_overlay_note", "browser_overlay_clear", "browser_overlay_image", "browser_overlay_viewport"]);
   assert.equal(m.tab.label, "📐 Overlay");
   eq(m.commands.map((c) => [c.group, c.name, !!c.partial]), [
     ["Design", "Show a 12-column grid", false], ["Design", "Measure the spacing between these two elements", true], ["Design", "Mark up this page for review", false],
+    ["Design", "Compare with a design image", true], ["Design", "Preview at phone width", false],
   ]);
   assert.match(m.commands[0].prompt, /browser_overlay_grid .*screenshot/);
   assert.match(m.commands[2].prompt, /browser_overlay_note.*screenshot/);
+  assert.match(m.commands[3].prompt, /browser_overlay_image .*clear the overlay/);
+  assert.match(m.commands[4].prompt, /browser_overlay_viewport.*preset=reset/);
 });
 
 test("gridGeometry: 12 columns, 24 px gutter, 1200 px max in a 1440 px viewport; full width; a narrow viewport", () => {
@@ -195,7 +215,7 @@ test("browser_overlay_clear removes one layer or everything", async () => {
   await runTool(m.T, "browser_overlay_grid", {});
   assert.equal(await runTool(m.T, "browser_overlay_clear", {}), "Removed all overlays; the page is clean.");
   assert.equal(overlay(m.page), null);
-  await assert.rejects(m.T.run("browser_overlay_clear", { only: "boxes" }), /only must be grid, measure or notes/);
+  await assert.rejects(m.T.run("browser_overlay_clear", { only: "boxes" }), /only must be grid, measure, notes or image/);
 });
 
 test("the 📐 tab: grid controls draw and remove the grid, the notes list with remove, Clear all, Screenshot with overlays", async () => {
@@ -232,4 +252,113 @@ test("the 📐 tab: grid controls draw and remove the grid, the notes list with 
   eq(statuses.pop(), { text: "All overlays removed.", kind: "good" });
   content.button("📸 Screenshot with overlays").click();
   assert.match(prompts[0], /browser_screenshot, without clearing them/);
+});
+
+test("browser_overlay_image: a translucent click-through image in the overlay layer at document or viewport coordinates; replaced, cleared, and failures reported", async () => {
+  const { X } = loadExtra("overlay");
+  const o = X.imageOptions({ url: " https://cdn.example/design.png " });
+  eq(o, { url: "https://cdn.example/design.png", opacity: 0.5, x: 0, y: 0, width: 0, align: "top-left", lock: true, fixed: false });
+  assert.equal(X.imageOptions({ url: "data:image/png;base64,AAAA\nBBBB" }).url, "data:image/png;base64,AAAABBBB", "whitespace pasted into a data URL goes");
+  assert.throws(() => X.imageOptions({}), /url is required/);
+  assert.throws(() => X.imageOptions({ url: "http://cdn.example/x.png" }), /url must be an https: URL or a data:image/);
+  assert.throws(() => X.imageOptions({ url: "data:text/html,<p>" }), /url must be an https: URL or a data:image/);
+  assert.throws(() => X.imageOptions({ url: "design.png" }), /attached files are not reachable here/);
+  assert.throws(() => X.imageOptions({ url: "https://x/y.png", opacity: 0 }), /opacity must be a number between 0.05 and 1/);
+  assert.throws(() => X.imageOptions({ url: "https://x/y.png", align: "bottom" }), /align must be top-left or top-center/);
+  assert.throws(() => X.imageOptions({ url: "https://x/y.png", width: 0 }), /width must be a number between 1 and 10000/);
+
+  const m = setup();
+  imageLoader(m.page, (url) => (/fail/.test(url) ? null : [800, 600]));
+  const out = await runTool(m.T, "browser_overlay_image", { url: "https://cdn.example/design.png" });
+  assert.equal(out, "Image overlay on: 800 × 600 px at (0, 0) of the document, scrolling with the page, opacity 0.5, top-left, click-through. Take a browser_screenshot to compare it with the page; browser_overlay_clear only=image removes it, another call replaces it.");
+  const root = overlay(m.page);
+  assert.match(root.getAttribute("style"), /pointer-events:none;z-index:2147483646/);
+  const layer = root.querySelector("[data-agent-overlay-image]");
+  assert.equal(layer.getAttribute("style"), "position:absolute;left:0px;top:0px;width:800px;height:600px;pointer-events:none;");
+  const img = layer.querySelector("img");
+  assert.equal(img.getAttribute("src"), "https://cdn.example/design.png");
+  assert.equal(img.getAttribute("style"), "display:block;width:100%;height:100%;opacity:0.5;pointer-events:inherit;");
+  assert.equal(img.getAttribute("alt"), "");
+  // Centred at a width, with offsets, fixed, unlocked: one layer (the earlier image replaced), the height from the aspect ratio.
+  const out2 = await runTool(m.T, "browser_overlay_image", { url: "https://cdn.example/design.png", width: 400, x: 10, y: 20, align: "top-center", opacity: 0.8, fixed: true, lock: false });
+  assert.equal(out2, "Image overlay on: 400 × 300 px (natural 800 × 600) at (530, 20) of the viewport, fixed to it, opacity 0.8, top-center with offset 10, 20, catching the pointer. Take a browser_screenshot to compare it with the page; browser_overlay_clear only=image removes it, another call replaces it.");
+  assert.equal(root.querySelectorAll("[data-agent-overlay-image]").length, 1);
+  assert.equal(root.querySelector("[data-agent-overlay-image]").getAttribute("style"), "position:fixed;left:530px;top:20px;width:400px;height:300px;pointer-events:auto;");
+  assert.equal(root.querySelector("[data-agent-overlay-image] img").getAttribute("style"), "display:block;width:100%;height:100%;opacity:0.8;pointer-events:inherit;");
+  // Cleared on its own, with the rest, and the emptied container goes.
+  await runTool(m.T, "browser_overlay_note", { selector: "#box-a", text: "n" });
+  assert.equal(await runTool(m.T, "browser_overlay_clear", { only: "image" }), "Removed the image overlay. Still on the page: notes.");
+  assert.equal(await runTool(m.T, "browser_overlay_clear", { only: "image" }), "No image overlay was on the page.");
+  await runTool(m.T, "browser_overlay_image", { url: "https://cdn.example/design.png" });
+  assert.equal(await runTool(m.T, "browser_overlay_note", { remove: 1 }), "Removed note #1. No notes left.");
+  assert.equal(overlay(m.page).querySelectorAll("[data-agent-overlay-image]").length, 1, "removing the last note keeps a container that still holds the image");
+  assert.equal(await runTool(m.T, "browser_overlay_clear", {}), "Removed all overlays; the page is clean.");
+  assert.equal(overlay(m.page), null);
+  // Failures: a URL that does not load, no image behind it, a load that takes too long.
+  await assert.rejects(m.T.run("browser_overlay_image", { url: "https://cdn.example/fail.png" }), /The image could not be loaded \(https:\/\/cdn\.example\/fail\.png\) — check the URL; a page's content security policy/);
+  assert.equal(overlay(m.page), null, "nothing drawn for an image that failed");
+  imageLoader(m.page, () => [0, 0]);
+  await assert.rejects(m.T.run("browser_overlay_image", { url: "https://cdn.example/empty.png" }), /The URL did not give an image/);
+  imageLoader(m.page, () => "never");
+  const t0 = Date.now();
+  const late = await m.X.pageOverlayImage({ url: "https://cdn.example/slow.png", timeout: 20, opacity: 0.5, x: 0, y: 0, width: 0, align: "top-left", lock: true, fixed: false });
+  assert.equal(late.error, "The image did not load within 0.02 s — check the URL (https://cdn.example/slow.png).");
+  assert.ok(Date.now() - t0 >= 15, "the timeout waited");
+  assert.equal(overlay(m.page), null);
+  assert.equal(m.X.IMAGE_TIMEOUT, 15000, "the tool waits 15 s");
+});
+
+test("browser_overlay_viewport: presets and sizes, the chrome measured in the tab, the original bounds kept per window and restored by reset; refusals", async () => {
+  const { X } = loadExtra("overlay");
+  eq(X.viewportRequest({ preset: "mobile" }), { preset: "mobile", width: 375, height: 812 });
+  eq(X.viewportRequest({ preset: "mobile-landscape" }), { preset: "mobile-landscape", width: 812, height: 375 });
+  eq(X.viewportRequest({ preset: "tablet" }), { preset: "tablet", width: 768, height: 1024 });
+  eq(X.viewportRequest({ preset: "laptop" }), { preset: "laptop", width: 1280, height: 800 });
+  eq(X.viewportRequest({ preset: "desktop" }), { preset: "desktop", width: 1440, height: 900 });
+  eq(X.viewportRequest({ preset: "reset" }), { reset: true });
+  eq(X.viewportRequest({ width: 1024 }), { preset: "", width: 1024, height: 0 });
+  eq(X.viewportRequest({ width: "600", height: 700.4 }), { preset: "", width: 600, height: 700 });
+  assert.throws(() => X.viewportRequest({}), /Give preset \(mobile, mobile-landscape, tablet, laptop, desktop, reset\) or width/);
+  assert.throws(() => X.viewportRequest({ preset: "tv" }), /preset must be one of mobile, mobile-landscape, tablet, laptop, desktop or reset/);
+  assert.throws(() => X.viewportRequest({ width: 100 }), /width must be a number between 320 and 3840/);
+  assert.throws(() => X.viewportRequest({ width: 400, height: 5000 }), /height must be a number between 320 and 3840/);
+  eq(X.boundsFor({ width: 375, height: 812 }, { innerWidth: 1584, innerHeight: 880, outerWidth: 1600, outerHeight: 1000 }), { width: 391, height: 932 });
+  eq(X.boundsFor({ width: 1024, height: 0 }, { innerWidth: 1584, innerHeight: 880, outerWidth: 1600, outerHeight: 1000 }), { width: 1040 });
+
+  const m = setup();
+  const win = m.chrome.windows.list[1];
+  const out = await runTool(m.T, "browser_overlay_viewport", { preset: "mobile" });
+  assert.equal(out, "Viewport 375 × 812 px, devicePixelRatio 2 (mobile). The window was resized; browser_overlay_viewport preset=reset puts it back. Take a browser_screenshot — reload first if the page lays out from media queries only at load.");
+  eq(m.chrome.windows.updates, [{ id: 1, info: { state: "normal", width: 391, height: 932 } }]);
+  eq(m.data["agentOverlayViewport:1"], { left: 10, top: 20, width: 1600, height: 1000, state: "normal" }, "the bounds before the first resize, kept for reset");
+  // A width alone keeps the height; the saved bounds stay those of the first resize.
+  assert.equal(await runTool(m.T, "browser_overlay_viewport", { width: 1024 }), "Viewport 1024 × 812 px, devicePixelRatio 2. The window was resized; browser_overlay_viewport preset=reset puts it back. Take a browser_screenshot — reload first if the page lays out from media queries only at load.");
+  eq(m.chrome.windows.updates[1], { id: 1, info: { state: "normal", width: 1040 } });
+  eq([win.width, win.height], [1040, 932]);
+  eq(m.data["agentOverlayViewport:1"], { left: 10, top: 20, width: 1600, height: 1000, state: "normal" });
+  // A window that will not go that small: one correction pass, then the truth.
+  const update = m.chrome.windows.update;
+  m.chrome.windows.update = async (id, info) => update(id, { ...info, ...(info.width && info.width < 500 ? { width: 500 } : {}) });
+  assert.equal(await runTool(m.T, "browser_overlay_viewport", { width: 320, height: 480 }), "Viewport 484 × 480 px, devicePixelRatio 2. Asked for 320 × 480 — the window would not go there; the screen or the browser's minimum window size limits it. The window was resized; browser_overlay_viewport preset=reset puts it back. Take a browser_screenshot — reload first if the page lays out from media queries only at load.");
+  assert.equal(m.chrome.windows.updates.length, 4, "the first attempt and one correction");
+  m.chrome.windows.update = update;
+  // Reset restores the bounds and forgets them; a second reset has nothing to do.
+  assert.equal(await runTool(m.T, "browser_overlay_viewport", { preset: "reset" }), "Window restored to 1600 × 1000 px. Viewport 1584 × 880 px, devicePixelRatio 2.");
+  eq(m.chrome.windows.updates[4], { id: 1, info: { state: "normal", left: 10, top: 20, width: 1600, height: 1000 } });
+  assert.equal(m.data["agentOverlayViewport:1"], undefined);
+  assert.equal(await runTool(m.T, "browser_overlay_viewport", { preset: "reset" }), "Nothing to reset: this window was not resized by browser_overlay_viewport. Viewport 1584 × 880 px, devicePixelRatio 2.");
+  // A maximised window is brought to normal for the resize and maximised again by reset.
+  win.state = "maximized";
+  await runTool(m.T, "browser_overlay_viewport", { preset: "tablet" });
+  assert.equal(m.data["agentOverlayViewport:1"].state, "maximized");
+  await runTool(m.T, "browser_overlay_viewport", { preset: "reset" });
+  eq(m.chrome.windows.updates.slice(-2), [{ id: 1, info: { state: "normal", left: 10, top: 20, width: 1600, height: 1000 } }, { id: 1, info: { state: "maximized" } }]);
+  // Refusals: arguments, and the panel's own (popup) window.
+  await assert.rejects(m.T.run("browser_overlay_viewport", {}), /Give preset .* or width/);
+  await assert.rejects(m.T.run("browser_overlay_viewport", { preset: "tv" }), /preset must be one of/);
+  await assert.rejects(m.T.run("browser_overlay_viewport", { width: 100 }), /width must be a number between 320 and 3840/);
+  const n = m.chrome.windows.updates.length;
+  win.type = "popup";
+  await assert.rejects(m.T.run("browser_overlay_viewport", { preset: "mobile" }), /sits in a popup window \(the panel's own, or an app window\), which is not resized/);
+  assert.equal(m.chrome.windows.updates.length, n);
 });

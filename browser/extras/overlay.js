@@ -1,6 +1,7 @@
 // Extra feature "overlay" (side panel): layout overlays for design review — a column/baseline grid,
-// measurements between two elements and numbered review notes, all drawn in ONE click-through layer
-// (<div data-agent-overlay>, pointer-events: none, a very high z-index) on the page for this visit only.
+// measurements between two elements, numbered review notes and a design image to compare against, all
+// drawn in ONE click-through layer (<div data-agent-overlay>, pointer-events: none, a very high z-index)
+// on the page for this visit only; plus a viewport resize of the tab's window for device previews.
 // Nothing is persisted; browser_overlay_clear or a reload removes everything. Built into extras.js only
 // for brands that switch the feature on; the tools are declared in browser/host/extras/overlay.ts. Also
 // adds the 📐 Overlay tab of the 🧩 panel and its "Design" quick commands.
@@ -20,7 +21,11 @@
   var DEFAULT_COLOR = "#ff2d78";
   var BOX_COLORS = ["#1e90ff", "#ff8c00"]; // A, B
   var STALE = "That element is gone — the page changed. Call browser_read_page again.";
-  var LAYERS = ["grid", "measure", "notes"];
+  var LAYERS = ["grid", "measure", "notes", "image"];
+  var VIEWPORTS = { mobile: [375, 812], "mobile-landscape": [812, 375], tablet: [768, 1024], laptop: [1280, 800], desktop: [1440, 900] };
+  var VIEWPORT_MIN = 320, VIEWPORT_MAX = 3840;
+  var VIEWPORT_KEY = "agentOverlayViewport:"; // + windowId → the window's bounds before its first resize (chrome.storage.session, or local)
+  var IMAGE_TIMEOUT = 15000;
 
   // ── Pure helpers ─────────────────────────────────────────────────────────
 
@@ -138,7 +143,99 @@
     return "Review notes on the page (" + notes.length + "):\n" + notes.map(function (n) { return "#" + n.n + " " + n.text + " — at (" + Math.round(n.x) + ", " + Math.round(n.y) + ")"; }).join("\n");
   }
 
+  /** The image overlay a call asks for, validated and defaulted: url (https: or data:image), opacity, x, y, width (0 = natural), align, lock, fixed. */
+  function imageOptions(a) {
+    a = a || {};
+    var url = String(a.url == null ? "" : a.url).trim();
+    if (/^data:/i.test(url)) url = url.replace(/\s+/g, "");
+    if (!url) throw new Error("url is required — an https: or data:image URL of the design image.");
+    if (!/^https:\/\/[^\s"'<>]+$/i.test(url) && !/^data:image\/[a-z0-9.+-]+[;,]\S*$/i.test(url)) throw new Error("url must be an https: URL or a data:image/… URL (attached files are not reachable here — pass a URL).");
+    var align = a.align === undefined || a.align === null || a.align === "" ? "top-left" : String(a.align);
+    if (align !== "top-left" && align !== "top-center") throw new Error("align must be top-left or top-center.");
+    return {
+      url: url,
+      opacity: num(a.opacity, 0.5, 0.05, 1, "opacity"),
+      x: num(a.x, 0, -10000, 10000, "x"),
+      y: num(a.y, 0, -10000, 100000, "y"),
+      width: num(a.width, 0, 1, 10000, "width"),
+      align: align,
+      lock: a.lock !== false,
+      fixed: a.fixed === true,
+    };
+  }
+  function formatImage(r, o) {
+    return "Image overlay on: " + r.width + " × " + r.height + " px" + (r.natural.width !== r.width ? " (natural " + r.natural.width + " × " + r.natural.height + ")" : "") +
+      " at (" + r.left + ", " + r.top + ") of the " + (o.fixed ? "viewport, fixed to it" : "document, scrolling with the page") + ", opacity " + o.opacity + ", " + o.align +
+      (o.x || o.y ? " with offset " + o.x + ", " + o.y : "") + ", " + (o.lock ? "click-through" : "catching the pointer") +
+      ". Take a browser_screenshot to compare it with the page; browser_overlay_clear only=image removes it, another call replaces it.";
+  }
+
+  /** What a browser_overlay_viewport call asks for: { reset: true } or { preset, width, height } (height 0 = unchanged). */
+  function viewportRequest(a) {
+    a = a || {};
+    var preset = a.preset === undefined || a.preset === null || a.preset === "" ? "" : String(a.preset);
+    if (preset === "reset") return { reset: true };
+    if (preset) {
+      if (!VIEWPORTS[preset]) throw new Error("preset must be one of " + Object.keys(VIEWPORTS).join(", ") + " or reset.");
+      return { preset: preset, width: VIEWPORTS[preset][0], height: VIEWPORTS[preset][1] };
+    }
+    if (a.width === undefined || a.width === null || a.width === "") throw new Error("Give preset (" + Object.keys(VIEWPORTS).join(", ") + ", reset) or width (and height) in px.");
+    return { preset: "", width: Math.round(num(a.width, 0, VIEWPORT_MIN, VIEWPORT_MAX, "width")), height: Math.round(num(a.height, 0, VIEWPORT_MIN, VIEWPORT_MAX, "height")) };
+  }
+  /** Window bounds that give the viewport `want` with the chrome `info` shows around the page (outer − inner: tabs, toolbars, the side panel). */
+  function boundsFor(want, info) {
+    var chromeW = Math.max(0, (info.outerWidth || 0) - (info.innerWidth || 0)), chromeH = Math.max(0, (info.outerHeight || 0) - (info.innerHeight || 0));
+    var b = { width: want.width + chromeW };
+    if (want.height) b.height = want.height + chromeH;
+    return b;
+  }
+  function viewportWords(info) { return "Viewport " + info.innerWidth + " × " + info.innerHeight + " px, devicePixelRatio " + info.dpr + "."; }
+  function viewportOff(want, info) { return info.innerWidth !== want.width || (want.height > 0 && info.innerHeight !== want.height); }
+
   // ── Page side (self-contained; injected with chrome.scripting.executeScript) ──
+
+  // The page's viewport and the window around it, as the page sees them.
+  function pageViewportInfo() {
+    return { innerWidth: window.innerWidth, innerHeight: window.innerHeight, outerWidth: window.outerWidth, outerHeight: window.outerHeight, dpr: window.devicePixelRatio || 1 };
+  }
+
+  // The design image at document (or, fixed, viewport) coordinates once it has loaded; replaces an earlier one. Returns a
+  // promise — executeScript waits for it. → { natural: { width, height }, width, height, left, top } or { error }
+  function pageOverlayImage(o) {
+    return new Promise(function (resolve) {
+      var img = document.createElement("img");
+      var done = false;
+      var timer = setTimeout(function () { finish({ error: "The image did not load within " + o.timeout / 1000 + " s — check the URL (" + o.url.slice(0, 80) + ")." }); }, o.timeout);
+      function finish(r) { if (done) return; done = true; clearTimeout(timer); resolve(r); }
+      img.onerror = function () { finish({ error: "The image could not be loaded (" + o.url.slice(0, 80) + ") — check the URL; a page's content security policy can also keep outside images out." }); };
+      img.onload = function () {
+        var nw = img.naturalWidth || 0, nh = img.naturalHeight || 0;
+        if (!nw || !nh) { finish({ error: "The URL did not give an image (" + o.url.slice(0, 80) + ")." }); return; }
+        var width = o.width > 0 ? o.width : nw;
+        var height = Math.round(width * nh / nw * 100) / 100;
+        var page = document.documentElement.clientWidth || window.innerWidth;
+        var left = Math.round(((o.align === "top-center" ? (page - width) / 2 : 0) + o.x) * 100) / 100;
+        var root = document.querySelector("[data-agent-overlay]");
+        if (!root) {
+          root = document.createElement("div");
+          root.setAttribute("data-agent-overlay", "");
+          root.setAttribute("style", "position:absolute;left:0;top:0;width:0;height:0;overflow:visible;pointer-events:none;z-index:2147483646;");
+          document.documentElement.appendChild(root);
+        }
+        var old = root.querySelector("[data-agent-overlay-image]");
+        if (old) old.parentNode.removeChild(old);
+        var layer = document.createElement("div");
+        layer.setAttribute("data-agent-overlay-image", "");
+        layer.setAttribute("style", "position:" + (o.fixed ? "fixed" : "absolute") + ";left:" + left + "px;top:" + o.y + "px;width:" + width + "px;height:" + height + "px;pointer-events:" + (o.lock ? "none" : "auto") + ";");
+        img.setAttribute("alt", "");
+        img.setAttribute("style", "display:block;width:100%;height:100%;opacity:" + o.opacity + ";pointer-events:inherit;");
+        layer.appendChild(img);
+        root.appendChild(layer);
+        finish({ natural: { width: nw, height: nh }, width: width, height: height, left: left, top: o.y });
+      };
+      img.src = o.url;
+    });
+  }
 
   // Rectangles of the targets ([{ local, selector }]) in document coordinates, with tag and text, plus the scroll and viewport.
   function pageRects(targets) {
@@ -282,17 +379,17 @@
     var layer = m.parentNode, root = layer.parentNode;
     layer.removeChild(m);
     if (!layer.querySelector("[data-agent-note]")) root.removeChild(layer);
-    if (!root.querySelector("[data-agent-overlay-grid],[data-agent-overlay-measure],[data-agent-overlay-notes]")) root.parentNode.removeChild(root);
+    if (!root.querySelector("[data-agent-overlay-grid],[data-agent-overlay-measure],[data-agent-overlay-notes],[data-agent-overlay-image]")) root.parentNode.removeChild(root);
     return true;
   }
-  // Remove everything, or one layer ("grid" | "measure" | "notes"). → { removed: bool, left: [layers still there] }
+  // Remove everything, or one layer ("grid" | "measure" | "notes" | "image"). → { removed: bool, left: [layers still there] }
   function pageOverlayClear(only) {
     var root = document.querySelector("[data-agent-overlay]");
     if (!root) return { removed: false, left: [] };
     if (!only) { root.parentNode.removeChild(root); return { removed: true, left: [] }; }
     var layer = root.querySelector("[data-agent-overlay-" + only + "]");
     if (layer) layer.parentNode.removeChild(layer);
-    var left = ["grid", "measure", "notes"].filter(function (l) { return !!root.querySelector("[data-agent-overlay-" + l + "]"); });
+    var left = ["grid", "measure", "notes", "image"].filter(function (l) { return !!root.querySelector("[data-agent-overlay-" + l + "]"); });
     if (!left.length) root.parentNode.removeChild(root);
     return { removed: !!layer, left: left };
   }
@@ -371,10 +468,52 @@
 
   T.register("browser_overlay_clear", async function (a) {
     var only = a && a.only ? String(a.only) : "";
-    if (only && LAYERS.indexOf(only) === -1) throw new Error("only must be grid, measure or notes.");
+    if (only && LAYERS.indexOf(only) === -1) throw new Error("only must be grid, measure, notes or image.");
     var r = await H.inTop(pageOverlayClear, [only]);
     if (!r.removed) return text(only ? "No " + only + " overlay was on the page." : "No overlays were on the page.");
     return text(only ? "Removed the " + only + " overlay." + (r.left.length ? " Still on the page: " + r.left.join(", ") + "." : " The page is clean.") : "Removed all overlays; the page is clean.");
+  });
+
+  T.register("browser_overlay_image", async function (a) {
+    var o = imageOptions(a);
+    var r = await H.inTop(pageOverlayImage, [Object.assign({ timeout: IMAGE_TIMEOUT }, o)]);
+    return text(formatImage(r, o));
+  });
+
+  // The side panel lives in the window of the tab it works on, so that window is the one to resize; a detached panel
+  // or app window (type popup/app) is not a page preview and is left alone.
+  T.register("browser_overlay_viewport", async function (a) {
+    var want = viewportRequest(a);
+    var tab = await H.currentTab();
+    var win = await chrome.windows.get(tab.windowId);
+    if (win.type && win.type !== "normal") throw new Error("The current tab sits in a " + win.type + " window (the panel's own, or an app window), which is not resized — open the page in a normal browser window first.");
+    var store = chrome.storage.session || chrome.storage.local;
+    var key = VIEWPORT_KEY + win.id;
+    var saved = (await store.get(key))[key];
+    if (want.reset) {
+      if (!saved) return text("Nothing to reset: this window was not resized by browser_overlay_viewport. " + viewportWords(await H.inTop(pageViewportInfo, [])));
+      await chrome.windows.update(win.id, { state: "normal", left: saved.left, top: saved.top, width: saved.width, height: saved.height });
+      if (saved.state && saved.state !== "normal") await chrome.windows.update(win.id, { state: saved.state });
+      await store.remove(key);
+      await H.sleep(150);
+      return text("Window restored to " + saved.width + " × " + saved.height + " px" + (saved.state && saved.state !== "normal" ? " (" + saved.state + ")" : "") + ". " + viewportWords(await H.inTop(pageViewportInfo, [])));
+    }
+    var info = await H.inTop(pageViewportInfo, []);
+    if (!saved) { var o = {}; o[key] = { left: win.left, top: win.top, width: win.width, height: win.height, state: win.state || "normal" }; await store.set(o); }
+    await chrome.windows.update(win.id, Object.assign({ state: "normal" }, boundsFor(want, info)));
+    await H.sleep(150);
+    var after = await H.inTop(pageViewportInfo, []);
+    if (viewportOff(want, after)) {
+      // The chrome was measured on the window as it was (maximised, a scrollbar more or less): one correction from the result.
+      await chrome.windows.update(win.id, boundsFor(want, after));
+      await H.sleep(150);
+      after = await H.inTop(pageViewportInfo, []);
+    }
+    return text(
+      viewportWords(after).replace(/\.$/, "") + (want.preset ? " (" + want.preset + ")." : ".") +
+      (viewportOff(want, after) ? " Asked for " + want.width + (want.height ? " × " + want.height : "") + " — the window would not go there; the screen or the browser's minimum window size limits it." : "") +
+      " The window was resized; browser_overlay_viewport preset=reset puts it back. Take a browser_screenshot — reload first if the page lays out from media queries only at load."
+    );
   });
 
   // ── 📐 Overlay tab of the 🧩 panel ───────────────────────────────────────
@@ -453,15 +592,21 @@
     { group: "Design", icon: "📏", name: "Measure the spacing between these two elements",
       prompt: "Read the page, then measure with browser_overlay_measure (and show me the screenshot) the spacing between these two elements: ", partial: true },
     { group: "Design", icon: "📐", name: "Mark up this page for review",
-      prompt: "Review the layout of this page: read it and take a screenshot, then mark every problem you see — alignment, spacing, hierarchy, contrast, crowding — with a numbered browser_overlay_note where it is, take a screenshot with the markers and list the notes with a suggested fix for each. Leave the markers on the page." }
+      prompt: "Review the layout of this page: read it and take a screenshot, then mark every problem you see — alignment, spacing, hierarchy, contrast, crowding — with a numbered browser_overlay_note where it is, take a screenshot with the markers and list the notes with a suggested fix for each. Leave the markers on the page." },
+    { group: "Design", icon: "🖼", name: "Compare with a design image",
+      prompt: "Lay this design image over the page with browser_overlay_image at 50% opacity (top-center, its natural width), take a screenshot and list where the page departs from the design — offsets, sizes, spacing, colours — with the numbers; then clear the overlay. The image URL: ", partial: true },
+    { group: "Design", icon: "📱", name: "Preview at phone width",
+      prompt: "Resize the viewport to the mobile preset with browser_overlay_viewport, take a screenshot and tell me what breaks or crowds at 375 px — navigation, images, text, tap targets — then put the window back with preset=reset." }
   );
 
   /** The pure parts and the page-side functions, for tests and other modules. */
   X.overlay = {
-    DEFAULT_COLOR: DEFAULT_COLOR, BOX_COLORS: BOX_COLORS, LAYERS: LAYERS,
+    DEFAULT_COLOR: DEFAULT_COLOR, BOX_COLORS: BOX_COLORS, LAYERS: LAYERS, VIEWPORTS: VIEWPORTS, VIEWPORT_KEY: VIEWPORT_KEY, IMAGE_TIMEOUT: IMAGE_TIMEOUT,
     isHexColor: isHexColor, hexToRgba: hexToRgba, gridOptions: gridOptions, gridGeometry: gridGeometry, formatGrid: formatGrid,
     measureBoxes: measureBoxes, formatMeasure: formatMeasure, nextNoteNumber: nextNoteNumber, formatNotes: formatNotes, targetOf: targetOf,
+    imageOptions: imageOptions, formatImage: formatImage, viewportRequest: viewportRequest, boundsFor: boundsFor, viewportWords: viewportWords,
     pageRects: pageRects, pageOverlayGrid: pageOverlayGrid, pageDrawMeasure: pageDrawMeasure, pageOverlayNotes: pageOverlayNotes, pageOverlayNote: pageOverlayNote, pageOverlayNoteRemove: pageOverlayNoteRemove, pageOverlayClear: pageOverlayClear,
+    pageOverlayImage: pageOverlayImage, pageViewportInfo: pageViewportInfo,
     render: renderTab,
   };
 })();

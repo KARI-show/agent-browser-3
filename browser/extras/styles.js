@@ -6,7 +6,11 @@
 // changes live. Built into extras.js only for brands that switch the feature on; the tools are declared
 // in browser/host/extras/styles.ts. Also adds the 🎨 Styles tab of the 🧩 panel and the "Design" quick
 // commands (automations.js and commands.js pick them up from AgentExtras). The palette extra builds
-// its themes on the storage helpers exposed at AgentExtras.styles.
+// its themes on the storage helpers exposed at AgentExtras.styles. On top of the single override the
+// model writes, the module carries whole looks (browser_style_preset: reading, focus, compact, dyslexia,
+// print — one "Preset: <name>" override per site), a fonts override (browser_style_font, with a Google
+// Fonts @import — the one @import the validator lets through, hoisted to the top of the injected text
+// where a browser honours it) and a Stylus/UserCSS export and import of the overrides.
 //
 // Page-side functions are injected with chrome.scripting.executeScript, so each is self-contained (no
 // closures over this file). The tab's DOM is built with ctx.el, never innerHTML: names and CSS are data.
@@ -24,6 +28,13 @@
   var MAX_TOTAL = 200 * 1024; // characters of the whole store (JSON)
   var MAX_NAME = 60;
   var STALE = "That element is gone — the page changed. Call browser_read_page again.";
+  var PRESET_PREFIX = "Preset: "; // a site has one preset override at a time
+  var FONTS_NAME = "Fonts"; // the override browser_style_font writes
+  // The one @import an override may carry: a Google Fonts stylesheet (browser_style_font googleFont) — any
+  // other @import would pull a stylesheet from elsewhere.
+  var GOOGLE_FONTS_IMPORT = /^@import\s+url\(\s*(?:"https:\/\/fonts\.googleapis\.com\/css2?\?[^"\s]*"|'https:\/\/fonts\.googleapis\.com\/css2?\?[^'\s]*')\s*\)\s*;?$/i;
+  // An @import statement at the start of a CSS text (quote-aware: a Google Fonts URL may hold ';').
+  var LEADING_IMPORT = /^@import\s+url\(\s*(?:"[^"]*"|'[^']*'|[^)]*)\s*\)\s*;\s*/i;
 
   // ── Pure helpers ─────────────────────────────────────────────────────────
 
@@ -81,17 +92,20 @@
   function sitesFor(host) { host = normHost(host); return host && host !== "*" ? ["*", host] : ["*"]; }
   /** The CSS text to inject for a page on `host` — the same concatenation the content script does. */
   function cssFor(all, host) {
-    var parts = [];
+    var imports = [], parts = [];
     sitesFor(host).forEach(function (site) {
       var group = siteGroup(all, site);
       if (!group) return;
       Object.keys(group).sort().forEach(function (name) {
         var o = group[name];
         if (!o || o.enabled === false || typeof o.css !== "string" || !o.css.trim()) return;
-        parts.push("/* " + siteWords(site) + " · " + name.replace(/\*\//g, "* /") + " */\n" + o.css.trim());
+        var css = o.css.trim(), m;
+        // A browser honours an @import only before every other rule of the sheet: the ones an override starts with go first.
+        while ((m = LEADING_IMPORT.exec(css))) { if (imports.indexOf(m[0].trim()) === -1) imports.push(m[0].trim()); css = css.slice(m[0].length); }
+        parts.push("/* " + siteWords(site) + " · " + name.replace(/\*\//g, "* /") + " */\n" + css);
       });
     });
-    return parts.join("\n\n");
+    return (imports.length ? imports.join("\n") + "\n\n" : "") + parts.join("\n\n");
   }
   /** The overrides that apply to a page on `host`: [{ site, name, css, enabled, t }], cascade order. */
   function applicable(all, host) {
@@ -162,12 +176,17 @@
     var sp = splitRules(css);
     if (sp.error) return { ok: false, error: sp.error };
     if (!sp.rules.length) return { ok: false, error: "No rules found — write them like h1 { color: red }." };
-    var bad = sp.rules.filter(function (r) { return /^@import\b/i.test(r); });
-    if (bad.length) return { ok: false, error: "@import is not allowed in an override (it would load a stylesheet from elsewhere); write the rules themselves." };
+    var seenRule = false;
+    for (var k = 0; k < sp.rules.length; k++) {
+      if (!/^@import\b/i.test(sp.rules[k])) { seenRule = true; continue; }
+      if (!GOOGLE_FONTS_IMPORT.test(sp.rules[k])) return { ok: false, error: "@import is not allowed in an override (it would load a stylesheet from elsewhere); write the rules themselves. The one exception is a Google Fonts stylesheet (browser_style_font googleFont)." };
+      if (seenRule) return { ok: false, error: "The @import must come before the other rules (a browser ignores it after them)." };
+    }
     var sheet = null;
     if (typeof CSSStyleSheet === "function") { try { sheet = new CSSStyleSheet(); } catch (_) { sheet = null; } }
     var problems = [];
     sp.rules.forEach(function (rule, i) {
+      if (/^@import\b/i.test(rule)) return; // checked above; a constructed stylesheet refuses @import
       var label = "rule " + (i + 1) + " (" + ruleHead(rule) + ")";
       var open = rule.indexOf("{"), close = rule.lastIndexOf("}");
       var body = open !== -1 && close > open ? rule.slice(open + 1, close) : "";
@@ -191,7 +210,7 @@
       }
     });
     if (problems.length) return { ok: false, error: problems.slice(0, 5).join("; ") + (problems.length > 5 ? "; … " + (problems.length - 5) + " more" : "") };
-    return { ok: true, rules: sp.rules.length };
+    return { ok: true, rules: sp.rules.filter(function (r) { return !/^@import\b/i.test(r); }).length };
   }
 
   // ── Storage ──────────────────────────────────────────────────────────────
@@ -439,6 +458,236 @@
     return lines;
   }
 
+  // ── Presets, fonts and UserCSS (pure) ────────────────────────────────────
+
+  // Blocks a reading view does without, by class or id name — a conservative list: ads, sidebars, promo and
+  // newsletter boxes. Consent and security UI are never on it (the prompt in host/extras/styles.ts forbids it).
+  var CLUTTER = '[class*="sidebar"], [id*="sidebar"], [class*="promo"], [id*="promo"], [class*="newsletter"], [id*="newsletter"], [class*="advert"], [id*="advert"], [class*="adsbygoogle"], [class*="ad-slot"], [class*="ad-container"], [class*="ad-banner"], [class*="banner-ad"], [class^="ad-"], [class$="-ad"], [class*="-ad-"], [id^="ad-"], [id$="-ad"], [id*="-ad-"], .ad, .ads, #ad, #ads';
+  var TEXT_ELS = "p, li, dd, dt, td, th, blockquote, figcaption, label, legend, summary, caption";
+  var READING = [
+    "/* Reading: a 68ch measure, 18px type with 1.7 leading, air between paragraphs, no clutter, no animations */",
+    "html { font-size: 18px !important; }",
+    "body { line-height: 1.7 !important; }",
+    'article, [role="article"], [itemprop="articleBody"], .article, .article-body, .article-content, .post, .post-content, .post-body, .entry-content, .story-body, .page-content { max-width: 68ch !important; margin-left: auto !important; margin-right: auto !important; }',
+    "p, li, dd, blockquote, figcaption { max-width: 68ch; line-height: 1.7 !important; }",
+    "p { margin-top: 0 !important; margin-bottom: 1.25em !important; }",
+    "h1, h2, h3, h4, h5, h6 { line-height: 1.3 !important; margin-top: 1.5em !important; margin-bottom: 0.5em !important; }",
+    "img, video { max-width: 100% !important; height: auto !important; }",
+    CLUTTER + " { display: none !important; }",
+    "*, *::before, *::after { animation: none !important; }",
+  ];
+  /** The looks browser_style_preset switches on: name → CSS (each passes validateCss; sizes well under MAX_CSS). */
+  var PRESETS = {
+    reading: READING.join("\n"),
+    focus: READING.concat([
+      "/* Focus: media fade back until hovered, sticky bars stay put */",
+      "img, video, iframe, embed, object { opacity: 0.35 !important; }",
+      "img:hover, video:hover, iframe:hover, embed:hover, object:hover { opacity: 1 !important; }",
+      'header, footer, nav, [role="banner"], [role="navigation"], [class*="sticky"], [id*="sticky"], [class*="fixed-top"], [class*="fixed-bottom"], [class*="navbar"] { position: static !important; }',
+    ]).join("\n"),
+    compact: [
+      "/* Compact: 13px type, tight leading, small headings, slimmer paddings */",
+      "html { font-size: 13px !important; }",
+      "body, " + TEXT_ELS + " { line-height: 1.35 !important; }",
+      "h1 { font-size: 1.6em !important; }",
+      "h2 { font-size: 1.35em !important; }",
+      "h3 { font-size: 1.15em !important; }",
+      "h4, h5, h6 { font-size: 1em !important; }",
+      "h1, h2, h3, h4, h5, h6 { line-height: 1.25 !important; margin-top: 0.8em !important; margin-bottom: 0.35em !important; }",
+      "p, ul, ol, dl, blockquote, pre, table, figure { margin-top: 0 !important; margin-bottom: 0.6em !important; }",
+      "li { margin-top: 0 !important; margin-bottom: 0.15em !important; }",
+      "td, th { padding: 3px 6px !important; }",
+      'button, [role="button"], .btn, .button, input, select, textarea { padding-top: 3px !important; padding-bottom: 3px !important; }',
+      "header, nav, footer, main, section, article, aside, form, fieldset, .card, .container, .content, .panel { padding-top: 6px !important; padding-bottom: 6px !important; }",
+    ].join("\n"),
+    dyslexia: [
+      "/* Dyslexia-friendly: a plain sans, wider letter and word spacing, roomy lines, left-aligned dark text on cream */",
+      "html { background-color: #fbf7ef !important; }",
+      "body { background-color: #fbf7ef !important; color: #222222 !important; line-height: 1.8 !important; }",
+      'main, article, [role="main"], .content, .post, .post-content, .entry-content, .article-body { background-color: #fbf7ef !important; }',
+      "body, " + TEXT_ELS + ", a, button, input, select, textarea, h1, h2, h3, h4, h5, h6 { font-family: Verdana, \"Open Sans\", Arial, Helvetica, system-ui, sans-serif !important; letter-spacing: 0.05em !important; word-spacing: 0.1em !important; }",
+      TEXT_ELS + " { color: #222222 !important; text-align: left !important; line-height: 1.8 !important; }",
+      "h1, h2, h3, h4, h5, h6 { color: #222222 !important; text-align: left !important; line-height: 1.4 !important; }",
+      "p { margin-bottom: 1.2em !important; }",
+      "em, i { font-style: normal !important; font-weight: 700 !important; }",
+      "a { text-decoration: underline !important; }",
+    ].join("\n"),
+    print: [
+      "/* Print: black on white, no chrome, link targets after the links, nothing fixed */",
+      "html, body { background-color: #ffffff !important; color: #000000 !important; }",
+      "body * { color: #000000 !important; background-color: transparent !important; background-image: none !important; box-shadow: none !important; text-shadow: none !important; position: static !important; }",
+      'nav, aside, footer, video, iframe, embed, object, [role="navigation"], [role="complementary"], [role="contentinfo"] { display: none !important; }',
+      "a { text-decoration: underline !important; }",
+      'a[href^="http"]::after { content: " (" attr(href) ")"; font-size: 0.85em; word-break: break-all; }',
+      "img { max-width: 100% !important; }",
+      "pre, code { white-space: pre-wrap !important; overflow-wrap: anywhere !important; }",
+      "*, *::before, *::after { animation: none !important; }",
+    ].join("\n"),
+  };
+  var PRESET_NAMES = Object.keys(PRESETS);
+  function presetName(preset) { return PRESET_PREFIX + preset; }
+  /** The preset overrides a site has: [{ name, preset, enabled }] (one, unless saved by hand). */
+  function presetsOf(all, site) {
+    var group = siteGroup(all, site) || {};
+    return Object.keys(group).filter(function (n) { return n.indexOf(PRESET_PREFIX) === 0; }).map(function (n) { return { name: n, preset: n.slice(PRESET_PREFIX.length), enabled: !group[n] || group[n].enabled !== false }; });
+  }
+
+  /** A font-family value from the model or the user: one line, without the characters that would end the declaration or the rule. */
+  function fontFamilyValue(v) { return String(v == null ? "" : v).replace(/[;{}]/g, " ").replace(/\s+/g, " ").trim(); }
+  function quoteFamily(name) { return /^[A-Za-z][\w-]*$/.test(name) ? name : '"' + name.replace(/"/g, "") + '"'; }
+  /**
+   * The options of browser_style_font, checked and filled in: a Google Fonts family stands in for body and
+   * headings where they are not given. Throws when nothing is set. → { body, headings, code, size, googleFont }
+   */
+  function fontOptions(o) {
+    o = o || {};
+    var google = String(o.googleFont == null ? "" : o.googleFont).replace(/\s+/g, " ").trim();
+    if (google && !/^[A-Za-z0-9][A-Za-z0-9 ]{0,60}$/.test(google)) throw new Error("googleFont must be a Google Fonts family name such as 'Inter' or 'Source Serif 4' (letters, digits and spaces).");
+    var body = fontFamilyValue(o.body), headings = fontFamilyValue(o.headings), code = fontFamilyValue(o.code);
+    var size = o.size === undefined || o.size === null || o.size === "" ? null : Number(o.size);
+    if (size !== null && (!isFinite(size) || size < 12 || size > 24)) throw new Error("size must be a base font size between 12 and 24 (px).");
+    if (google) {
+      var stack = quoteFamily(google) + ", sans-serif";
+      if (!body) body = stack;
+      if (!headings) headings = stack;
+    }
+    if (!body && !headings && !code && size === null) throw new Error("Nothing to set — pass body, headings or code (font-family strings), size (12-24) or googleFont.");
+    return { body: body, headings: headings, code: code, size: size, googleFont: google };
+  }
+  /** The "Fonts" override for those options: the Google Fonts @import first, then !important font-family rules and the base size. */
+  function fontCss(o) {
+    var f = fontOptions(o);
+    var out = [];
+    if (f.googleFont) out.push('@import url("https://fonts.googleapis.com/css2?family=' + encodeURIComponent(f.googleFont).replace(/%20/g, "+") + '&display=swap");');
+    out.push("/* Fonts" + (f.googleFont ? " — " + f.googleFont + " from Google Fonts" : "") + " */");
+    if (f.body) out.push("body, " + TEXT_ELS + ", input, select, textarea, button { font-family: " + f.body + " !important; }");
+    if (f.headings) out.push("h1, h2, h3, h4, h5, h6 { font-family: " + f.headings + " !important; }");
+    if (f.code) out.push("code, pre, kbd, samp, var, tt { font-family: " + f.code + " !important; }");
+    if (f.size !== null) out.push("html { font-size: " + f.size + "px !important; }");
+    return out.join("\n");
+  }
+
+  function commentSafe(s) { return String(s == null ? "" : s).replace(/\*\//g, "* /").replace(/\s+/g, " ").trim(); }
+  function indentCss(css, pad) { return css.split("\n").map(function (l) { return l.trim() ? pad + l : ""; }).join("\n"); }
+  function isoDate(ts) { return ts ? new Date(ts).toISOString().slice(0, 10) : ""; }
+  /** The sites an export covers: the one asked for (when it has overrides), or every site with "*" first. */
+  function exportSites(all, site) {
+    if (site) { var g = siteGroup(all, site); return g && Object.keys(g).length ? [site] : []; }
+    return Object.keys(all || {}).filter(function (h) { return Object.keys(all[h] || {}).length; }).sort(function (a, b) { return a === "*" ? -1 : b === "*" ? 1 : a.localeCompare(b); });
+  }
+  function exportFilename(site, format) { return (site ? (site === "*" ? "every-site" : site.replace(/[^\w.-]+/g, "_")) : "all") + "-styles" + (format === "css" ? ".css" : ".user.css"); }
+  /**
+   * The overrides of one site (or every site) as a Stylus/UserCSS document: a ==UserStyle== header and one
+   * @-moz-document block per site (domain("host"); regexp(".*") for the overrides that apply everywhere),
+   * each override a commented section, paused ones commented out, the @imports hoisted to the top where a
+   * browser honours them. format "css": the sections only — no header, no blocks.
+   */
+  function toUserCss(all, site, format) {
+    site = site ? normHost(site) : "";
+    format = format === "css" ? "css" : "usercss";
+    var imports = [], blocks = [], names = [];
+    exportSites(all, site).forEach(function (h) {
+      var group = siteGroup(all, h);
+      var sections = [];
+      Object.keys(group).sort().forEach(function (name) {
+        var o = group[name] || {};
+        var css = String(o.css || "").trim(), m;
+        while ((m = LEADING_IMPORT.exec(css))) { if (imports.indexOf(m[0].trim()) === -1) imports.push(m[0].trim()); css = css.slice(m[0].length); }
+        names.push(name);
+        var head = "/* " + commentSafe(name) + (o.t ? " — saved " + isoDate(o.t) : "") + (o.enabled === false ? " — paused" : "") + " */";
+        sections.push(o.enabled === false ? head + "\n/*\n" + css.replace(/\*\//g, "* /") + "\n*/" : head + "\n" + css);
+      });
+      var body = sections.join("\n\n");
+      if (format === "css") blocks.push("/* ── " + siteWords(h) + " ── */\n" + body);
+      else blocks.push("@-moz-document " + (h === "*" ? 'regexp(".*")' : 'domain("' + h + '")') + " {\n" + indentCss(body, "  ") + "\n}");
+    });
+    var out = [];
+    if (format === "usercss") {
+      var label = site ? siteWords(site) : "all sites";
+      out.push([
+        "/* ==UserStyle==",
+        "@name           " + label + " — site styles",
+        "@namespace      agent-site-styles",
+        "@version        1.0.0",
+        "@description    " + names.length + " override" + (names.length === 1 ? "" : "s") + " for " + label + ": " + commentSafe(names.join(", ")).slice(0, 200),
+        "==/UserStyle== */",
+      ].join("\n"));
+    }
+    if (imports.length) out.push(imports.join("\n"));
+    return out.concat(blocks).join("\n\n");
+  }
+
+  /** The index of the '}' closing the block opened at `open` (quotes and comments skipped); the text's end when unbalanced. */
+  function matchBrace(s, open) {
+    var depth = 0, quote = null;
+    for (var i = open; i < s.length; i++) {
+      var ch = s[i];
+      if (quote) { if (ch === "\\") i++; else if (ch === quote) quote = null; continue; }
+      if (ch === "/" && s[i + 1] === "*") { var e = s.indexOf("*/", i + 2); i = e === -1 ? s.length : e + 1; continue; }
+      if (ch === '"' || ch === "'") { quote = ch; continue; }
+      if (ch === "{") depth++;
+      else if (ch === "}" && --depth === 0) return i;
+    }
+    return s.length;
+  }
+  /** A block's text without the indentation it had inside its @-moz-document. */
+  function dedent(css) {
+    var lines = css.replace(/^\n+|\s+$/g, "").split("\n");
+    var pad = null;
+    lines.forEach(function (l) { if (!l.trim()) return; var n = /^[ \t]*/.exec(l)[0].length; pad = pad === null ? n : Math.min(pad, n); });
+    return lines.map(function (l) { return l.slice(Math.min(pad || 0, /^[ \t]*/.exec(l)[0].length)); }).join("\n").trim();
+  }
+  /** The sites of an @-moz-document prelude: domain("h") → h, url-prefix / url → the URL's host, regexp(".*") → "*"; anything else is not understood. */
+  function preludeSites(prelude) {
+    var sites = [], m, re = /(domain|url-prefix|url|regexp)\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi;
+    while ((m = re.exec(prelude))) {
+      var kind = m[1].toLowerCase(), v = String(m[2] != null ? m[2] : m[3] != null ? m[3] : m[4] || "").trim(), site = "";
+      if (kind === "domain") site = normHost(v);
+      else if (kind === "regexp") site = /^\^?(\.\*|\.\+|\.\*\?)\$?$/.test(v) ? "*" : "";
+      else site = hostOf(v);
+      if (site && sites.indexOf(site) === -1) sites.push(site);
+    }
+    return sites;
+  }
+  /**
+   * UserCSS or plain CSS → [{ site, css, prelude? }]: each @-moz-document block to the sites of its prelude
+   * (site "" with the prelude when none is understood), the rules outside the blocks to "*" when there are
+   * blocks — else the whole text is one plain-CSS entry with site "". The ==UserStyle== header is dropped and
+   * the @imports found outside the blocks (the export hoists them there) go back to the top of every entry.
+   */
+  function parseUserCss(text) {
+    var s = String(text == null ? "" : text).replace(/\r\n?/g, "\n").replace(/\/\*\s*==UserStyle==[\s\S]*?==\/UserStyle==\s*\*\//, "");
+    var blocks = [], outside = "", i = 0, n = s.length;
+    while (i < n) {
+      var ch = s[i];
+      if (ch === "/" && s[i + 1] === "*") { var e = s.indexOf("*/", i + 2); e = e === -1 ? n : e + 2; outside += s.slice(i, e); i = e; continue; }
+      if (ch === '"' || ch === "'") { var q = i + 1; while (q < n && s[q] !== ch) { if (s[q] === "\\") q++; q++; } outside += s.slice(i, q + 1); i = q + 1; continue; }
+      if (ch === "@" && s.slice(i, i + 14) === "@-moz-document" && !/[\w-]/.test(s[i + 14] || "")) {
+        var open = s.indexOf("{", i);
+        if (open === -1) break;
+        var close = matchBrace(s, open);
+        var css = dedent(s.slice(open + 1, close));
+        if (css.replace(/\/\*[\s\S]*?\*\//g, "").trim()) blocks.push({ prelude: s.slice(i + 14, open).trim(), css: css });
+        i = close + 1;
+        continue;
+      }
+      outside += ch; i++;
+    }
+    var imports = [];
+    var rest = outside.replace(/@import\s+url\(\s*(?:"[^"]*"|'[^']*'|[^)]*)\s*\)\s*;?/gi, function (x) { x = x.replace(/;?$/, ";"); if (imports.indexOf(x) === -1) imports.push(x); return ""; }).trim();
+    var restHasRules = !!rest.replace(/\/\*[\s\S]*?\*\//g, "").trim();
+    function entry(site, css, prelude) { var o = { site: site, css: (imports.length ? imports.join("\n") + "\n" : "") + css }; if (prelude) o.prelude = prelude; return o; }
+    if (!blocks.length) return restHasRules ? [entry("", rest)] : [];
+    var out = [];
+    blocks.forEach(function (b) {
+      var sites = preludeSites(b.prelude);
+      if (!sites.length) out.push(entry("", b.css, b.prelude));
+      sites.forEach(function (site) { out.push(entry(site, b.css, b.prelude)); });
+    });
+    if (restHasRules) out.push(entry("*", rest));
+    return out;
+  }
+
   // ── Applying to the current tab; the content script ──────────────────────
 
   /** Put the saved overrides of the current tab's host into the tab now → { host, applies, chars } (or { error }). */
@@ -478,6 +727,14 @@
   var ready = ensureContentScript();
 
   // ── Tools ────────────────────────────────────────────────────────────────
+
+  /** Save `body` as a text file in Downloads (a data: URL; the download id comes back) → { id, filename, size }. */
+  async function downloadText(filename, body, mime) {
+    var dl = typeof chrome !== "undefined" && chrome.downloads;
+    if (!dl || typeof dl.download !== "function") throw new Error("This build cannot save files (no downloads permission) — call again without save and copy the text.");
+    var id = await dl.download({ url: "data:" + (mime || "text/css") + ";charset=utf-8," + encodeURIComponent(body), filename: filename, conflictAction: "uniquify" });
+    return { id: id, filename: filename, size: body.length };
+  }
 
   async function siteOf(a, tab) {
     if (a.site) return normHost(a.site);
@@ -551,6 +808,103 @@
     }
     var ap = tab ? await applyToTab(tab) : { applies: false };
     return text(out + (ap.applies ? " The current tab is updated." : ap.error && ap.host ? " The current tab could not be updated (" + ap.error + "); the change applies on the next load." : ""));
+  });
+
+  T.register("browser_style_preset", async function (a) {
+    a = a || {};
+    var preset = String(a.preset || "").trim().toLowerCase();
+    if (preset !== "off" && !PRESETS[preset]) throw new Error("preset must be one of " + PRESET_NAMES.join(", ") + " — or off to remove the site's preset.");
+    var tab = null;
+    try { tab = await H.currentTab(); } catch (e) { if (!a.site) throw e; }
+    var site = await siteOf(a, tab);
+    var name = presetName(preset);
+    var had = presetsOf(await loadAll(), site);
+    var gone = [], paused = false;
+    // One preset at a time: every other "Preset: …" override of the site goes; the same one is refreshed.
+    for (var i = 0; i < had.length; i++) {
+      if (preset !== "off" && had[i].name === name) { paused = !had[i].enabled; continue; }
+      await removeOverride({ site: site, name: had[i].name });
+      gone.push(had[i].preset);
+    }
+    if (preset === "off") {
+      var apOff = tab ? await applyToTab(tab) : { applies: false };
+      if (!gone.length) return text("No preset is on for " + siteWords(site) + ". Presets: " + PRESET_NAMES.join(", ") + ".");
+      return text("Preset " + gone.join(", ") + " is off for " + siteWords(site) + " (override '" + presetName(gone[0]) + "' removed; its other overrides are untouched)." + (apOff.applies ? " The current tab is updated." : ""));
+    }
+    var r = await saveOverride({ site: site, name: name, css: PRESETS[preset] });
+    if (paused) await setEnabled({ site: site, name: name, enabled: true });
+    var ap = tab ? await applyToTab(tab) : { applies: false, error: "no tab" };
+    return text("Preset '" + preset + "' is on for " + siteWords(site) + " — override '" + r.name + "' (" + kb(r.size) + ", " + r.rules + " rules" + (gone.length ? ", replacing " + gone.join(", ") : r.replaced ? ", refreshed" : "") + "). " + appliedWords(ap, site) +
+      "; the site keeps it until browser_style_preset preset=off (or browser_style_remove). Check it with browser_screenshot and fix a broken spot with a small browser_style_apply rule. Other presets: " + PRESET_NAMES.filter(function (p) { return p !== preset; }).join(", ") + ".");
+  });
+
+  T.register("browser_style_font", async function (a) {
+    a = a || {};
+    var f = fontOptions(a);
+    var css = fontCss(a);
+    var tab = null;
+    try { tab = await H.currentTab(); } catch (e) { if (!a.site) throw e; }
+    var site = await siteOf(a, tab);
+    var r = await saveOverride({ site: site, name: FONTS_NAME, css: css });
+    var ap = tab ? await applyToTab(tab) : { applies: false, error: "no tab" };
+    var what = [];
+    if (f.body) what.push("body text → " + f.body);
+    if (f.headings) what.push("headings → " + f.headings);
+    if (f.code) what.push("code → " + f.code);
+    if (f.size !== null) what.push("base size → " + f.size + "px");
+    return text((r.replaced ? "Replaced" : "Saved") + " the '" + r.name + "' override for " + siteWords(site) + " (" + kb(r.size) + "): " + what.join("; ") + ". " +
+      (f.googleFont ? "'" + f.googleFont + "' is loaded with an @import from fonts.googleapis.com at the top of the override — a site's Content-Security-Policy can block that import, in which case the fallback fonts show (browser_style_inspect on a paragraph tells which font rendered). " : "") +
+      appliedWords(ap, site) + "; the site keeps it until browser_style_remove name=" + r.name + ".");
+  });
+
+  T.register("browser_style_export", async function (a) {
+    a = a || {};
+    var site = a.site ? normHost(a.site) : "";
+    var format = a.format === "css" ? "css" : "usercss";
+    var all = await loadAll();
+    var sites = exportSites(all, site);
+    if (!sites.length) throw new Error(site ? "No style overrides for " + siteWords(site) + " — nothing to export." + (countOf(all) ? " browser_style_list shows the sites that have some." : "") : "No style overrides saved yet — nothing to export.");
+    var doc = toUserCss(all, site, format);
+    if (!a.save) return text(doc);
+    var r = await downloadText(exportFilename(site, format), doc);
+    return text("Saved " + r.filename + " to Downloads (download id " + r.id + ", " + kb(r.size) + "): " + sites.map(function (h) { return siteWords(h) + " (" + Object.keys(siteGroup(all, h)).length + ")"; }).join(", ") + ". " +
+      (format === "usercss" ? "It installs in Stylus (Manage → Import, or drop the file onto the Stylus page); paused overrides are in it as comments." : "Plain CSS with a comment per override."));
+  });
+
+  T.register("browser_style_import", async function (a) {
+    a = a || {};
+    var src = typeof a.css === "string" ? a.css : "";
+    if (!src.trim()) throw new Error("css is required — a UserCSS document (@-moz-document domain(\"…\") blocks) or plain CSS with site.");
+    var entries = parseUserCss(src);
+    if (!entries.length) throw new Error("No CSS rules found in the text.");
+    var tab = null;
+    try { tab = await H.currentTab(); } catch (_) { tab = null; } // not needed when every block names its site
+    var given = a.site ? normHost(a.site) : "";
+    var name = cleanName(a.name) || "Imported";
+    // One override per site: the valid blocks of a site are joined; a broken one is reported and skipped. Plain
+    // CSS goes to the given site or the current tab's; a block whose prelude is not understood only to a given site.
+    var bySite = {}, order = [], lines = [], problems = [];
+    entries.forEach(function (e) {
+      var site = e.site || given || (e.prelude ? "" : hostOf(tab && tab.url));
+      var where = e.prelude ? "the block for " + short(e.prelude, 50) : "the plain CSS";
+      if (!site) { problems.push("  skipped " + where + ": no site — pass site, or use @-moz-document domain(\"…\") blocks"); return; }
+      var v = validateCss(e.css);
+      if (!v.ok) { problems.push("  " + siteWords(site) + ": refused " + where + " — " + v.error.replace(/\.$/, "")); return; }
+      if (!bySite[site]) { bySite[site] = []; order.push(site); }
+      bySite[site].push(e.css);
+    });
+    var saved = 0;
+    for (var i = 0; i < order.length; i++) {
+      try {
+        var r = await saveOverride({ site: order[i], name: name, css: bySite[order[i]].join("\n\n") });
+        saved++;
+        lines.push("  " + siteWords(order[i]) + ": " + (r.replaced ? "replaced" : "saved") + " override '" + r.name + "' (" + kb(r.size) + ", " + r.rules + " rule" + (r.rules === 1 ? "" : "s") + ")");
+      } catch (e) { lines.push("  " + siteWords(order[i]) + ": not saved — " + String((e && e.message) || e)); }
+    }
+    lines = lines.concat(problems);
+    if (!saved) throw new Error("Nothing was imported:\n" + lines.join("\n"));
+    var ap = tab ? await applyToTab(tab) : { applies: false };
+    return text("Imported " + saved + " override" + (saved === 1 ? "" : "s") + " named '" + name + "'" + (ap.applies ? " (the current tab is updated)" : "") + ":\n" + lines.join("\n") + "\nThe sites keep them until browser_style_remove.");
   });
 
   // ── The 🎨 Styles tab ────────────────────────────────────────────────────
@@ -652,7 +1006,11 @@
   globalThis.AgentExtras.commands.push(
     { group: "Design", icon: "📖", name: "Make this page easier to read", prompt: "Make this page easier to read: larger text (about 18px) with more line-height (1.6), a comfortable maximum width for the main content (about 70ch, centred), and more breathing room between paragraphs — keep the site's colours and fonts." + RULES },
     { group: "Design", icon: "🧹", name: "Hide the distractions on this page", prompt: "Hide the distractions on this page — sidebars, promo banners, 'related' and 'recommended' blocks, sticky bars, floating widgets — but never consent or security UI (cookie choices, sign-in, warnings) and nothing I need to use the page." + RULES },
-    { group: "Design", icon: "🎨", name: "Show this site's style overrides", prompt: "Show me the style overrides saved for this site (browser_style_list for the current site) and say in one line each what they do." }
+    { group: "Design", icon: "🎨", name: "Show this site's style overrides", prompt: "Show me the style overrides saved for this site (browser_style_list for the current site) and say in one line each what they do." },
+    { group: "Design", icon: "📚", name: "Reading mode for this site", prompt: "Switch this site to the reading preset (browser_style_preset preset=reading): a comfortable measure, bigger text with more line-height, sidebars and promo blocks hidden, animations off — the site keeps it. Take a screenshot; if something I need is hidden or broken, fix it with a small browser_style_apply rule (never consent or security UI). preset=off switches it off." },
+    { group: "Design", icon: "🔤", name: "Dyslexia-friendly text", prompt: "Make this site's text dyslexia-friendly with browser_style_preset preset=dyslexia (a plain sans, wider letter and word spacing, 1.8 line-height, left-aligned dark text on cream, underlined links), take a screenshot and fix anything that became unreadable with a targeted browser_style_apply rule." },
+    { group: "Design", icon: "🔠", name: "Change the site's fonts", prompt: "Change this site's fonts with browser_style_font (body text, headings, code, base size; a Google Fonts family loads with googleFont) to: ", partial: true },
+    { group: "Design", icon: "📤", name: "Export my styles for Stylus", prompt: "Export my style overrides for this site as a UserCSS file for Stylus (browser_style_export with save=true), tell me where it landed and how to install it in Stylus; if this site has none, export every site's instead." }
   );
 
   // ── Exports: the pure parts and the storage, for tests and the palette extra ──
@@ -664,5 +1022,7 @@
     loadAll: loadAll, saveAll: saveAll, saveOverride: saveOverride, removeOverride: removeOverride, setEnabled: setEnabled,
     applyToTab: applyToTab, previewInTab: previewInTab, ensureContentScript: ensureContentScript, ready: ready,
     formatInspect: formatInspect, formatList: formatList, pageApplyStyles: pageApplyStyles, pageInspect: pageInspect,
+    PRESET_PREFIX: PRESET_PREFIX, FONTS_NAME: FONTS_NAME, PRESETS: PRESETS, PRESET_NAMES: PRESET_NAMES, presetsOf: presetsOf,
+    fontOptions: fontOptions, fontCss: fontCss, toUserCss: toUserCss, parseUserCss: parseUserCss, preludeSites: preludeSites, exportFilename: exportFilename, downloadText: downloadText,
   };
 })();

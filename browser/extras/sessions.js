@@ -1,5 +1,6 @@
-// Extra feature "sessions" (side panel): tab sessions — the tabs of a window saved under a name and
-// opened again later, into a new window or the current one. Built into extras.js only for brands
+// Extra feature "sessions" (side panel): tab sessions — the tabs of a window saved under a name,
+// added to later and opened again, into a new window or the current one — and a tidy-up that closes
+// the window's duplicate tabs or every tab of one site. Built into extras.js only for brands
 // that switch the feature on. The tools are declared in browser/host/extras/sessions.ts; this file
 // registers them, the 🗂 tab of the 🧩 panel and the "Tabs" quick commands through the registry
 // browserTools.js provides.
@@ -78,6 +79,55 @@
   }
   function formatTabs(tabs) {
     return (tabs || []).map(function (t, i) { return "  " + (i + 1) + ". " + (t.pinned ? "📌 " : "") + (t.title || "(untitled)") + " — " + t.url + (t.active ? "  (active)" : ""); }).join("\n");
+  }
+  /**
+   * The session with `tabs` appended, skipping addresses it already holds (counted in `skipped`; a
+   * repeat within `tabs` is just folded); the added tabs are not the active one (the session keeps
+   * its own). → { session, added, skipped }
+   */
+  function addToSession(session, tabs, now) {
+    var have = {};
+    (session.tabs || []).forEach(function (t) { have[t.url] = true; });
+    var added = [];
+    var batch = {};
+    var skipped = 0;
+    (tabs || []).forEach(function (t) {
+      if (have[t.url]) { skipped++; return; }
+      if (batch[t.url]) return;
+      batch[t.url] = true;
+      added.push({ url: t.url, title: t.title, pinned: !!t.pinned, active: false });
+    });
+    var out = Object.assign({}, session, { tabs: (session.tabs || []).concat(added) });
+    if (added.length) out.t = now || Date.now();
+    return { session: out, added: added, skipped: skipped };
+  }
+
+  /** The address without its #fragment: what makes two tabs duplicates. */
+  function pageKey(url) { return String(url || "").replace(/#.*$/, ""); }
+  function sameHost(url, host) { return hostOf(url).toLowerCase() === String(host || "").replace(/^www\./, "").toLowerCase(); }
+  /**
+   * The tabs browser_session_tidy closes, in window order. With opts.host: every tab of that site. Else
+   * the duplicates — tabs with the same address (ignoring the #fragment) — so that one of each remains:
+   * the active or a pinned one when the address has one (those are never closed), else the earliest.
+   * Never closed: the active tab, pinned tabs, the extension's own pages (opts.ownOrigin) and ids in opts.keep.
+   */
+  function duplicateTabs(tabs, opts) {
+    opts = opts || {};
+    var keep = {};
+    (opts.keep || []).forEach(function (id) { keep[id] = true; });
+    var safe = function (t) { return !!(t.active || t.pinned || keep[t.id] || (opts.ownOrigin && String(t.url || "").indexOf(opts.ownOrigin) === 0)); };
+    var ordered = (tabs || []).filter(function (t) { return t && t.url; }).slice().sort(function (a, b) { return (a.index || 0) - (b.index || 0); });
+    if (opts.host) return ordered.filter(function (t) { return !safe(t) && sameHost(t.url, opts.host); });
+    var groups = {};
+    ordered.forEach(function (t) {
+      var k = pageKey(t.url);
+      if (!groups[k]) groups[k] = { first: t, protectedOne: false };
+      if (safe(t)) groups[k].protectedOne = true;
+    });
+    return ordered.filter(function (t) {
+      var g = groups[pageKey(t.url)];
+      return !safe(t) && (g.protectedOne || g.first !== t);
+    });
   }
   /** The list the model sees: id, name, tab count, saved time, the first titles. */
   function formatList(list) {
@@ -189,6 +239,44 @@
     return text("Deleted session '" + s.name + "' (" + tabsWord(s.tabs.length) + ").");
   });
 
+  AgentBrowserTools.register("browser_session_add", async function (a) {
+    a = a || {};
+    var list = await load();
+    var s = findSession(list, a);
+    var tabs;
+    if (a.all === true) {
+      tabs = restorableTabs(await chrome.tabs.query({ windowId: await agentWindowId() }), ownOrigin());
+      if (!tabs.length) throw new Error("No website tabs to add in this window.");
+    } else {
+      var tab = await H.currentTab();
+      tabs = restorableTabs([tab], ownOrigin());
+      if (!tabs.length) throw new Error("The current tab (" + (tab.url || "no address") + ") is a browser page a session can't reopen — switch to the website tab to add, or pass all.");
+    }
+    var r = addToSession(s, tabs, Date.now());
+    if (r.added.length) await save(upsertSession(list, r.session));
+    var head = (r.added.length ? "Added " + tabsWord(r.added.length) + " to" : "Nothing added to") + " session '" + s.name + "'" +
+      (r.skipped ? " (" + r.skipped + " skipped, already in it)" : "") + " — " + (r.added.length ? "now " : "still ") + tabsWord(r.session.tabs.length) + ".";
+    return text(head + (r.added.length ? "\n" + formatTabs(r.session.tabs) : ""));
+  });
+
+  AgentBrowserTools.register("browser_session_tidy", async function (a) {
+    a = a || {};
+    var host = a.host ? String(a.host).trim().replace(/^https?:\/\//i, "").replace(/[\/?#].*$/, "") : "";
+    var windowId = await agentWindowId();
+    var tabs = await chrome.tabs.query({ windowId: windowId });
+    // The tab the agent works in stays even when it is not the window's active one.
+    var keep = [];
+    try { keep.push((await H.currentTab()).id); } catch (_) {}
+    var going = duplicateTabs(tabs, { host: host, keep: keep, ownOrigin: ownOrigin() });
+    var what = host ? "tabs of " + host : "duplicate tabs";
+    if (!going.length) return text("No " + what + " to close in this window (" + tabsWord(tabs.length) + "; the active tab, pinned tabs and the panel are never closed).");
+    var lines = going.map(function (t) { return "  • " + (t.title || "(untitled)") + " — " + t.url; });
+    if (a.dryRun === true) return text("Would close " + tabsWord(going.length) + " (" + what + "; dry run, nothing closed):\n" + lines.join("\n") + "\n" + tabsWord(tabs.length - going.length) + " would remain.");
+    await chrome.tabs.remove(going.map(function (t) { return t.id; }));
+    var left = (await chrome.tabs.query({ windowId: windowId })).length;
+    return text("Closed " + tabsWord(going.length) + " (" + what + "):\n" + lines.join("\n") + "\n" + tabsWord(left) + " remain in the window.");
+  });
+
   // ── 🗂 tab of the 🧩 panel ─────────────────────────────────────────────
 
   var expanded = {}; // session id → the tab list is open
@@ -262,12 +350,15 @@
     { group: "Tabs", icon: "▶", name: "Restore a session",
       prompt: "Restore my saved tab session (browser_session_restore, in a new window) named: ", partial: true },
     { group: "Tabs", icon: "🧹", name: "Close the duplicates in this window",
-      prompt: "List the tabs in this window with browser_tabs. Where several tabs show the same address, keep one of each (the one I'm working in when it is among them) and close the others with browser_close_tab. Don't close anything else. Tell me what you closed." }
+      prompt: "Close the duplicate tabs in this window with browser_session_tidy (it keeps one of each address and never closes the tab I'm in, pinned tabs or the panel). Tell me what you closed." },
+    { group: "Tabs", icon: "➕", name: "Add this tab to a session",
+      prompt: "Add this tab to my saved session (browser_session_add) named: ", partial: true }
   );
 
   X.sessions = {
     KEY: KEY, MAX: MAX, INTERNAL: INTERNAL,
     restorableTabs: restorableTabs, makeSession: makeSession, upsertSession: upsertSession, findSession: findSession, findByName: findByName,
+    addToSession: addToSession, duplicateTabs: duplicateTabs, pageKey: pageKey,
     formatList: formatList, formatTabs: formatTabs, tabsWord: tabsWord,
     load: load, save: save, saveWindow: saveWindow, openSession: openSession, render: renderSessions,
   };

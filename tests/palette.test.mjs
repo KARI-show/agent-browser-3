@@ -1,7 +1,7 @@
 // Palette (browser/extras/palette.js) against fakes of chrome and the tool registry, with styles.js
 // loaded first as extras.js does: colour normalisation, the WCAG contrast maths, the palette summary
 // and its reports, the theme CSS and its mapping, browser_palette_theme saving through the styles
-// extra's key (one theme per site, preview, off), and the 🧪 tab. The page-side walkers run for real
+// extra's key (one theme per site, preview, off), the colour harmonies, and the 🧪 tab. The page-side walkers run for real
 // in tests/e2e/extras-palette.e2e.mjs.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -45,18 +45,19 @@ const CONTRAST = {
   ],
 };
 
-test("loads only with the feature; registers three tools, the 🧪 tab and three Design commands; without the styles extra its tools say so", async () => {
+test("loads only with the feature; registers four tools, the 🧪 tab and four Design commands; without the styles extra its tools say so", async () => {
   const off = load({ features: { styles: true, palette: false } });
   assert.deepEqual(off.T.names.filter((n) => /palette/.test(n)), []);
   assert.deepEqual(off.tabs.map((t) => t.id), ["styles"]);
   assert.equal(off.P, undefined);
 
   const { T, tabs, commands, P } = load();
-  assert.deepEqual(T.names.filter((n) => /palette/.test(n)), ["browser_palette_extract", "browser_palette_contrast", "browser_palette_theme"]);
+  assert.deepEqual(T.names.filter((n) => /palette/.test(n)), ["browser_palette_extract", "browser_palette_contrast", "browser_palette_theme", "browser_palette_harmony"]);
   assert.deepEqual(plain(tabs.map((t) => [t.id, t.label, t.storageKeys])), [["styles", "🎨 Styles", ["agentSiteStyles"]], ["palette", "🧪 Palette", ["agentSiteStyles"]]]);
   assert.deepEqual(commands.filter((c) => /browser_palette_/.test(c.prompt)).map((c) => [c.group, c.name]), [
-    ["Design", "What colours and fonts does this page use?"], ["Design", "Check this page's contrast"], ["Design", "Dark theme for this site"],
+    ["Design", "What colours and fonts does this page use?"], ["Design", "Check this page's contrast"], ["Design", "Dark theme for this site"], ["Design", "Colour harmonies from this site's accent"],
   ]);
+  assert.match(commands.find((c) => c.name === "Colour harmonies from this site's accent").prompt, /browser_palette_harmony with no arguments/);
   assert.equal(commands.filter((c) => c.name === "Dark theme for this site").length, 1, "defined once, by the palette");
   assert.match(commands.find((c) => c.name === "Dark theme for this site").prompt, /browser_palette_theme mode=dark/);
   assert.equal(typeof P.themeCss, "function");
@@ -348,4 +349,65 @@ test("the 🧪 tab: Extract shows swatches from validated hex only, Copy puts th
   await settle();
   assert.match(ctx.statuses.at(-1).text, /^⚠ Cannot access a chrome:\/\/ URL/);
   assert.deepEqual(ctx.prompts, []);
+});
+
+test("harmony: the wheel rotations (complementary 180° away, split ±150°, analogous ±30°, triadic, tetradic), tints toward white and shades toward black that keep the hue and are monotonic; the tool measures against the page's background and picks the page's accent", async () => {
+  const { T, P, scripting } = load();
+  const h = P.harmony("#e0457b");
+  const hue = (hex) => P.rgbToHsl(P.parseColor(hex)).h;
+  const apart = (a, b) => { const d = Math.abs(hue(a) - hue(b)) % 360; return Math.min(d, 360 - d); };
+  assert.equal(h.base, "#e0457b");
+  assert.deepEqual(plain(h.hsl), { h: 339, s: 71, l: 57.5 });
+  assert.ok(Math.abs(apart(h.base, h.complementary) - 180) <= 1, "complementary " + h.complementary + " is 180° away");
+  assert.ok(h.split.every((x) => Math.abs(apart(h.base, x) - 150) <= 1), "split-complementary ±150°: " + h.split);
+  assert.ok(h.analogous.every((x) => Math.abs(apart(h.base, x) - 30) <= 1), "analogous ±30°: " + h.analogous);
+  assert.ok(h.triadic.every((x) => Math.abs(apart(h.base, x) - 120) <= 1), "triadic: " + h.triadic);
+  assert.ok([90, 180, 90].every((d, i) => Math.abs(apart(h.base, h.tetradic[i]) - d) <= 1), "tetradic: " + h.tetradic);
+  assert.equal(h.tints.length, 5);
+  assert.equal(h.shades.length, 5);
+  for (let i = 0; i < 5; i++) {
+    assert.ok(P.luminance(h.tints[i]) > P.luminance(i ? h.tints[i - 1] : h.base), "tint " + (i + 1) + " is lighter than the one before");
+    assert.ok(P.luminance(h.shades[i]) < P.luminance(i ? h.shades[i - 1] : h.base), "shade " + (i + 1) + " is darker than the one before");
+    assert.ok(apart(h.tints[i], h.base) <= 2 && apart(h.shades[i], h.base) <= 2, "the ramps keep the hue");
+  }
+  assert.ok(P.luminance(h.tints[4]) < 1 && P.luminance(h.shades[4]) > 0, "the ramps stop short of white and black");
+  for (const x of [h.complementary].concat(h.split, h.analogous, h.triadic, h.tetradic, h.tints, h.shades)) assert.match(x, /^#[0-9a-f]{6}$/);
+  assert.equal(P.harmony("rgb(224, 69, 123)").complementary, h.complementary, "any colour syntax");
+  assert.throws(() => P.harmony("nope"), /'nope' is not a colour/);
+  assert.equal(P.harmony("#808080").complementary, "#808080", "a grey has no hue");
+  assert.equal(P.mix("#000000", "#ffffff", 0.5), "#808080");
+
+  // The tool: a given colour and background.
+  await assert.rejects(T.run("browser_palette_harmony", { color: "junk" }), /'junk' is not a colour/);
+  await assert.rejects(T.run("browser_palette_harmony", { color: "#e0457b", background: "transparent" }), /'transparent' is not a colour/);
+  const out = await runTool(T, "browser_palette_harmony", { color: "#e0457b", background: "#ffffff" });
+  const lines = out.split("\n");
+  assert.equal(lines[0], "Harmonies of #e0457b (hue 339°, 71% saturation, 58% lightness), contrast against #ffffff:");
+  assert.equal(lines[1], "  base                 #e0457b " + P.contrastRatio("#e0457b", "#ffffff").toFixed(2) + ":1 ⚠ large only");
+  assert.match(lines[2], /^  complementary        #[0-9a-f]{6} \d\.\d\d:1 (⚠|✓ AA)/);
+  assert.match(lines[3], /^  split-complementary  #[0-9a-f]{6} \d\.\d\d:1 [^ ]+( large only)?   #[0-9a-f]{6} \d\.\d\d:1/);
+  assert.match(lines[7], /^  tints → white        (#[0-9a-f]{6} \d\.\d\d:1 ⚠( large only)?   ){4}#[0-9a-f]{6} 1\.\d\d:1 ⚠$/, "no tint passes AA on white");
+  assert.match(lines[8], /^  shades → black       #[0-9a-f]{6} \d\.\d\d:1 [^ ]+/);
+  assert.match(lines[8], /✓ AA$/, "the darkest shade passes on white");
+  assert.match(out, /\n✓ AA = 4\.5:1 or more, fine for text; ⚠ large only = 3:1 or more/);
+  assert.match(out, /\n:root \{\n  --accent: #e0457b;\n  --accent-2: #[0-9a-f]{6}; \/\* complementary \*\/\n  --accent-3: #[0-9a-f]{6}; \/\* split-complementary \*\/\n  --accent-4: #[0-9a-f]{6};\n  --accent-analogous-1: #[0-9a-f]{6};\n  --accent-analogous-2: #[0-9a-f]{6};\n  --accent-triad-1: #[0-9a-f]{6};\n  --accent-triad-2: #[0-9a-f]{6};\n  --accent-tetrad-1: #[0-9a-f]{6};\n  --accent-tetrad-2: #[0-9a-f]{6};\n  --accent-tetrad-3: #[0-9a-f]{6};\n  --accent-tint-1: #[0-9a-f]{6};\n(  --accent-tint-\d: #[0-9a-f]{6};\n){4}(  --accent-shade-\d: #[0-9a-f]{6};\n){5}  --on-accent: #(ffffff|111111); \/\* text on the accent \*\/\n\}$/);
+  assert.deepEqual(scripting.calls, [], "nothing read from the page when both colours are given");
+
+  // Without arguments: the page's accent (its coloured button) against its body background.
+  scripting.results.pageExtractPalette = RAW;
+  const auto = await runTool(T, "browser_palette_harmony", {});
+  assert.match(auto, /^Harmonies of #ff6600 \(hue 24°, 100% saturation, 50% lightness\) — the page's accent \(its button colour\), contrast against #ffffff:\n/);
+  assert.match(auto, /\n  --accent-2: #0099ff; \/\* complementary \*\//);
+  assert.deepEqual(plain(P.accentOf(P.summarizePalette(RAW))), { hex: "#ff6600", from: "its button colour" });
+  assert.deepEqual(plain(P.accentOf(P.summarizePalette({ ...RAW, button: null }))), { hex: "#ff6600", from: "its theme-color" });
+  assert.deepEqual(plain(P.accentOf(P.summarizePalette({ ...RAW, button: null, themeColor: "" }))), { hex: "#0066cc", from: "its link colour" });
+  // A given colour against the page's background; a dark page.
+  scripting.results.pageExtractPalette = { ...RAW, body: { bg: "rgb(18, 18, 18)", color: "rgb(230, 230, 230)" } };
+  assert.match(await runTool(T, "browser_palette_harmony", { color: "#e0457b" }), /^Harmonies of #e0457b \([^)]*\), contrast against #121212:\n  base                 #e0457b \d\.\d\d:1 ✓ AA/);
+  // A grey page has no accent; a page that can't be read asks for color, or measures against white.
+  scripting.results.pageExtractPalette = { ...RAW, button: null, themeColor: "", link: "rgb(80, 80, 80)", bg: [{ v: "rgb(255, 255, 255)", n: 5, sels: [] }], text: [{ v: "rgb(0, 0, 0)", n: 5, sels: [] }], vars: [] };
+  await assert.rejects(T.run("browser_palette_harmony", {}), /No accent stands out on this page \(no coloured buttons, theme-color or links\) — pass color/);
+  scripting.fail = "Cannot access a chrome:// URL";
+  await assert.rejects(T.run("browser_palette_harmony", {}), /Couldn't read the page's palette \(Cannot access a chrome:\/\/ URL\) — pass color/);
+  assert.match(await runTool(T, "browser_palette_harmony", { color: "#e0457b" }), /contrast against #ffffff:[^]*\n\(the page could not be read: Cannot access a chrome:\/\/ URL; measured against white\)$/);
 });

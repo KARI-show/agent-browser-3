@@ -1,7 +1,7 @@
 // Page elements (browser/extras/elements.js + elements.cs.js) against fakes of chrome, the tool runtime and a
-// small DOM: the sanitiser (allow-lists over a parsed tree), css scoping, durable selectors, the five tools
-// with their storage records and reports, the cap, the content script's re-application order and
-// idempotency, and the 🧱 tab. The real page is exercised in tests/e2e/extras-stencil.e2e.mjs.
+// small DOM: the sanitiser (allow-lists over a parsed tree), css scoping, durable selectors, the eight tools
+// with their storage records and reports (moves with their way back, copies through the sanitiser, the
+// hand-off export), the cap, the content script's re-application order and idempotency, and the 🧱 tab. The real page is exercised in tests/e2e/extras-stencil.e2e.mjs.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 const plain = (x) => (x === undefined ? undefined : JSON.parse(JSON.stringify(x))); // values made inside the vm have another realm's prototypes
@@ -30,20 +30,21 @@ function setup(bodyHtml = FIXTURE, opts = {}) {
 const records = (m) => (m.data.agentPageEdits || {})["example.com"] || [];
 const html = (el) => el.innerHTML.replace(/\s+/g, " ").trim();
 
-test("loads only for a brand with the feature; registers five tools, the 🧱 tab, four Design commands and the content script once", async () => {
+test("loads only for a brand with the feature; registers eight tools, the 🧱 tab, five Design commands and the content script once", async () => {
   const off = loadExtra("elements", { features: { elements: false, overlay: true } });
   eq(off.T.names, []);
   eq(off.AgentExtras.tabs, []);
   assert.equal(off.X, undefined);
 
   const m = loadExtra("elements");
-  eq(m.T.names, ["browser_element_add", "browser_element_edit", "browser_element_hide", "browser_element_list", "browser_element_forget"]);
+  eq(m.T.names, ["browser_element_add", "browser_element_edit", "browser_element_hide", "browser_element_move", "browser_element_duplicate", "browser_element_export", "browser_element_list", "browser_element_forget"]);
   assert.equal(m.tab.label, "🧱 Elements");
   eq(m.tab.storageKeys, ["agentPageEdits"]);
   eq(m.commands.map((c) => [c.group, c.name, !!c.partial]), [
-    ["Design", "Add a note to this page", true], ["Design", "Hide this element…", false], ["Design", "Replace the hero text with…", true], ["Design", "Show this site's edits", false],
+    ["Design", "Add a note to this page", true], ["Design", "Hide this element…", false], ["Design", "Replace the hero text with…", true], ["Design", "Show this site's edits", false], ["Design", "Hand-off of this site's edits", false],
   ]);
   assert.match(m.commands[1].prompt, /browser_element_hide/);
+  assert.match(m.commands[4].prompt, /browser_element_export \(format markdown\)/);
   assert.match(m.commands[1].prompt, /never consent, cookie, security/);
   assert.equal(await m.X.registered, true);
   eq(m.scripting.registered, [{ id: "extras-elements", js: ["extras-elements.cs.js"], matches: ["http://*/*", "https://*/*"], runAt: "document_start", persistAcrossSessions: true }]);
@@ -474,4 +475,235 @@ test("the 🧱 tab: the site's edits by kind with restore/switch-on and delete, 
   assert.equal(m.page.querySelector("h1").textContent, "Welcome to the fixture");
   await m.tab.render(content, ctx);
   assert.match(content.text(), /No edits on example\.com yet/);
+});
+
+const order = (el) => el.children.map((c) => c.getAttribute("id") || c.getAttribute("data-agent-element") || c.localName);
+
+test("browser_element_move: durable selectors for the element and the target, the way back in `from`, applied once; moving again replaces; forget puts it back", async () => {
+  const m = setup();
+  await settle();
+  const main = m.page.querySelector("main");
+  const out = await runTool(m.T, "browser_element_move", { selector: "#box-a", targetSelector: "#box-b" });
+  const id = /Saved as (el_\w+)/.exec(out)[1];
+  assert.equal(out, `Moved div "A" (#box-a) after div "B" (#box-b) on example.com. Saved as ${id}: it comes back on every load of this site until forgotten (browser_element_forget). Check it with browser_screenshot.`);
+  eq(order(main), ["box-b", "box-a"]);
+  assert.equal(m.page.querySelector("#box-a").getAttribute("data-agent-moved"), id, "the move's id on the element says it is in place");
+  const rec = records(m)[0];
+  eq(Object.keys(rec).sort(), ["enabled", "from", "id", "kind", "name", "position", "selector", "t", "targetSelector"]);
+  eq([rec.kind, rec.selector, rec.targetSelector, rec.position, rec.name], ["move", "#box-a", "#box-b", "after", 'div "A"']);
+  eq(rec.from, { parentSelector: "body > main", nextSelector: "#box-b" }, "the parent and the next sibling, selected as if the element were already gone");
+  // The storage listener synced the same list again: still one move, the element not moved twice.
+  eq(order(main), ["box-b", "box-a"]);
+  assert.match(await runTool(m.T, "browser_element_list", {}), /Moved \(1\):\n  el_\w+  div "A" — #box-a · moved after #box-b · on · just now/);
+  assert.match(await runTool(m.T, "browser_element_list", { site: "*" }), /example\.com — 1 \(1 moved\)/);
+  // Moving the same element again: the first move is dropped (the element goes back), the new one starts from the original place.
+  const out2 = await runTool(m.T, "browser_element_move", { selector: "#box-a", targetSelector: "#sidebar", position: "prepend", name: "Box A" });
+  assert.match(out2, /^Moved div "A" \(#box-a\) to the start of aside "Sidebar One Two" \(#sidebar\) on example\.com\. Saved as el_\w+:/);
+  eq(order(main), ["box-b"]);
+  eq(order(m.page.querySelector("#sidebar")), ["box-a", "h2", "ul"]);
+  assert.equal(records(m).length, 1, "one move record for the element");
+  eq(records(m)[0].from, { parentSelector: "body > main", nextSelector: "#box-b" }, "the way back is the original place");
+  assert.equal(records(m)[0].name, "Box A");
+  // The 🧱 tab lists it under Moved.
+  const { content, ctx } = fakeCtx(m.page);
+  await m.tab.render(content, ctx);
+  eq(content.byClass("cmd-group-title").map((n) => n.textContent), ["Moved (1)"]);
+  assert.match(content.text(), /#box-a · moved to the start of #sidebar/);
+  // Forgetting the move puts the element back before #box-b.
+  assert.match(await runTool(m.T, "browser_element_forget", { name: "box a" }), /^Forgot "Box A" \(el_\w+, move\) on example\.com and undid it on the page\. 0 edits left/);
+  eq(order(main), ["box-a", "box-b"]);
+  assert.equal(m.page.querySelector("#box-a").hasAttribute("data-agent-moved"), false);
+  eq(records(m), []);
+  // persist=false: moved, marked, nothing saved; a move to the end of a parent has no next sibling to come back before.
+  const out3 = await runTool(m.T, "browser_element_move", { ref: 3, targetSelector: "main", position: "append", persist: false });
+  assert.match(out3, /^Moved a "a link" \(body > p > a\) to the end of main "A B" \(body > main\) on example\.com\. This visit only \(persist=false\), nothing saved\./);
+  eq(order(main), ["box-a", "box-b", "a"]);
+  eq(records(m), []);
+  // Refusals, before anything reaches the page or storage.
+  await assert.rejects(m.T.run("browser_element_move", { selector: "#box-a" }), /Give target .* or targetSelector/);
+  await assert.rejects(m.T.run("browser_element_move", { selector: "#box-a", targetSelector: "#box-b", position: "fixed" }), /position must be one of before, after, prepend, append/);
+  await assert.rejects(m.T.run("browser_element_move", { selector: "#box-a", targetSelector: "#box-a" }), /The target div "A" \(#box-a\) is the element itself or sits inside it/);
+  await assert.rejects(m.T.run("browser_element_move", { selector: "main", targetSelector: "#box-b" }), /is the element itself or sits inside it/);
+  await assert.rejects(m.T.run("browser_element_move", { selector: "#box-a", targetSelector: "#nope" }), /Nothing on the page matches the selector "#nope"/);
+  await assert.rejects(m.T.run("browser_element_move", { selector: "#box-a", target: 42 }), /No element \[42\]/);
+  await runTool(m.T, "browser_element_add", { html: "<p>note</p>", name: "Note" });
+  await assert.rejects(m.T.run("browser_element_move", { selector: "[data-agent-element]", targetSelector: "#box-b" }), /was added by browser_element_add .* forget it and add it again/);
+  eq(order(main), ["box-a", "box-b", "a"]);
+  // A move whose way back is gone from the page: forgetting it says so instead of losing the element.
+  await runTool(m.T, "browser_element_move", { selector: "#box-b", targetSelector: "#sidebar", position: "append", name: "Box B" });
+  m.data.agentPageEdits["example.com"].filter((r) => r.kind === "move")[0].from = { parentSelector: "#gone", nextSelector: "" };
+  assert.match(await runTool(m.T, "browser_element_forget", { name: "Box B" }), /^Forgot "Box B" \(el_\w+, move\) on example\.com — its original place is not on the page any more; reload to put the element back\. 1 edit left/);
+  eq(order(m.page.querySelector("#sidebar")), ["h2", "ul", "box-b"], "left where it is, unmarked");
+  assert.equal(m.page.querySelector("#box-b").hasAttribute("data-agent-moved"), false);
+});
+
+test("the content script applies moves once, reports missing elements and targets, and puts a switched-off move back by `from`", async () => {
+  const page = fakeDocument(FIXTURE);
+  const m = loadExtra("elements");
+  const edits = [
+    { id: "el_m", kind: "move", name: "A", selector: "#box-a", targetSelector: "#sidebar", position: "prepend", from: { parentSelector: "body > main", nextSelector: "#box-b" }, enabled: true, t: 1 },
+    { id: "el_n", kind: "move", name: "Late", selector: "#late", targetSelector: "#box-b", position: "after", enabled: true, t: 2 },
+    { id: "el_t", kind: "move", name: "No target", selector: "#box-b", targetSelector: "#nowhere", position: "after", enabled: true, t: 3 },
+    { id: "el_e", kind: "edit", name: "Title", selector: "#title", text: "Hello", before: { text: "Welcome to the fixture" }, enabled: true, t: 4 },
+  ];
+  await m.chrome.storage.local.set({ agentPageEdits: { "example.com": edits } });
+  const cs = loadContentScript({ document: page, hostname: "www.example.com", chrome: m.chrome });
+  await settle();
+  eq(order(page.querySelector("#sidebar")), ["box-a", "h2", "ul"]);
+  assert.equal(page.querySelector("#box-a").getAttribute("data-agent-moved"), "el_m");
+  const rep = cs.cs().sync(edits);
+  eq([rep.moved, rep.missingMove, rep.missingTarget, rep.unmoved, rep.stuck, rep.edited], [["el_m"], ["el_n"], ["el_t"], [], [], ["el_e"]], "idempotent: the move in place is reported, not redone");
+  eq(order(page.querySelector("#sidebar")), ["box-a", "h2", "ul"]);
+  // A target inside the element itself counts as missing.
+  const rep2 = cs.cs().sync(edits.concat([{ id: "el_i", kind: "move", selector: "#sidebar", targetSelector: "#sidebar h2", position: "after", enabled: true, t: 5 }]));
+  eq(rep2.missingTarget, ["el_t", "el_i"]);
+  // Switched off: back before #box-b, unmarked; a move without a way back (or with one that is gone) stays put and is reported stuck.
+  const off = edits.map((e) => (e.id === "el_m" ? { ...e, enabled: false } : e));
+  const rep3 = cs.cs().sync(off);
+  eq(rep3.unmoved, ["el_m"]);
+  eq(order(page.querySelector("main")), ["box-a", "box-b"]);
+  assert.equal(page.querySelector("#box-a").hasAttribute("data-agent-moved"), false);
+  cs.cs().sync(edits);
+  const gone = edits.map((e) => (e.id === "el_m" ? { ...e, enabled: false, from: { parentSelector: "#gone", nextSelector: "" } } : e));
+  eq(cs.cs().sync(gone).stuck, ["el_m"]);
+  eq(order(page.querySelector("#sidebar")), ["box-a", "h2", "ul"]);
+  // Forgotten altogether (no record for the mark): unmarked, left where it is.
+  cs.cs().sync(edits);
+  assert.equal(page.querySelector("#box-a").getAttribute("data-agent-moved"), "el_m");
+  eq(cs.cs().sync([]).stuck, ["el_m"]);
+  assert.equal(page.querySelector("#box-a").hasAttribute("data-agent-moved"), false);
+  // Storage changes follow: the move again, then off → back.
+  await m.chrome.storage.local.set({ agentPageEdits: { "example.com": edits } });
+  eq(order(page.querySelector("#sidebar")), ["box-a", "h2", "ul"]);
+  await m.chrome.storage.local.set({ agentPageEdits: { "example.com": off } });
+  eq(order(page.querySelector("main")), ["box-a", "box-b"]);
+});
+
+test("browser_element_duplicate: copies go through the sanitiser without ids or agent marks, are saved as added elements named copy of …, and keep an agent element's scoped css", async () => {
+  const m = setup();
+  await settle();
+  const main = m.page.querySelector("main");
+  const boxB = m.page.querySelector("#box-b");
+  boxB.setAttribute("onclick", "x()");
+  boxB.innerHTML = 'B <script></script><a href="javascript:z" data-agent-edit="el_old">link</a>';
+  const out = await runTool(m.T, "browser_element_duplicate", { selector: "#box-b", count: 2 });
+  const ids = records(m).map((r) => r.id);
+  assert.equal(out, `Added 2 copies of div "B link" (#box-b) after it on example.com — ${ids.join(", ")}, each carrying data-agent-element. Dropped from the copies: <script>, onclick, 1 unsafe URL, 1 id. Saved for this site: it comes back on every load of this site until forgotten (browser_element_forget). Check it with browser_screenshot.`);
+  eq(records(m).map((r) => [r.kind, r.name, r.position, r.selector, r.html]), [
+    ["add", 'copy of div "B link" (1)', "after", "#box-b", "<div>B <a>link</a></div>"],
+    ["add", 'copy of div "B link" (2)', "after", "#box-b", "<div>B <a>link</a></div>"],
+  ]);
+  eq(order(main), ["box-a", "box-b", ids[1], ids[0]], "each copy right after the source, with its own agent id");
+  assert.equal(m.page.querySelectorAll("[data-agent-element]").length, 2);
+  assert.match(await runTool(m.T, "browser_element_list", {}), /Added \(2\):\n  el_\w+  copy of div "B link" \(1\) — after #box-b/);
+  // One copy before, named; persist=false saves nothing.
+  const out2 = await runTool(m.T, "browser_element_duplicate", { selector: "#box-a", position: "before", name: "Box A", persist: false });
+  assert.match(out2, /^Added 1 copy of div "A" \(#box-a\) before it on example\.com — el_\w+, each carrying data-agent-element\. Dropped from the copies: 1 id\. This visit only \(persist=false\), nothing saved\./);
+  assert.equal(main.children[0].getAttribute("data-agent-element").slice(0, 3), "el_");
+  assert.equal(html(main.children[0]), "A");
+  assert.equal(records(m).length, 2);
+  // A copy of an agent element carries its css, re-scoped to the copy.
+  await runTool(m.T, "browser_element_add", { html: '<p class="promo">Promo</p>', css: "& { color: red }", name: "Promo" });
+  const promo = records(m)[2];
+  const out3 = await runTool(m.T, "browser_element_duplicate", { selector: `[data-agent-element="${promo.id}"]` });
+  const copy = records(m)[3];
+  assert.match(out3, new RegExp(`^Added 1 copy of div "Promo" \\(\\[data-agent-element="${promo.id}"\\]\\) after it on example\\.com — ${copy.id}, each carrying data-agent-element\\. Saved`));
+  assert.equal(copy.name, 'copy of div "Promo"');
+  assert.equal(copy.html, '<div style="position:fixed;z-index:2147483000;box-sizing:border-box;margin:0;left:0;right:0;top:0;"><p class="promo">Promo</p></div>', "the source's wrapper, without its agent id");
+  assert.equal(copy.css, `[data-agent-element="${copy.id}"] { color: red; }`);
+  assert.equal(m.page.head.querySelector(`style[data-agent-css="${copy.id}"]`).textContent, copy.css);
+  // Refusals.
+  await assert.rejects(m.T.run("browser_element_duplicate", { selector: "#box-a", count: 0 }), /count must be a whole number from 1 to 10/);
+  await assert.rejects(m.T.run("browser_element_duplicate", { selector: "#box-a", count: 11 }), /count must be a whole number from 1 to 10/);
+  await assert.rejects(m.T.run("browser_element_duplicate", { selector: "#box-a", count: 1.5 }), /count must be a whole number/);
+  await assert.rejects(m.T.run("browser_element_duplicate", { selector: "#box-a", position: "append" }), /position must be after or before/);
+  await assert.rejects(m.T.run("browser_element_duplicate", {}), /Give ref .* or selector/);
+  await assert.rejects(m.T.run("browser_element_duplicate", { selector: "#nope" }), /Nothing on the page matches/);
+  m.page.querySelector("#box-a").innerHTML = "x".repeat(m.X.MAX_HTML);
+  await assert.rejects(m.T.run("browser_element_duplicate", { selector: "#box-a" }), /The element's markup is 20 KB; the limit is 20 KB — copy a smaller element/);
+  const empty = m.page.querySelector("h2");
+  empty.innerHTML = "<script>1</script>";
+  empty.setAttribute("id", "scripty");
+  const r = m.X.cloneHtml(empty.outerHTML);
+  eq([r.html, r.words, r.ids], ["<h2></h2>", "<script>, 1 id".replace(", 1 id", ""), 1]);
+  assert.equal(records(m).length, 4);
+});
+
+test("exportEdits: the markdown hand-off, the css stylesheet and the JSON patch over add/edit/hide/move records; the tool reads the site's list", async () => {
+  const { X } = loadExtra("elements");
+  const t = Date.UTC(2026, 9, 26, 12, 0, 0);
+  const recs = [
+    { id: "el_a", kind: "add", name: "Banner", position: "fixed", corner: "top", html: "<p>Banner</p>", css: '[data-agent-element="el_a"] { background: #123; }', enabled: true, t },
+    { id: "el_b", kind: "add", name: "Tag", position: "after", selector: "body > p > a", html: '<em class="tag">new</em>', enabled: true, t },
+    { id: "el_e", kind: "edit", name: 'h1 "Welcome"', selector: "#title", text: "Hello", attrs: { href: "https://new.example/", title: "New", addClass: "hero big", removeClass: "old" }, style: "color: #c00; font-weight: 700", before: { text: "Welcome to the fixture", attrs: { href: "/more", title: null }, style: "margin: 0" }, enabled: true, t },
+    { id: "el_h", kind: "hide", name: "Sidebar", selector: "#sidebar", mode: "remove", enabled: true, t },
+    { id: "el_h2", kind: "hide", name: "Box B", selector: "#box-b", mode: "hide", enabled: false, t },
+    { id: "el_m", kind: "move", name: 'div "A"', selector: "#box-a", targetSelector: "#sidebar", position: "prepend", from: { parentSelector: "body > main", nextSelector: "#box-b" }, enabled: true, t },
+  ];
+  assert.equal(X.exportEdits(recs, "markdown", "example.com"), [
+    "# Page edits for example.com (6)",
+    "",
+    "Saved edits, re-applied on every load of example.com; selectors are CSS in the top frame. 1 of them switched off.",
+    "",
+    "1. **Added** Banner — `fixed top` · 2026-10-26",
+    "   ```html",
+    "   <p>Banner</p>",
+    "   ```",
+    "   ```css",
+    '   [data-agent-element="el_a"] { background: #123; }',
+    "   ```",
+    "",
+    "2. **Added** Tag — `after body > p > a` · 2026-10-26",
+    "   ```html",
+    '   <em class="tag">new</em>',
+    "   ```",
+    "",
+    '3. **Edited** h1 "Welcome" — `#title` · 2026-10-26',
+    '   - text: "Welcome to the fixture" → "Hello"',
+    '   - href: "/more" → "https://new.example/"',
+    '   - title: (none) → "New"',
+    "   - add class: hero big",
+    "   - remove class: old",
+    "   - style: `margin: 0` → `color: #c00; font-weight: 700`",
+    "",
+    "4. **Hidden** Sidebar — `#sidebar` · 2026-10-26",
+    "   - removed from view and the accessibility tree (display: none; hidden; aria-hidden)",
+    "",
+    "5. **Hidden** Box B _(off)_ — `#box-b` · 2026-10-26",
+    "   - display: none",
+    "",
+    '6. **Moved** div "A" — `#box-a` · 2026-10-26',
+    "   - moved to the start of `#sidebar` (was in `body > main`, before `#box-b`)",
+    "",
+  ].join("\n"));
+  const css = X.exportEdits(recs, "css", "example.com");
+  assert.equal(css, [
+    "/* Page edits for example.com — exported " + new Date().toISOString().slice(0, 10) + "; the hides and inline style changes, 1 switched-off edit left out */",
+    "",
+    '/* Edited: h1 "Welcome" */',
+    "#title { color: #c00; font-weight: 700; }",
+    "",
+    "/* Hidden: Sidebar (also hidden from assistive technology) */",
+    "#sidebar { display: none !important; }",
+    "",
+    "/* 3 edits (added, moved, text or attribute changes) cannot be written as CSS — see the markdown export */",
+  ].join("\n"));
+  eq(JSON.parse(X.exportEdits(recs, "patch", "example.com")), recs, "the patch is the records as they are, re-importable");
+  assert.throws(() => X.exportEdits(recs, "yaml", "x"), /format must be one of markdown, css, patch/);
+  assert.equal(X.exportEdits([], "markdown", "x"), "# Page edits for x (0)\n\nSaved edits, re-applied on every load of x; selectors are CSS in the top frame.\n");
+  // The tool: the current site by default, any site by name, a format check, nothing to export.
+  const m = setup();
+  await settle();
+  assert.equal(await runTool(m.T, "browser_element_export", {}), "No saved edits for example.com — nothing to export.");
+  await runTool(m.T, "browser_element_hide", { selector: "#sidebar", name: "Sidebar" });
+  await runTool(m.T, "browser_element_edit", { selector: "h1", text: "New" });
+  const md = await runTool(m.T, "browser_element_export", {});
+  assert.match(md, /^# Page edits for example\.com \(2\)\n/);
+  assert.match(md, /1\. \*\*Hidden\*\* Sidebar — `#sidebar` · \d{4}-\d\d-\d\d\n   - display: none\n/);
+  assert.match(md, /2\. \*\*Edited\*\* h1 "Welcome to the fixture" — `#title` · \d{4}-\d\d-\d\d\n   - text: "Welcome to the fixture" → "New"\n/);
+  assert.match(await runTool(m.T, "browser_element_export", { format: "css" }), /#sidebar \{ display: none !important; \}/);
+  const patch = JSON.parse(await runTool(m.T, "browser_element_export", { format: "patch" }));
+  eq(patch.map((r) => r.kind), ["hide", "edit"]);
+  assert.match(await runTool(m.T, "browser_element_export", { site: "https://Other.example/x" }), /^No saved edits for other\.example/);
+  await assert.rejects(m.T.run("browser_element_export", { format: "html" }), /format must be one of markdown, css, patch/);
 });
