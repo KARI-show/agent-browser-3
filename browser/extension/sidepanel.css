@@ -214,9 +214,14 @@ body.backend-native .user-tools .rewind-btn:last-child { display: none !importan
 #profiles-panel.hidden { display: none; }
 .prof-tabs {
   display: flex;
+  /* A brand with several extras has six tabs or more: they wrap to a second row rather than run off
+     the panel (a clipped tab can neither be seen nor clicked; the panel never scrolls sideways). */
+  flex-wrap: wrap;
   border-bottom: 1px solid var(--vscode-panel-border, #333);
   padding: 0 8px;
 }
+.prof-tab { white-space: nowrap; }
+#automations-panel, #profiles-panel { overflow-x: hidden; }
 .prof-tab {
   padding: 8px 14px;
   font-size: 12px;
