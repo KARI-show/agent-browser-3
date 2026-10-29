@@ -29,6 +29,7 @@
 
   var STALE = "That element is gone — the page changed. Call browser_read_page again.";
   var inWorker = typeof window === "undefined"; // background.js (service worker) vs the side panel
+  function brandName() { return (globalThis.AGENT_BRAND && globalThis.AGENT_BRAND.shortName) || "Tali"; }
 
   function auto() {
     if (!globalThis.AgentAutomation) throw new Error("The automation module (recipes, watchers, memory) didn't load.");
@@ -1371,6 +1372,7 @@
   // The setting in place before the first profile launch is kept aside and restored by endProfile();
   // a profile without a proxy launched over another profile's proxy goes direct, not through it.
   async function applyProfileProxy(pid, p) {
+    if (!chrome.proxy) return p.proxy && p.proxy.enabled && p.proxy.host ? " — NOT applied: this build has no proxy support" : "";
     var st = await chrome.storage.local.get(["agentProxy", PROXY_BEFORE_KEY]);
     var before = st[PROXY_BEFORE_KEY];
     var want = p.proxy && p.proxy.enabled && p.proxy.host
@@ -1472,7 +1474,7 @@
       // The page text is budgeted inside the snapshot; this is only a safety net for pathological pages.
       var out = s.text.length > 120000 ? s.text.slice(0, 120000) + "\n… (output truncated)" : s.text;
       // Site memory: what was learnt about this site earlier rides along with the first look at it.
-      if (globalThis.AgentAutomation) {
+      if (globalThis.AgentAutomation && (!globalThis.AGENT_BRAND || !globalThis.AGENT_BRAND.has || globalThis.AGENT_BRAND.has("memory"))) {
         var notes = await globalThis.AgentAutomation.memoryBlock(s.top.url).catch(function () { return ""; });
         if (notes) out += "\n\n" + notes;
       }
@@ -1579,7 +1581,7 @@
       } catch (e) {
         throw new Error(
           "Couldn't open a private window (" + ((e && e.message) || e) + "). Turn on \"Allow in Incognito\" " +
-          "for Tali at chrome://extensions, then try again."
+          "for " + brandName() + " at chrome://extensions, then try again."
         );
       }
       var tab = win.tabs && win.tabs[0];
@@ -2259,7 +2261,7 @@
       // 4. Session: this is the regular cookie jar, so the profile's domains are cleared first —
       //    whatever account was signed in there is signed out — then the saved cookies go in.
       var imported = 0, replaced = 0, domainList = [];
-      if (p.cookies && p.cookies.length) {
+      if (p.cookies && p.cookies.length && chrome.cookies) {
         var domains = {};
         p.cookies.forEach(function (c) { if (c.domain) domains[c.domain.replace(/^\./, "")] = true; });
         domainList = Object.keys(domains);
@@ -2344,7 +2346,7 @@
       } catch (_) {}
 
       // Snapshot cookies for current domain
-      if (tab.url) {
+      if (tab.url && chrome.cookies) {
         try {
           var domain = new URL(tab.url).hostname;
           var cookies = await chrome.cookies.getAll({ domain: domain });
@@ -2420,6 +2422,13 @@
     return e && e.loc ? Object.assign({}, e.loc) : null;
   }
 
+  // The frame and in-page index behind a ref of the current tab, for an extra that runs its own
+  // function on the element (window.__agentRefs[local - 1] in that document's ISOLATED world).
+  function refTarget(ref) {
+    var e = (refTables[currentTabId] || {})[ref];
+    return e ? { documentId: e.documentId, local: e.local, loc: e.loc ? Object.assign({}, e.loc) : null } : null;
+  }
+
   // Arguments as they may be stored: no file bytes, no cookie values, no passwords.
   function traceArgs(name, args) {
     var a = {};
@@ -2468,7 +2477,24 @@
     stepListeners.forEach(function (fn) { try { fn(step); } catch (_) {} });
   }
 
+  // Extra features (browser/extras/<id>.js, built into extras.js for the brands that have them) add
+  // their tools here and their UI to AgentExtras; automations.js and commands.js pick those up.
+  var EXTRA_TOOLS = {};
+  globalThis.AgentExtras = {
+    /** [{ id, label, render(content, ctx) }] — tabs of the 🧩 panel (ctx: el, field, ago, hostOf, status, sendPrompt, currentTabUrl, rerender). */
+    tabs: [],
+    /** Quick commands ({ group, icon, name, prompt, partial? }) added to the ⚡ panel. */
+    commands: [],
+  };
+
   globalThis.AgentBrowserTools = {
+    /** An extra feature's tool: name as declared in browser/host/extras/<id>.ts, fn(args) → content parts. */
+    register: function (name, fn) {
+      if (TOOLS[name] || EXTRA_TOOLS[name]) throw new Error("Browser tool already defined: " + name);
+      EXTRA_TOOLS[name] = fn;
+    },
+    /** What the extras build on: the tab the tools act on, scripts in it, the page snapshot. */
+    helpers: { currentTab: currentTab, inTop: inTop, inAllFrames: inAllFrames, snapshot: snapshot, sleep: sleep, text: text, ownPage: ownPage, refTarget: refTarget },
     /** Words for what a call would act on — the element behind a ref, or the address — for approval cards. */
     describe: function (name, args) {
       args = args || {};
@@ -2483,7 +2509,7 @@
     },
     /** Run a tool; the call lands in the trace (replay=true marks a recipe's own steps). */
     run: function (name, args, replay) {
-      var fn = TOOLS[name];
+      var fn = TOOLS[name] || EXTRA_TOOLS[name];
       if (!fn) return Promise.reject(new Error("Unknown browser tool: " + name));
       args = args || {};
       var step = beginStep(name, args);
@@ -2498,7 +2524,7 @@
         function (err) { return after().then(function () { endStep(step, null, err); throw err; }); }
       );
     },
-    names: Object.keys(TOOLS),
+    get names() { return Object.keys(TOOLS).concat(Object.keys(EXTRA_TOOLS)); },
     /** The recorded steps (a copy), oldest first. */
     trace: function () { return trace.slice(); },
     clearTrace: function () { trace.length = 0; },

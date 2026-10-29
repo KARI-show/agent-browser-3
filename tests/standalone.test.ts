@@ -531,7 +531,8 @@ function host(api: Awaited<ReturnType<typeof mockApi>>, over: Partial<LocalHostD
   };
   const h = new LocalHost(deps);
   const types = () => posted.map((m) => m.type);
-  const waitFor = async (pred: () => boolean, ms = 4000) => {
+  // Generous: the suite runs next to e2e browsers on CI, and a slow machine must not fail a correct flow.
+  const waitFor = async (pred: () => boolean, ms = 15000) => {
     const t0 = Date.now();
     while (!pred()) {
       if (Date.now() - t0 > ms) throw new Error("timed out; got " + JSON.stringify(types()));
@@ -1003,6 +1004,7 @@ test("panel: Retry runs the last user message again on a history cut back to it;
     await t.h.handle({ type: "ready" });
     void t.h.handle({ type: "prompt", text: "long job" });
     await t.waitFor(() => t.types().includes("started"));
+    await t.waitFor(() => busy.requests.length === 1); // "started" is posted before the request reaches the server
     t.posted.length = 0;
     await t.h.handle({ type: "regenerate" });
     await t.h.handle({ type: "rewind", userIndex: 0 });

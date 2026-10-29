@@ -2,13 +2,16 @@
 // host/tools.ts into plain JSON Schema for the extension's built-in agent, so
 // the API tool list is generated from the same source as the host's MCP tools.
 import { z } from "zod";
-import { BROWSER_SYSTEM_PROMPT, BROWSER_TOOLS } from "./host/tools";
+import { BROWSER_SYSTEM_PROMPT, BROWSER_TOOLS, PROMPT_SECTIONS } from "./host/tools";
 
+// `system`/`tools` are the full set; `sections` and each tool's `feature` let brand.mjs cut a
+// build's set down to the features that brand has (toolDefsFor).
 export default {
   system: BROWSER_SYSTEM_PROMPT,
+  sections: PROMPT_SECTIONS,
   tools: BROWSER_TOOLS.map((t) => {
     const schema = z.toJSONSchema(z.object(t.shape)) as Record<string, unknown>;
     delete schema.$schema;
-    return { name: t.name, description: t.description, readOnly: t.readOnly, alwaysAsk: !!t.alwaysAsk, input_schema: schema };
+    return { name: t.name, feature: t.feature, description: t.description, readOnly: t.readOnly, alwaysAsk: !!t.alwaysAsk, input_schema: schema };
   }),
 };

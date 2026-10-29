@@ -33,6 +33,8 @@ const kv: KV = {
 };
 
 const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"];
+// Brand builds without the local helper (no nativeMessaging permission) run the agent here only.
+const HELPER = !((window as any).AGENT_BRAND?.has) || (window as any).AGENT_BRAND.has("helper");
 const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
 
 /** https anywhere, or plain http only to this machine — an http:// address would send the key in the clear. */
@@ -53,9 +55,10 @@ async function stored(): Promise<Record<string, unknown>> {
 /** The mode in force: the user's choice, else their key if they set one, else the free trial if this build has one, else the host. */
 function resolveMode(s: Record<string, unknown>): Mode {
   if (s.mode === "trial" && TRIAL_URL) return "trial";
-  if (s.mode === "api" || s.mode === "subscription") return s.mode;
+  if (s.mode === "api") return "api";
+  if (s.mode === "subscription" && HELPER) return "subscription";
   if (str(s.apiKey)) return "api";
-  return TRIAL_URL ? "trial" : "subscription";
+  return TRIAL_URL ? "trial" : HELPER ? "subscription" : "api";
 }
 
 /** The free-trial sign-in: a token from the gateway's email sign-in, and how to talk to that gateway. */
@@ -146,13 +149,15 @@ const PROMPT_ID = fnv(defs.system + JSON.stringify(defs.tools));
 
 (window as any).AgentLocal = {
   trialConfigured: !!TRIAL_URL,
+  /** The browser tools this build declares to the model (a brand without a feature has none of its tools). */
+  toolNames: defs.tools.map((t) => t.name),
 
   /** Which backend the panel should use: the built-in agent ("local") or the native host ("native"). */
   async backend(): Promise<"local" | "native"> {
     const s = await stored();
     const mode = resolveMode(s);
     if (mode === "subscription") return "native";
-    if (mode === "api" && !str(s.apiKey)) return "native"; // chose "own key" but hasn't added one: fall back to the host / setup banner
+    if (mode === "api" && !str(s.apiKey)) return HELPER ? "native" : "local"; // no key yet: the host, or (no helper in this build) the setup banner
     return "local";
   },
 
@@ -168,6 +173,7 @@ const PROMPT_ID = fnv(defs.system + JSON.stringify(defs.tools));
       runTool,
       describeCall: (name, input) => (window as any).AgentBrowserTools?.describe?.(name, input),
       openSettings: () => chrome.runtime.openOptionsPage(),
+      helper: HELPER,
       forgetTrialToken: () => chrome.storage.local.remove(TRIAL_KEY),
     });
     return { handle: (msg: unknown) => void host.handle(msg) };

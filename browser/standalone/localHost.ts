@@ -50,6 +50,8 @@ export interface LocalHostDeps {
   forgetTrialToken?(): void | Promise<void>;
   /** Identifies the tool set + system prompt; a chat saved under another build has its old thinking blocks dropped. */
   promptId?: string;
+  /** This build can run the agent through the local helper (Claude subscription); false = key or trial only. */
+  helper?: boolean;
 }
 
 const DEFAULT_MODEL = "claude-opus-5-5";
@@ -322,7 +324,7 @@ export class LocalHost {
     this.post({
       type: "auth",
       ok,
-      text: error ? `⚠ ${error}` : "⚠ Choose how to run the agent — add an Anthropic API key (or use the free trial / your Claude subscription):",
+      text: error ? `⚠ ${error}` : `⚠ Choose how to run the agent — add an Anthropic API key${this.d.helper === false ? " or use the free trial" : " (or use the free trial / your Claude subscription)"}:`,
       loginLabel: "Open settings",
       recheckLabel: "I've done it",
     });

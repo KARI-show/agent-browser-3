@@ -46,7 +46,7 @@ function anySignal(signals) {
 // Top-level request fields we forward. Anything else (mcp_servers, container,
 // betas, service_tier, metadata…) is refused so it can't smuggle in extra cost.
 const ALLOWED_FIELDS = new Set(["model", "max_tokens", "messages", "system", "tools", "tool_choice", "thinking", "output_config", "cache_control", "stream", "temperature", "top_p", "top_k", "stop_sequences"]);
-const MAX_TOOLS = 64;
+const MAX_TOOLS = 96; // Tali declares 53; a brand with its extras stays under this (tests/features.test.ts checks every brand)
 const MAX_PARALLEL_PER_TOKEN = 3;
 const IMAGE_TOKENS = 3300; // upper bound for one image after the API's own downscaling
 const OUTPUT_TPS_CEILING = 300; // tokens/second no model here exceeds — turns time into a token estimate for cancelled streams

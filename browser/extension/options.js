@@ -182,7 +182,7 @@
       el.className = "status " + (allowed ? "active" : "error");
       $("incognitoStatusText").textContent = allowed
         ? "Allowed — the agent can open private windows."
-        : "Not allowed yet — turn it on at chrome://extensions (Tali → Details).";
+        : "Not allowed yet — turn it on at chrome://extensions (" + ((window.AGENT_BRAND && window.AGENT_BRAND.shortName) || "Tali") + " → Details).";
     });
   }
 
@@ -213,6 +213,10 @@
   // ---- how the agent runs: free trial / own API key / Claude subscription ----
   var API_KEY = "agentApi";
   var trialOk = !!(window.AgentLocal && window.AgentLocal.trialConfigured);
+  // Sections of features this brand ships without (proxy, remote, the local helper) are not shown.
+  document.querySelectorAll("[data-feature]").forEach(function (el) {
+    if (window.AGENT_BRAND && window.AGENT_BRAND.has && !window.AGENT_BRAND.has(el.dataset.feature)) el.hidden = true;
+  });
 
   function chosenMode() {
     var r = document.querySelector('input[name="mode"]:checked');

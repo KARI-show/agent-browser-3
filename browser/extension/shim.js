@@ -28,6 +28,8 @@
   function deliver(ev) {
     // A file a phone uploaded through relay.js belongs in that phone's composer, not this one's.
     if (ev && ev.type === "attached" && window.AgentRemote && window.AgentRemote.claimAttached && window.AgentRemote.claimAttached(ev)) return;
+    // Both backends name the assistant; the brand this build carries decides what the panel shows.
+    if (ev && ev.type === "identity" && window.AGENT_BRAND && window.AGENT_BRAND.shortName) ev = Object.assign({}, ev, { name: window.AGENT_BRAND.shortName });
     window.dispatchEvent(new MessageEvent("message", { data: ev }));
   }
 
@@ -134,7 +136,7 @@
     });
     flush();
     // Re-hydrate state after a reconnect; the first "ready" comes from main.js.
-    if (failures > 0) port.postMessage({ type: "ready" });
+    if (failures > 0) port.postMessage(withBrand({ type: "ready" }));
   }
 
   function fail(reason) {
@@ -164,7 +166,13 @@
   // announced as an "agent:outgoing" event, so relay.js can mirror prompts typed
   // here to the phone (the UI draws its own bubble; the host doesn't echo it).
   var saved = {};
+  // "ready" tells the host which features this brand build has, so the model gets only their tools.
+  function withBrand(m) {
+    if (!m || m.type !== "ready" || !window.AGENT_BRAND) return m;
+    return Object.assign({}, m, { brand: window.AGENT_BRAND.id, features: window.AGENT_BRAND.features });
+  }
   function postMessage(m) {
+    m = withBrand(m);
     try { window.dispatchEvent(new CustomEvent("agent:outgoing", { detail: m })); } catch (_) {}
     send(m);
   }

@@ -1,0 +1,219 @@
+// Brands (browser/brand.mjs + browser/brands/*.json): every brand is complete and distinct, the
+// tokens in the extension's source are all filled by a brand, the manifest stays valid, and the
+// default brand reproduces today's strings.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import vm from "node:vm";
+import { ALL_FEATURES, BASE_BRAND, DEFAULT_BRAND, FEATURES, FEATURE_PERMISSIONS, OPT_IN_FEATURES, TOKEN_FILES, brandManifest, brandScript, extrasContentScripts, extrasScript, featuresOf, fillTokens, listBrands, loadBrand, optInOf, parsePlaybook, playbooksOf, toolDefsFor, validateBrand, validatePlaybook } from "../browser/brand.mjs";
+
+const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const ext = (f) => fs.readFileSync(path.join(root, "browser", "extension", f), "utf8");
+
+test("every brand file loads, is complete, and names/ids/icons are distinct", () => {
+  const ids = listBrands(root);
+  assert.ok(ids.includes(DEFAULT_BRAND));
+  assert.ok(ids.includes(BASE_BRAND));
+  assert.ok(ids.length >= 2 || DEFAULT_BRAND === BASE_BRAND, "the base brand and the brand this repository ships");
+  const brands = ids.map((id) => loadBrand(root, id));
+  const uniq = (k) => new Set(brands.map((b) => (typeof k === "function" ? k(b) : b[k]))).size;
+  assert.equal(uniq("name"), brands.length, "store names differ");
+  assert.equal(uniq("shortName"), brands.length, "assistant names differ");
+  assert.equal(uniq("icon"), brands.length, "each brand has its own icon");
+  assert.equal(uniq((b) => b.colors.accent), brands.length, "accent colours differ");
+  for (const b of brands) {
+    for (const k of ["icon", "avatar"]) {
+      const png = fs.readFileSync(path.join(root, b[k]));
+      assert.equal(png.readUInt32BE(0), 0x89504e47, `${b.id} ${k} is a PNG`);
+      assert.equal(png.readUInt32BE(16), k === "icon" ? 128 : 256, `${b.id} ${k} width`);
+    }
+    // Only one brand may pin the extension id: two listings with one key would be the same extension.
+    if (b.id !== DEFAULT_BRAND) assert.equal(b.key, undefined, `${b.id} must not carry the default brand's key`);
+  }
+});
+
+test("features: a brand without a feature loses its permissions, tools and prompt sections; the default has everything", () => {
+  const tali = loadBrand(root, BASE_BRAND);
+  assert.deepEqual(featuresOf(tali), Object.fromEntries([...FEATURES.map((f) => [f, true]), ...OPT_IN_FEATURES.map((f) => [f, false])]), "the published brand keeps every base feature and has no extras");
+  const full = JSON.parse(brandManifest(ext("manifest.json"), tali));
+  for (const perms of Object.values(FEATURE_PERMISSIONS)) for (const p of perms) assert.ok(full.permissions.includes(p), `${p} in the full manifest`);
+
+  const lite = { ...tali, id: "lite", features: { watchers: false, proxy: false, helper: false, cookies: false, converter: false, profiles: false } };
+  delete lite.key;
+  const m = JSON.parse(brandManifest(ext("manifest.json"), lite));
+  for (const p of ["alarms", "notifications", "proxy", "webRequest", "webRequestAuthProvider", "privacy", "nativeMessaging", "cookies", "downloads", "downloads.open"]) {
+    assert.ok(!m.permissions.includes(p), `${p} dropped`);
+  }
+  for (const p of ["sidePanel", "tabs", "scripting", "storage", "debugger", "unlimitedStorage"]) assert.ok(m.permissions.includes(p), `${p} stays (core)`);
+
+  // Tool definitions as gen-tooldefs produces them: tagged tools and prompt sections.
+  const defs = {
+    sections: [{ text: "# Agent" }, { feature: "watchers", text: "## Watchers\n- watch" }, { feature: "cookies", text: "## Cookies" }, { text: "## Safety" }],
+    tools: [
+      { name: "browser_read_page", readOnly: true, description: "r", input_schema: {} },
+      { name: "browser_watch_create", feature: "watchers", readOnly: false, description: "w", input_schema: {} },
+      { name: "browser_cookies_get", feature: "cookies", readOnly: false, alwaysAsk: true, description: "c", input_schema: {} },
+      { name: "browser_recipe_save", feature: "recipes", readOnly: false, description: "s", input_schema: {} },
+    ],
+  };
+  const cut = toolDefsFor(defs, lite);
+  assert.deepEqual(cut.tools.map((t) => t.name), ["browser_read_page", "browser_recipe_save"]);
+  assert.ok(cut.tools.every((t) => !("feature" in t)), "the tag is build-time only");
+  assert.equal(cut.system, "# Agent\n\n## Safety");
+  const all = toolDefsFor(defs, tali);
+  assert.equal(all.tools.length, 4);
+  assert.match(all.system, /## Watchers\n- watch\n\n## Cookies/);
+
+  const script = brandScript(lite);
+  assert.match(script, /"watchers": false/);
+  assert.match(script, /"recipes": true/);
+  assert.match(script, /AGENT_BRAND\.has = function/);
+  assert.match(brandScript(tali), /"skin": "default"/);
+  assert.deepEqual(validateBrand({ ...tali, features: { nope: true, watchers: "no" } }, root), ["features.nope: unknown feature (" + ALL_FEATURES.join(", ") + ")", "features.watchers must be true or false"]);
+});
+
+test("extras: an opt-in feature is off unless a brand switches it on; its tools, prompt, runtime and dependencies follow", () => {
+  const tali = loadBrand(root, BASE_BRAND);
+  assert.deepEqual(optInOf(tali), [], "Tali has no extras");
+  const orbit = { ...tali, id: "orbit2", features: { clips: true, sessions: true } };
+  delete orbit.key;
+  assert.deepEqual(optInOf(orbit), ["clips", "sessions"]);
+  assert.equal(featuresOf(orbit).clips, true);
+  assert.equal(featuresOf(orbit).watchers, true, "base features stay on");
+  // The manifest is the same: extras own no permissions.
+  assert.deepEqual(JSON.parse(brandManifest(ext("manifest.json"), orbit)).permissions, JSON.parse(brandManifest(ext("manifest.json"), tali)).permissions);
+  // Tool definitions: an extra's tools and section reach only the brands that have it.
+  const defs = {
+    sections: [{ text: "# Agent" }, { feature: "clips", text: "## Clips\n- clip" }, { text: "## Safety" }],
+    tools: [
+      { name: "browser_read_page", readOnly: true, description: "r", input_schema: {} },
+      { name: "browser_clip_save", feature: "clips", readOnly: false, description: "c", input_schema: {} },
+    ],
+  };
+  assert.deepEqual(toolDefsFor(defs, tali).tools.map((t) => t.name), ["browser_read_page"]);
+  assert.equal(toolDefsFor(defs, tali).system, "# Agent\n\n## Safety");
+  assert.deepEqual(toolDefsFor(defs, orbit).tools.map((t) => t.name), ["browser_read_page", "browser_clip_save"]);
+  assert.match(toolDefsFor(defs, orbit).system, /## Clips\n- clip\n\n## Safety/);
+  // The runtime flag and the built extras.js.
+  const ctx = {};
+  vm.runInNewContext(brandScript(orbit), ctx);
+  assert.equal(ctx.AGENT_BRAND.has("clips"), true);
+  assert.equal(ctx.AGENT_BRAND.has("audit"), false);
+  assert.equal(ctx.AGENT_BRAND.has("recipes"), true);
+  assert.match(extrasScript(tali, root), /^\/\/ Generated[^\n]*\n\/\/ This brand has no extra features\.\n$/);
+  const js = extrasScript(orbit, root);
+  assert.ok(js.indexOf("── clips (browser/extras/clips.js)") < js.indexOf("── sessions (browser/extras/sessions.js)"), "modules in OPT_IN_FEATURES order");
+  assert.ok(js.includes(fs.readFileSync(path.join(root, "browser", "extras", "clips.js"), "utf8")), "the module's source is carried whole");
+  for (const id of OPT_IN_FEATURES) assert.ok(fs.existsSync(path.join(root, "browser", "extras", `${id}.js`)) && fs.existsSync(path.join(root, "browser", "host", "extras", `${id}.ts`)), `${id} has both halves`);
+  // Content scripts: only of the brand's extras that ship one, named for the panel to register.
+  assert.deepEqual(extrasContentScripts(tali, root), []);
+  assert.deepEqual(extrasContentScripts(orbit, root), [], "clips and sessions act from the panel only");
+  const styled = { ...orbit, features: { styles: true, elements: true } };
+  assert.deepEqual(extrasContentScripts(styled, root).map((c) => c.file), ["extras-styles.cs.js", "extras-elements.cs.js"]);
+  for (const c of extrasContentScripts(styled, root)) assert.ok(fs.existsSync(c.src), c.src);
+  assert.deepEqual(validateBrand({ ...tali, features: { palette: true } }, root), ["features.palette needs styles, which this brand switches off"]);
+  // An extra that builds on a base feature needs it.
+  assert.deepEqual(validateBrand({ ...tali, features: { cookies: false, accounts: true } }, root), ["features.accounts needs cookies, which this brand switches off"]);
+  assert.deepEqual(validateBrand({ ...tali, features: { watchers: false, uptime: true } }, root), ["features.uptime needs watchers, which this brand switches off"]);
+  assert.deepEqual(validateBrand({ ...tali, features: { accounts: true, uptime: true } }, root), []);
+});
+
+test("playbooks (the skills extra): every shipped playbook is complete, a brand packs only its own, and the rules are enforced", () => {
+  const dir = path.join(root, "browser", "playbooks");
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith(".md"));
+  assert.ok(files.length >= 8, "a shelf of playbooks");
+  for (const f of files) {
+    const pb = parsePlaybook(fs.readFileSync(path.join(dir, f), "utf8"), f.replace(/\.md$/, ""));
+    assert.deepEqual(validatePlaybook(pb), [], `${f} is complete`);
+    assert.ok(pb.command && pb.prompt, `${f} brings a quick command`);
+    assert.match(pb.prompt, new RegExp(`"${pb.name}"`), `${f}: the command's prompt names the playbook to read`);
+    assert.ok(pb.body.includes("## "), `${f} has sections`);
+    assert.ok(/- \[ \]/.test(pb.body), `${f} ends with a checklist`);
+    assert.doesNotMatch(pb.body, /antidetect|spoof/i);
+  }
+  // Parsing: front matter → fields; a file without front matter is still a body.
+  const pb = parsePlaybook("---\ntitle: T\nsummary: A summary that is long enough to count.\nwhen: always\ncommand: Do it\nprompt: Read \"x\"\nicon: ✨\n---\n# T\n\nBody " + "x".repeat(400), "x");
+  assert.equal(pb.title, "T"); assert.equal(pb.icon, "✨"); assert.match(pb.body, /^# T/);
+  assert.deepEqual(validatePlaybook(pb), []);
+  assert.deepEqual(validatePlaybook(parsePlaybook("# Just a body", "y")), ["front matter needs a title", "front matter needs a one-line summary (20+ chars)", "front matter needs 'when' (when the model should read it)", "the body is too short to be a playbook (400+ chars)"]);
+  // A brand packs the playbooks it lists, in order; brands without the extra pack none. A repository
+  // that ships one brand may hold neither shelf brand: then two synthetic shelves stand in.
+  const tali = loadBrand(root, BASE_BRAND);
+  assert.deepEqual(playbooksOf(tali, root), []);
+  const ids = listBrands(root);
+  const shelf = (id, list) => ({ ...tali, id, features: { styles: true, palette: true, skills: true }, playbooks: list });
+  const palette = ids.includes("palette") ? loadBrand(root, "palette") : shelf("palette-like", ["design-review", "typography", "color"]);
+  assert.deepEqual(playbooksOf(palette, root).map((p) => p.name), palette.playbooks);
+  assert.ok(playbooksOf(palette, root).every((p) => p.body.length > 400 && p.title));
+  const stencil = ids.includes("stencil") ? loadBrand(root, "stencil") : shelf("stencil-like", ["design-review", "layout", "components"]);
+  assert.ok(stencil.playbooks.includes("components") && !palette.playbooks.includes("components"), "the shelves differ by brand");
+  // Rules: skills needs a list; names are checked; files must exist and be complete.
+  assert.deepEqual(validateBrand({ ...tali, features: { skills: true } }, root), ['features.skills needs a "playbooks" list']);
+  assert.deepEqual(validateBrand({ ...tali, features: { skills: true }, playbooks: ["Nope Name"] }, root), ['"playbooks" must be a list of names like "design-review" (browser/playbooks/<name>.md)']);
+  assert.match(validateBrand({ ...tali, features: { skills: true }, playbooks: ["no-such"] }, root)[0], /no-such\.md does not exist/);
+  assert.deepEqual(validateBrand({ ...tali, features: { skills: true }, playbooks: ["typography"] }, root), []);
+});
+
+test("validateBrand: the reasons a brand is refused", () => {
+  const ok = loadBrand(root, BASE_BRAND);
+  assert.deepEqual(validateBrand(ok, root), []);
+  const bad = { ...ok, id: "Bad Id", name: "x".repeat(80), description: "d".repeat(140), colors: { ...ok.colors, accent: "blue" }, icon: "media/nope.png" };
+  const problems = validateBrand(bad, root);
+  for (const re of [/"id" must be lower-case/, /"name" is over/, /"description" is over 132/, /colors\.accent must be/, /media\/nope\.png does not exist/]) {
+    assert.ok(problems.some((p) => re.test(p)), `${re} in ${problems.join(" | ")}`);
+  }
+  assert.throws(() => loadBrand(root, "no-such-brand"), /Unknown brand "no-such-brand"/);
+});
+
+test("fillTokens: every {{brand.*}} in the source files has a value; an unknown token is an error", () => {
+  const brand = loadBrand(root, BASE_BRAND);
+  for (const f of TOKEN_FILES) {
+    const src = ext(f);
+    assert.match(src, /\{\{\s*brand\./, `${f} carries brand tokens`);
+    const filled = f === "manifest.json" ? brandManifest(src, brand) : fillTokens(src, brand);
+    assert.doesNotMatch(filled, /\{\{\s*brand\./, `${f}: no token left`);
+  }
+  assert.throws(() => fillTokens("{{brand.nothing.here}}", brand), /No value for \{\{brand\.nothing\.here\}\}/);
+  // Nothing else in the extension carries a token the build would miss.
+  for (const f of fs.readdirSync(path.join(root, "browser", "extension"))) {
+    if (TOKEN_FILES.includes(f)) continue;
+    assert.doesNotMatch(ext(f), /\{\{\s*brand\./, `${f} has a token outside TOKEN_FILES`);
+  }
+});
+
+test("the default brand reproduces the published strings; another brand replaces them everywhere", () => {
+  const tali = loadBrand(root, BASE_BRAND);
+  const m = JSON.parse(brandManifest(ext("manifest.json"), tali));
+  assert.equal(m.name, "Tali — AI Browser Agent");
+  assert.equal(m.action.default_title, "Tali — AI Browser Agent");
+  // Only the repository that ships Tali pins its extension id; a brand repository keeps Tali as a keyless base.
+  if (DEFAULT_BRAND === BASE_BRAND) assert.ok(m.key && m.key.startsWith("MIIB"), "the default brand keeps the fixed id for unpacked installs");
+  else assert.equal(m.key, undefined, "the base brand carries no key outside its own repository");
+  assert.match(fillTokens(ext("sidepanel.html"), tali), /<span class="bar-title">Tali · Browser<\/span>/);
+  assert.match(fillTokens(ext("sidepanel.html"), tali), /data-assistant="Tali"/);
+  assert.match(fillTokens(ext("theme.css"), tali), /--brand-accent: #25b6ff;/);
+
+  const other = { ...tali, id: "zed", name: "Zed — Browser Copilot", shortName: "Zed", tagline: "Browser Copilot", subtitle: "Sub", description: "Desc", colors: { ...tali.colors, accent: "#ff00aa" } };
+  delete other.key;
+  const om = JSON.parse(brandManifest(ext("manifest.json"), other));
+  assert.equal(om.name, "Zed — Browser Copilot");
+  assert.equal(om.description, "Desc");
+  assert.equal(om.key, undefined, "no key → the store assigns the id");
+  assert.deepEqual(om.permissions, m.permissions, "only the branding differs");
+  const html = fillTokens(ext("options.html"), other);
+  assert.match(html, /<title>Zed — settings<\/title>/);
+  assert.match(html, /Zed <span>&middot; Browser Copilot<\/span>/);
+  assert.doesNotMatch(html, /Tali/, "no trace of the default brand in another brand's page");
+  assert.doesNotMatch(fillTokens(ext("sidepanel.html"), other), /Tali/);
+  assert.match(fillTokens(ext("theme.css"), other), /--brand-accent: #ff00aa;/);
+  const script = brandScript(other);
+  assert.match(script, /globalThis\.AGENT_BRAND = /);
+  assert.doesNotMatch(script, /MIIB|media\//, "no key or file paths reach the runtime");
+  const ctx = {};
+  vm.runInNewContext(script, ctx);
+  assert.equal(ctx.AGENT_BRAND.shortName, "Zed");
+  assert.equal(ctx.AGENT_BRAND.has("watchers"), true, "every base feature on unless switched off");
+  assert.equal(ctx.AGENT_BRAND.has("clips"), false, "no extra unless switched on");
+});

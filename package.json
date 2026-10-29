@@ -291,10 +291,12 @@
     "watch": "node esbuild.js --watch",
     "typecheck": "tsc --noEmit && tsc --noEmit -p browser && tsc --noEmit -p browser/standalone",
     "test": "node tests/run.mjs",
-    "test:e2e": "npm run build && npm run build:browser && node --test tests/e2e/browserTools.e2e.mjs tests/e2e/remote.e2e.mjs tests/e2e/trialSignin.e2e.mjs",
+    "test:e2e": "npm run build && npm run build:brands && node --test tests/e2e/browserTools.e2e.mjs tests/e2e/remote.e2e.mjs tests/e2e/trialSignin.e2e.mjs tests/e2e/brands.e2e.mjs tests/e2e/extras-orbit.e2e.mjs tests/e2e/extras-quill.e2e.mjs tests/e2e/extras-beacon.e2e.mjs tests/e2e/extras-harbor.e2e.mjs tests/e2e/extras-palette.e2e.mjs tests/e2e/extras-stencil.e2e.mjs",
     "check": "npm run typecheck && npm run build && npm run test",
     "build:browser": "node browser/build.mjs",
+    "build:brands": "node browser/build.mjs --all-brands",
     "package:browser": "node esbuild.js --production && node browser/build.mjs --production --zip",
+    "package:brands": "node esbuild.js --production && node browser/build.mjs --all-brands --production --zip",
     "package": "vsce package --allow-missing-repository --skip-license",
     "vscode:prepublish": "node esbuild.js --production && node relay/build-app.mjs"
   },

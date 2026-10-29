@@ -1,0 +1,519 @@
+// Extra feature "uptime" (side panel): uptime monitors — HTTP status checks on a schedule, built on the
+// watchers (browser/extension/automation.js). A monitor is a watcher of mode "status": the service worker
+// runs it on its alarm, fetches the URL instead of opening a tab (HEAD, GET fallback, 15 s timeout),
+// compares "HTTP 200" / "HTTP 503" / "down: <reason>" like any other watcher — so a flip goes through the
+// same notification + Telegram path — and appends { at, ms, code, ok } to the watcher's `history` (a ring
+// of the last 288 checks, 24 h at 5 min). This module adds the tools (declared in
+// browser/host/extras/uptime.ts: add, list, delete, toggle = pause/resume, report = availability, latency
+// percentiles, flips and the longest outage over the history, export = the history as CSV/JSON, as text or
+// a file in Downloads), the ⏱ Uptime tab and the quick commands; the pure helpers (state, sparkline,
+// uptime %, summarizeHistory, historyToCsv, formatting) are exposed on AgentExtras.uptime for the unit tests.
+// Built into extras.js only for brands that switch the feature on. No innerHTML: names and addresses come
+// from storage.
+(function () {
+  if (!globalThis.AGENT_BRAND || !globalThis.AGENT_BRAND.has("uptime")) return;
+  var T = globalThis.AgentBrowserTools;
+  var H = T.helpers;
+  var text = H.text;
+  function auto() {
+    if (!globalThis.AgentAutomation) throw new Error("The automation module (watchers) didn't load.");
+    return globalThis.AgentAutomation;
+  }
+
+  var DEFAULT_EVERY = 5, DEFAULT_EXPECT = 200;
+  var BARS = "▁▂▃▄▅▆▇";
+  var SPARK_WIDTH = 24;
+
+  function ago(ts) {
+    if (!ts) return "never";
+    var d = Date.now() - ts;
+    if (d < 60000) return "just now";
+    if (d < 3600000) return Math.floor(d / 60000) + " min ago";
+    if (d < 86400000) return Math.floor(d / 3600000) + " h ago";
+    return Math.floor(d / 86400000) + " d ago";
+  }
+  function norm(s) { return String(s || "").replace(/\s+/g, " ").trim().toLowerCase(); }
+
+  // ── pure helpers ────────────────────────────────────────────────────────
+
+  /** The status watchers of the watcher map, newest first. */
+  function statusWatchers(all) {
+    return Object.keys(all || {})
+      .filter(function (id) { return all[id] && all[id].mode === "status"; })
+      .sort(function (x, y) { return (all[y].created || 0) - (all[x].created || 0); })
+      .map(function (id) { return all[id]; });
+  }
+
+  /** Uptime over the history, a percentage with one decimal; null without checks. */
+  function uptimePercent(history) {
+    var h = history || [];
+    if (!h.length) return null;
+    var up = h.filter(function (e) { return e.ok; }).length;
+    return Math.round((up / h.length) * 1000) / 10;
+  }
+
+  /** Failed checks at the end of the history, in a row. */
+  function consecutiveFailures(history) {
+    var h = history || [], n = 0;
+    for (var i = h.length - 1; i >= 0 && !h[i].ok; i--) n++;
+    return n;
+  }
+
+  /** A text sparkline of the last `width` checks: ▁…▇ latency scaled to the slowest good check, × for a failed one. */
+  function sparkline(history, width) {
+    var h = (history || []).slice(-(width || SPARK_WIDTH));
+    if (!h.length) return "";
+    var max = 0;
+    h.forEach(function (e) { if (e.ok && e.ms > max) max = e.ms; });
+    return h.map(function (e) {
+      if (!e.ok) return "×";
+      var level = max ? Math.min(BARS.length - 1, Math.floor((e.ms / max) * (BARS.length - 1))) : 0;
+      return BARS.charAt(level);
+    }).join("");
+  }
+
+  /** What the list and the tab show for one monitor. */
+  function stateOf(w) {
+    var h = w.history || [];
+    var last = h[h.length - 1] || null;
+    var answered = h.filter(function (e) { return e.code > 0; });
+    var avg = answered.length ? Math.round(answered.reduce(function (s, e) { return s + e.ms; }, 0) / answered.length) : null;
+    return {
+      state: !last ? "unknown" : last.ok ? "up" : "down",
+      code: last ? last.code : null,
+      ms: last ? last.ms : null,
+      at: last ? last.at : null,
+      consecutiveFailures: consecutiveFailures(h),
+      checks: h.length,
+      failures: h.filter(function (e) { return !e.ok; }).length,
+      uptime: uptimePercent(h),
+      avgMs: avg,
+      since: w.created || null,
+    };
+  }
+
+  function lastLabel(w, s) {
+    if (w.lastRun && !w.lastRun.ok) return "ERROR " + ago(w.lastRun.at) + ": " + w.lastRun.error;
+    if (!s.checks) return "not checked yet";
+    return "last: " + (w.lastContent || (s.code ? "HTTP " + s.code : "down")) + (s.code ? " in " + s.ms + " ms" : "") + ", " + ago(s.at);
+  }
+
+  function formatMonitor(w) {
+    var s = stateOf(w);
+    var dot = s.state === "up" ? "🟢 UP" : s.state === "down" ? "🔴 DOWN" + (s.consecutiveFailures > 1 ? " (" + s.consecutiveFailures + " failures in a row)" : "") : "⚪ UNKNOWN";
+    var parts = [w.id + "  " + dot + "  " + w.name];
+    if (!w.enabled) parts.push("⏸ paused");
+    parts.push(w.url, "every " + w.every + " min", "expects " + (w.expect || DEFAULT_EXPECT), lastLabel(w, s));
+    if (s.checks) {
+      parts.push("history: " + s.uptime + "% up, " + s.checks + " check" + (s.checks === 1 ? "" : "s") + ", " + s.failures + " failure" + (s.failures === 1 ? "" : "s") +
+        (s.avgMs != null ? ", avg " + s.avgMs + " ms" : "") + "  " + sparkline(w.history, SPARK_WIDTH));
+    }
+    parts.push("since " + ago(s.since));
+    if (w.notify && w.notify.telegram) parts.push("Telegram");
+    return parts.join("  |  ");
+  }
+
+  function formatList(all) {
+    var ws = statusWatchers(all);
+    if (!ws.length) return "No uptime monitors. browser_uptime_add checks a site's HTTP status on a schedule and reports when it goes down or comes back.";
+    return "Uptime monitors (" + ws.length + "):\n" + ws.map(formatMonitor).join("\n");
+  }
+
+  // ── reports over the history ────────────────────────────────────────────
+
+  var DEFAULT_REPORT_HOURS = 24, MAX_REPORT_HOURS = 720;
+
+  function pad2(n) { return (n < 10 ? "0" : "") + n; }
+  /** "2026-10-25 14:05" in the browser's local time. */
+  function stamp(ts) {
+    var d = new Date(ts);
+    return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()) + " " + pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+  }
+  function fmtDuration(ms) {
+    if (ms < 60000) return "< 1 min";
+    var m = Math.round(ms / 60000);
+    if (m < 60) return m + " min";
+    var h = Math.floor(m / 60), rest = m % 60;
+    if (h < 24) return h + " h" + (rest ? " " + rest + " min" : "");
+    var d = Math.floor(h / 24);
+    return d + " d" + (h % 24 ? " " + (h % 24) + " h" : "");
+  }
+  /** Nearest-rank percentile of an ascending list; null when empty. */
+  function percentile(sorted, p) {
+    if (!sorted.length) return null;
+    return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1))];
+  }
+  function median(sorted) {
+    var n = sorted.length;
+    if (!n) return null;
+    return n % 2 ? sorted[(n - 1) / 2] : Math.round((sorted[n / 2 - 1] + sorted[n / 2]) / 2);
+  }
+
+  /**
+   * The checks between sinceTs and nowTs summarized: counts, availability %, latency (avg / median / p95 of
+   * the answered checks), the flips between up and down, the outages (a run of failed checks, measured
+   * from its first failed check to the check that saw the site back, or to nowTs while it lasts) and the
+   * longest of them, the last check and the state it leaves. An empty window gives nulls, not errors.
+   */
+  function summarizeHistory(history, sinceTs, nowTs) {
+    sinceTs = Number(sinceTs) || 0;
+    nowTs = nowTs == null ? Date.now() : Number(nowTs);
+    var h = (history || []).filter(function (e) { return e && e.at >= sinceTs && e.at <= nowTs; });
+    var out = { checks: h.length, up: 0, down: 0, availability: null, avgMs: null, medianMs: null, p95Ms: null, flips: 0, outages: 0, longestOutage: null, last: null, state: "unknown" };
+    if (!h.length) return out;
+    var lat = [], cur = null;
+    function close(o) { if (!out.longestOutage || o.ms > out.longestOutage.ms) out.longestOutage = o; }
+    h.forEach(function (e, i) {
+      if (e.ok) out.up++; else out.down++;
+      if (e.code > 0 && e.ms >= 0) lat.push(e.ms);
+      if (i > 0 && !!h[i - 1].ok !== !!e.ok) out.flips++;
+      if (!e.ok) {
+        if (!cur) { cur = { from: e.at, to: null, ms: 0, checks: 0, ongoing: false }; out.outages++; }
+        cur.checks++;
+      } else if (cur) {
+        cur.to = e.at;
+        cur.ms = e.at - cur.from;
+        close(cur);
+        cur = null;
+      }
+    });
+    if (cur) { cur.ongoing = true; cur.ms = Math.max(0, nowTs - cur.from); close(cur); }
+    out.availability = Math.round((out.up / h.length) * 1000) / 10;
+    if (lat.length) {
+      lat.sort(function (a, b) { return a - b; });
+      out.avgMs = Math.round(lat.reduce(function (s, v) { return s + v; }, 0) / lat.length);
+      out.medianMs = median(lat);
+      out.p95Ms = percentile(lat, 0.95);
+    }
+    var last = h[h.length - 1];
+    out.last = { at: last.at, ok: !!last.ok, code: last.code, ms: last.ms };
+    out.state = last.ok ? "up" : "down";
+    return out;
+  }
+
+  function outageLabel(o) {
+    return fmtDuration(o.ms) + " (" + (o.ongoing ? "since " + stamp(o.from) + ", still down" : stamp(o.from) + " → " + stamp(o.to)) + ")";
+  }
+
+  /** The report for the model: a compact table per monitor over the last `hours`. */
+  function formatReport(ws, hours, now) {
+    now = now || Date.now();
+    hours = Number(hours) || DEFAULT_REPORT_HOURS;
+    if (!ws.length) return "No uptime monitors. browser_uptime_add checks a site's HTTP status on a schedule and reports when it goes down or comes back.";
+    var since = now - hours * 3600000;
+    var lines = ["Uptime report, last " + hours + " h (" + ws.length + " monitor" + (ws.length === 1 ? "" : "s") + ", since " + stamp(since) + "):"];
+    ws.forEach(function (w) {
+      var r = summarizeHistory(w.history, since, now);
+      lines.push(w.id + "  " + w.name + "  |  " + w.url + "  |  every " + w.every + " min" + (w.enabled ? "" : "  |  ⏸ paused"));
+      if (!r.checks) {
+        var older = (w.history || []).length;
+        lines.push("  no checks in the last " + hours + " h" + (older ? " (" + older + " older in the history)" : w.enabled ? " — waiting for the first check" : "") + ".");
+        return;
+      }
+      lines.push("  state       " + (r.state === "up" ? "🟢 UP" : "🔴 DOWN") + "  ·  " + (r.last.code ? "HTTP " + r.last.code + " in " + r.last.ms + " ms" : "no answer (timeout or network error)") + "  ·  " + ago(r.last.at));
+      lines.push("  checks      " + r.checks + "  ·  " + r.up + " up, " + r.down + " down  ·  availability " + r.availability + "%");
+      lines.push("  latency     " + (r.avgMs == null ? "no answered check" : "avg " + r.avgMs + " ms  ·  median " + r.medianMs + " ms  ·  p95 " + r.p95Ms + " ms"));
+      lines.push("  incidents   " + r.flips + " flip" + (r.flips === 1 ? "" : "s") + "  ·  " + (r.longestOutage ? r.outages + " outage" + (r.outages === 1 ? "" : "s") + ", longest " + outageLabel(r.longestOutage) : "no outage"));
+    });
+    return lines.join("\n");
+  }
+
+  // ── export of the history ───────────────────────────────────────────────
+
+  var DEFAULT_EXPORT_HOURS = 168, EXPORT_CAP = 200 * 1024;
+  var CSV_HEADER = "monitor,url,time,status,ok,ms";
+
+  /** One CSV field: quoted when it holds a comma, a quote or a line break. */
+  function csvField(v) {
+    var s = v == null ? "" : String(v);
+    return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }
+  function iso(ts) { return new Date(ts).toISOString(); }
+
+  /** The rows of an export ({ monitor, url, at, code, ok, ms }) as CSV: a header line, then one line per check, the time in ISO 8601 (UTC), status 0 for no answer. */
+  function historyToCsv(rows) {
+    var lines = [CSV_HEADER];
+    (rows || []).forEach(function (r) {
+      lines.push([csvField(r.monitor), csvField(r.url), iso(r.at), Number(r.code) || 0, r.ok ? "true" : "false", Number(r.ms) || 0].join(","));
+    });
+    return lines.join("\n") + "\n";
+  }
+
+  /** The checks of the monitors inside the window, monitor by monitor, oldest first. → [{ id, monitor, url, at, code, ok, ms }] */
+  function exportRows(ws, sinceTs, nowTs) {
+    var rows = [];
+    (ws || []).forEach(function (w) {
+      (w.history || [])
+        .filter(function (e) { return e && e.at >= sinceTs && e.at <= nowTs; })
+        .sort(function (a, b) { return a.at - b.at; })
+        .forEach(function (e) { rows.push({ id: w.id, monitor: w.name, url: w.url, at: e.at, code: Number(e.code) || 0, ok: !!e.ok, ms: Number(e.ms) || 0 }); });
+    });
+    return rows;
+  }
+
+  /** The same export as JSON: the window, then one object per monitor with its checks. */
+  function historyToJson(ws, rows, hours, now) {
+    var since = now - hours * 3600000;
+    return JSON.stringify({
+      exported: iso(now),
+      hours: hours,
+      since: iso(since),
+      monitors: ws.map(function (w) {
+        return {
+          id: w.id, name: w.name, url: w.url, every: w.every, expect: w.expect || DEFAULT_EXPECT, enabled: !!w.enabled,
+          checks: rows.filter(function (r) { return r.id === w.id; }).map(function (r) { return { time: iso(r.at), status: r.code, ok: r.ok, ms: r.ms }; }),
+        };
+      }),
+    }, null, 2) + "\n";
+  }
+
+  /** "uptime-<monitor or all>-<YYYYMMDD>.<csv|json>" — the name as a slug. */
+  function exportFilename(name, format, now) {
+    var slug = String(name || "all").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "all";
+    var d = new Date(now);
+    return "uptime-" + slug + "-" + d.getFullYear() + pad2(d.getMonth() + 1) + pad2(d.getDate()) + "." + format;
+  }
+
+  /** Save `body` as a text file in Downloads (a data: URL; the download id comes back) → { id, filename, size }. */
+  async function downloadText(filename, body, mime) {
+    var dl = typeof chrome !== "undefined" && chrome.downloads;
+    if (!dl || typeof dl.download !== "function") throw new Error("This build cannot save files (no downloads permission) — call again without save and copy the text.");
+    var id = await dl.download({ url: "data:" + mime + ";charset=utf-8," + encodeURIComponent(body), filename: filename, conflictAction: "uniquify" });
+    return { id: id, filename: filename, size: body.length };
+  }
+  function kb(n) { return (n / 1024).toFixed(n < 10240 ? 1 : 0) + " kB"; }
+
+  /** The export behind the tool. a: { id, hours, format, save } → the text for the model. */
+  async function exportHistory(a) {
+    a = a || {};
+    var hours = Math.max(1, Math.min(MAX_REPORT_HOURS, Math.floor(Number(a.hours)) || DEFAULT_EXPORT_HOURS));
+    var format = String(a.format || "csv").toLowerCase() === "json" ? "json" : "csv";
+    var ws = a.id ? [await findMonitor({ id: String(a.id).trim() })] : statusWatchers(await auto().loadWatchers());
+    if (!ws.length) return "No uptime monitors. browser_uptime_add checks a site's HTTP status on a schedule and reports when it goes down or comes back.";
+    var now = Date.now(), since = now - hours * 3600000;
+    var rows = exportRows(ws, since, now);
+    var scope = a.id ? "monitor '" + ws[0].name + "' (" + ws[0].id + ")" : ws.length + " monitor" + (ws.length === 1 ? "" : "s");
+    if (!rows.length) {
+      var older = ws.reduce(function (n, w) { return n + (w.history || []).length; }, 0);
+      return "No checks in the last " + hours + " h for " + scope + " — nothing to export." + (older ? " " + older + " older check" + (older === 1 ? " is" : "s are") + " in the history: raise hours (up to " + MAX_REPORT_HOURS + ")." : "");
+    }
+    var body = format === "csv" ? historyToCsv(rows) : historyToJson(ws, rows, hours, now);
+    var summary = rows.length + " check" + (rows.length === 1 ? "" : "s") + " of " + scope + " over the last " + hours + " h (" + stamp(since) + " → " + stamp(now) + ")";
+    if (a.save) {
+      var filename = exportFilename(a.id ? ws[0].name : "all", format, now);
+      var dl = await downloadText(filename, body, format === "csv" ? "text/csv" : "application/json");
+      return "Saved " + filename + " to Downloads (download id " + dl.id + ", " + kb(dl.size) + "): " + summary + ".";
+    }
+    if (body.length > EXPORT_CAP) {
+      if (format === "json") throw new Error("The JSON export is " + kb(body.length) + ", over the " + kb(EXPORT_CAP) + " limit — narrow hours, pick one monitor with id, or pass save=true to write the file.");
+      var cut = body.lastIndexOf("\n", EXPORT_CAP - 1);
+      body = body.slice(0, cut + 1);
+      var shown = body.split("\n").length - 2; // the header and the trailing newline
+      return summary + " — CSV cut to the first " + shown + " rows (" + kb(EXPORT_CAP) + " cap; save=true writes the full file):\n" + body;
+    }
+    return summary + ", " + format.toUpperCase() + ":\n" + body;
+  }
+
+  // ── tools ───────────────────────────────────────────────────────────────
+
+  /** A status watcher by id or name — never a page watcher. */
+  async function findMonitor(a) {
+    a = a || {};
+    var all = await auto().loadWatchers();
+    var ws = statusWatchers(all);
+    var w = a.id ? ws.filter(function (x) { return x.id === a.id; })[0] : null;
+    if (!w) {
+      var want = norm(a.name || a.id);
+      var hit = want ? ws.filter(function (x) { return norm(x.name) === want; }) : [];
+      if (hit.length > 1) throw new Error("Several monitors are named '" + a.name + "' — pass the id (browser_uptime_list).");
+      w = hit[0];
+    }
+    if (!w) {
+      if (a.id && all[a.id]) throw new Error(a.id + " is a page watcher, not an uptime monitor — browser_watch_delete handles it.");
+      throw new Error("No uptime monitor " + (a.id ? "with id " + a.id : "named '" + a.name + "'") + ". browser_uptime_list shows them.");
+    }
+    return w;
+  }
+
+  /** Create a monitor (a status watcher); lastTab supplies the URL when none is given. → the message for the model. */
+  async function addMonitor(a, lastTab) {
+    a = a || {};
+    var A = auto();
+    var every = Number(a.every) > 0 ? Number(a.every) : DEFAULT_EVERY;
+    var expect = Number(a.expect) > 0 ? Number(a.expect) : DEFAULT_EXPECT;
+    var out = await A.watchCreate({ url: a.url, name: a.name, every: every, mode: "status", expect: expect, telegram: a.telegram }, lastTab);
+    var m = /\(id: (wch_\w+)/.exec(out);
+    var w = m ? (await A.loadWatchers())[m[1]] : null;
+    if (!w) return out;
+    return "Monitoring " + w.url + " every " + w.every + " min (id: " + w.id + "), expecting HTTP " + w.expect + ". The first check sets the baseline; after that every flip (e.g. 200 → 503 and back) is reported with a system notification" +
+      (w.notify && w.notify.telegram ? " and, when the Telegram bot is set up, a Telegram message" : "") +
+      ". It runs in the background with the panel closed; browser_uptime_list shows the state and history (the ⏱ Uptime tab of the 🧩 panel too).";
+  }
+
+  T.register("browser_uptime_add", async function (a) {
+    a = a || {};
+    var tab = null;
+    if (!a.url) { try { tab = await H.currentTab(); } catch (_) { tab = null; } }
+    return text(await addMonitor(a, tab ? { url: tab.url } : null));
+  });
+
+  T.register("browser_uptime_list", async function () {
+    return text(formatList(await auto().loadWatchers()));
+  });
+
+  T.register("browser_uptime_delete", async function (a) {
+    var w = await findMonitor(a || {});
+    await auto().watchDelete({ id: w.id });
+    return text("Deleted uptime monitor '" + w.name + "'.");
+  });
+
+  T.register("browser_uptime_toggle", async function (a) {
+    a = a || {};
+    if (!a.id) throw new Error("id is required (browser_uptime_list shows the ids).");
+    var w = await findMonitor({ id: String(a.id).trim() });
+    var enabled = a.enabled == null ? !w.enabled : !!a.enabled;
+    var already = !!w.enabled === enabled;
+    // Same path as the ⏱ tab's pause button: the alarm is cleared, or created again when enabled.
+    await auto().watchToggle(w.id, enabled);
+    var who = "uptime monitor '" + w.name + "' (" + w.id + ")";
+    if (enabled) return text((already ? "The " + who + " was already running" : "Resumed the " + who) + " — checking " + w.url + " every " + w.every + " min, the next check within a minute.");
+    return text((already ? "The " + who + " was already paused" : "Paused the " + who) + " — no checks or notifications until it is resumed (browser_uptime_toggle with enabled=true); the history is kept.");
+  });
+
+  T.register("browser_uptime_report", async function (a) {
+    a = a || {};
+    var hours = Math.max(1, Math.min(MAX_REPORT_HOURS, Math.floor(Number(a.hours)) || DEFAULT_REPORT_HOURS));
+    var ws = a.id ? [await findMonitor({ id: String(a.id).trim() })] : statusWatchers(await auto().loadWatchers());
+    return text(formatReport(ws, hours, Date.now()));
+  });
+
+  T.register("browser_uptime_export", async function (a) {
+    return text(await exportHistory(a || {}));
+  });
+
+  // ── ⏱ Uptime tab ────────────────────────────────────────────────────────
+
+  async function checkNow(w, ctx) {
+    ctx.status("Checking " + w.name + "…");
+    var r = await auto().requestRun(w.id);
+    if (!r) ctx.status("The background worker didn't answer — it will check on schedule.", "bad");
+    else if (!r.ok) ctx.status("⚠ " + (r.error || "failed"), "bad");
+    else {
+      var up = r.status === "HTTP " + (w.expect || DEFAULT_EXPECT);
+      ctx.status((up ? "✓ " : "✗ ") + (r.status || "checked") + (r.first ? " — baseline saved." : r.changed ? " — changed since the last check." : " — no change."), up ? "good" : "bad");
+    }
+    ctx.rerender();
+  }
+
+  async function showAdd(content, ctx) {
+    var el = ctx.el, field = ctx.field;
+    var url = el("input", { value: await ctx.currentTabUrl(), placeholder: "https://…" });
+    var name = el("input", { placeholder: ctx.hostOf(url.value) || "My site" });
+    var every = el("input", { type: "number", value: DEFAULT_EVERY, min: 1, max: 10080 });
+    var expect = el("input", { type: "number", value: DEFAULT_EXPECT, min: 100, max: 599 });
+    var tg = el("input", { type: "checkbox", checked: true });
+    var save = el("button", { className: "prof-btn primary" }, ["⏱ Start monitoring"]);
+    save.addEventListener("click", async function () {
+      try {
+        var out = await addMonitor({ url: url.value.trim(), name: name.value.trim() || name.placeholder, every: Number(every.value), expect: Number(expect.value), telegram: tg.checked }, null);
+        ctx.status(out.split(". ")[0] + ".", "good");
+        ctx.rerender();
+      } catch (e) { ctx.status("⚠ " + e.message, "bad"); }
+    });
+    content.textContent = "";
+    content.appendChild(el("div", { className: "ed-wrap" }, [
+      el("button", { className: "prof-btn", onclick: ctx.rerender }, ["← Back"]),
+      el("h3", { className: "ed-title" }, ["New uptime monitor"]),
+      field("Site", url),
+      field("Name", name),
+      el("div", { className: "ed-row" }, [field("Every (minutes)", every), field("Expected status", expect)]),
+      el("label", { className: "ed-label" }, [tg, " Send flips to Telegram (needs the bot from the Remote settings)"]),
+      el("div", { className: "ed-actions" }, [save, el("button", { className: "prof-btn", onclick: ctx.rerender }, ["Cancel"])]),
+    ]));
+  }
+
+  async function renderTab(content, ctx) {
+    var el = ctx.el;
+    var A = auto();
+    var ws = statusWatchers(await A.loadWatchers());
+    content.textContent = "";
+    content.appendChild(el("div", { className: "cmd-item", onclick: function () { return showAdd(content, ctx); } }, [
+      el("span", { className: "cmd-icon" }, ["➕"]),
+      el("div", { className: "cmd-body" }, [
+        el("div", { className: "cmd-name" }, ["Monitor a site's uptime"]),
+        el("div", { className: "cmd-desc" }, ["An HTTP status check every few minutes in the background — no page is opened, no model involved. A flip (200 → 503 and back) arrives as a notification and in Telegram."]),
+      ]),
+    ]));
+    if (!ws.length) { content.appendChild(el("div", { className: "cmd-empty" }, ["No uptime monitors yet."])); return; }
+    ws.forEach(function (w) {
+      var s = stateOf(w);
+      var dot = s.state === "up" ? "🟢" : s.state === "down" ? "🔴" : "⚪";
+      var actions = el("div", { className: "prof-actions column" }, [
+        el("button", { className: "prof-btn", title: "Check now", onclick: function (e) { e.stopPropagation(); return checkNow(w, ctx); } }, ["▶"]),
+        el("button", { className: "prof-btn", title: w.enabled ? "Pause" : "Resume", onclick: function (e) { e.stopPropagation(); return A.watchToggle(w.id, !w.enabled).then(ctx.rerender); } }, [w.enabled ? "⏸" : "⏵"]),
+        el("button", { className: "prof-btn", title: "Delete", onclick: function (e) {
+          e.stopPropagation();
+          if (confirm("Delete the uptime monitor '" + w.name + "'?")) return A.watchDelete({ id: w.id }).then(ctx.rerender, function (err) { ctx.status("⚠ " + err.message, "bad"); });
+        } }, ["🗑"]),
+      ]);
+      content.appendChild(el("div", { className: "cmd-item" + (w.enabled ? "" : " paused") }, [
+        el("span", { className: "cmd-icon" }, [dot]),
+        el("div", { className: "cmd-body" }, [
+          el("div", { className: "cmd-name" }, [w.name]),
+          el("div", { className: "cmd-desc" }, [ctx.hostOf(w.url) + " · every " + w.every + " min · expects " + (w.expect || DEFAULT_EXPECT) + (w.enabled ? "" : " · paused")]),
+          el("div", { className: "cmd-desc" + (s.state === "down" || (w.lastRun && !w.lastRun.ok) ? " bad" : "") }, [lastLabel(w, s) + (s.consecutiveFailures > 1 ? " · " + s.consecutiveFailures + " failures in a row" : "")]),
+          s.checks ? el("div", { className: "cmd-desc mono" }, [sparkline(w.history, 30) + "  " + s.uptime + "% up · " + s.checks + " check" + (s.checks === 1 ? "" : "s") + (s.avgMs != null ? " · avg " + s.avgMs + " ms" : "")]) : null,
+        ]),
+        actions,
+      ]));
+    });
+  }
+
+  globalThis.AgentExtras.tabs.push({
+    id: "uptime",
+    label: "⏱ Uptime",
+    storageKeys: [(globalThis.AgentAutomation && globalThis.AgentAutomation.WATCHERS_KEY) || "agentWatchers"],
+    render: renderTab,
+  });
+
+  globalThis.AgentExtras.commands.push(
+    { group: "Monitoring", icon: "⏱", name: "Monitor this site's uptime",
+      prompt: "Monitor this site's uptime with browser_uptime_add: check it every 5 minutes and tell me what you set up." },
+    { group: "Monitoring", icon: "📈", name: "Show my uptime monitors",
+      prompt: "Show my uptime monitors with browser_uptime_list: which are up or down, the last status and latency, and the uptime over the stored history." },
+    { group: "Monitoring", icon: "📊", name: "Uptime report",
+      prompt: "Give me an uptime report for the last 24 hours with browser_uptime_report: availability, latency (average, median, p95), flips and the longest outage per monitor, and tell me which monitor needs attention." },
+    { group: "Monitoring", icon: "📤", name: "Export uptime history",
+      prompt: "Export the stored uptime history of the last 7 days with browser_uptime_export as a CSV file in Downloads (save=true) and tell me the file name and how many checks it holds." }
+  );
+
+  // Pure helpers for the unit tests (and other extras).
+  globalThis.AgentExtras.uptime = {
+    DEFAULT_EVERY: DEFAULT_EVERY,
+    DEFAULT_EXPECT: DEFAULT_EXPECT,
+    statusWatchers: statusWatchers,
+    uptimePercent: uptimePercent,
+    consecutiveFailures: consecutiveFailures,
+    sparkline: sparkline,
+    stateOf: stateOf,
+    formatMonitor: formatMonitor,
+    formatList: formatList,
+    findMonitor: findMonitor,
+    addMonitor: addMonitor,
+    renderTab: renderTab,
+    DEFAULT_REPORT_HOURS: DEFAULT_REPORT_HOURS,
+    MAX_REPORT_HOURS: MAX_REPORT_HOURS,
+    summarizeHistory: summarizeHistory,
+    fmtDuration: fmtDuration,
+    stamp: stamp,
+    formatReport: formatReport,
+    DEFAULT_EXPORT_HOURS: DEFAULT_EXPORT_HOURS,
+    EXPORT_CAP: EXPORT_CAP,
+    csvField: csvField,
+    historyToCsv: historyToCsv,
+    exportRows: exportRows,
+    historyToJson: historyToJson,
+    exportFilename: exportFilename,
+    exportHistory: exportHistory,
+  };
+})();

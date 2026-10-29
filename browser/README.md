@@ -258,6 +258,153 @@ free-trial sign-in). Before a release:
    profiles: proxy, cookies, debugger, scripting; converter: downloads) — a
    reviewer asks about each one.
 
+## Brands (white-label builds)
+
+The same extension can ship as several products that differ in name, logo,
+design and what they can do, while the core — tools, host, protocol — stays one
+code base. A brand is a JSON file in `browser/brands/`:
+
+```json
+{
+  "id": "orbit",
+  "name": "Orbit — AI Copilot for the Web",     // store listing / manifest name (≤ 75 chars)
+  "shortName": "Orbit",                          // the assistant's name in the panel, Telegram, notifications
+  "tagline": "AI Copilot for the Web",           // settings page header
+  "subtitle": "…",                               // settings page, one line
+  "description": "…",                            // manifest description (≤ 132 chars)
+  "mascot": "🪐",                                // the Telegram greeting's emoji
+  "icon": "media/brands/orbit-icon.png",         // 128×128 PNG
+  "avatar": "media/brands/orbit-avatar.png",     // 256×256 PNG, the chat avatar
+  "colors": { "accent": "#…", "accentLight": "#…", "spark": "#…", "action": "#…", "ink": "#…", "radius": "12px" },
+  "skin": "glass",                               // browser/skins/<skin>.css — the design (default: "default", Tali's look)
+  "features": { "profiles": false, "proxy": false }   // what this product leaves out (everything else is on)
+}
+```
+
+`browser/brands/tali.json` is the published brand and the default. What the build
+does with a brand:
+
+- **Texts** — fills the `{{brand.*}}` tokens in `manifest.json`, `sidepanel.html`,
+  `options.html` and `theme.css`; writes `brand.js` (`globalThis.AGENT_BRAND`) for
+  the strings shown at run time: the relay node name, watcher notifications, the
+  Telegram greeting, the assistant's name (whichever backend posts the identity).
+- **Design** — copies `browser/skins/<skin>.css` to `skin.css`, linked after every
+  other stylesheet on both pages (`body.browser` for the panel, `body.options` for
+  the settings page). A skin can restyle the whole chat; it reads the brand's
+  colours through `--brand-accent` and friends and never sets them, so one skin
+  serves any brand. The default look maps the accent to focus rings and links and
+  switches to `accentLight` under a light OS theme; a skin may pin a scheme or use
+  its own ink for focus. Shipped: `default` (Tali's look), `glass` (dark, frosted
+  translucent panels, gradient header, pill composer), `paper` (light, serif
+  reading, ruled lists instead of cards, monochrome buttons), `mono` (terminal:
+  monospace, sharp corners, prompt-style messages, the accent as phosphor on
+  near-black), `slate` (compact professional, follows the OS scheme, accent bars
+  instead of fills), `studio` (light creative studio: warm paper, 14px radii, the
+  accent on chips, tabs, rings and Send, a tri-colour stripe and paint wash,
+  tinted code cards), `blueprint` (dark technical drawing: navy from the brand's
+  ink under a faint grid, 1px accent lines, 4px corners, small-caps labels with
+  ruler ticks, monospace for code and tool names only).
+- **Features** — the brand's `features` decide what the product can do, and that
+  is visible to a reviewer and to the user: the tools of a feature the brand
+  leaves out are not declared to the model (built-in agent and helper alike — the
+  panel tells the helper its features with `ready`), the matching system-prompt
+  sections go with them, the panel's controls disappear (🛰, 🧩 tabs, 👤, quick
+  commands, settings sections), and the manifest drops the feature's permissions:
+
+  | feature | what it is | permissions it owns |
+  | --- | --- | --- |
+  | `helper` | "My Claude subscription" through the local helper | `nativeMessaging` |
+  | `remote` | phone / Telegram remote (🛰) | — |
+  | `recipes` | record and replay | — |
+  | `watchers` | scheduled page checks + notifications | `alarms`, `notifications` |
+  | `memory` | site notes | — |
+  | `profiles` | device profiles and the User-Agent tools (👤) | — |
+  | `cookies` | the cookie tools | `cookies` |
+  | `converter` | documents, PDFs, saved pages, screenshots to file | `downloads`, `downloads.open` |
+  | `network` | the network tap | — |
+  | `proxy` | the proxy settings and per-profile proxies | `proxy`, `webRequest`, `webRequestAuthProvider`, `privacy` |
+
+- **Extras** — opt-in features a brand switches on (`"clips": true`) and every
+  other brand lacks, so Tali stays as published while another brand gets
+  capabilities of its own. Each is two files: `browser/host/extras/<id>.ts`
+  declares the tools and the prompt section the model gets (tools.ts appends
+  them under the feature, so the host and the built-in agent declare them only
+  to builds that have it) and `browser/extras/<id>.js` implements them in the
+  side panel — tools through `AgentBrowserTools.register`, a tab in the 🧩 panel
+  and quick commands through `AgentExtras`. The build concatenates a brand's
+  modules into its `extras.js`. An extra that builds on a base feature declares
+  it (`FEATURE_REQUIRES`): the build refuses `accounts` without `cookies` and
+  `uptime` without `watchers`. `browser/host/features.ts` and `brand.mjs` hold the
+  same lists; `tests/features.test.ts` keeps them equal and pins each extra's
+  tool-name prefix.
+
+  | extra | what it is | tools | ships in |
+  | --- | --- | --- | --- |
+  | `clips` | research clips with their sources: save, search, tag, edit, export as Markdown; a citation (APA, MLA, Harvard, BibTeX) for the page from its metadata; reader-mode extraction of an article as Markdown (saved as a clip); the page's clips highlighted in place | `browser_clip_*` | Orbit |
+  | `sessions` | save a window's tabs, add to a session later, rename, restore; export and import sessions (a JSON envelope, or a Markdown / plain link list); tidy a window (close duplicates or a host's tabs, never the active or pinned ones) | `browser_session_*` | Orbit |
+  | `rewrite` | rewrite the selected text in place: tone, length, grammar, translation; text statistics (words, sentences, reading time, Flesch) of the selection, the field or the page; find & replace inside the focused field (literal or regex, markup kept); deterministic case changes (upper, lower, title, sentence, slug, plain text) | `browser_selection_*` | Quill |
+  | `snippets` | saved texts with placeholders, inserted into any field, edited in place, exported and imported as a JSON envelope | `browser_snippet_*` | Quill |
+  | `autofill` | named identities (name, email, phone, company, address …, never secrets) that fill a page's form fields by label, name, placeholder and autocomplete, with a dry run and a report of what was and was not filled; an identity built from what the user already typed on a page; nothing is submitted | `browser_autofill_*` | Quill |
+  | `forms` | a page's form read as the user sees it (labels, values, required, validation state, submit buttons); drafts of what was typed, saved per page and restored later, never passwords or card data (on `autofill`) | `browser_form_*` | Quill |
+  | `checks` | broken-link finder and URL status checks; an on-page SEO audit (title, description, canonical, robots, headings, alt texts, links, Open Graph, structured data); a speed report from the Performance API (TTFB, DCL, load, FCP, LCP, requests and weight by type, slowest resources); robots.txt and sitemap reading with the first URLs checked; an accessibility audit (names, generic links, heading order, landmarks, ids, iframes); mobile readiness (viewport meta, tap targets, small text, overflow, fixed overlays); a redirect chain hop by hop; the response headers that matter (caching, compression, HSTS, CSP, frame, nosniff, referrer, cookie flags) | `browser_check_*` | Beacon |
+  | `uptime` | HTTP status monitors on a schedule, with latency history, pause/resume, and an availability report (uptime %, avg/median/p95 latency, flips, longest outage) over a window; the history exported as CSV or JSON (on the watcher machinery) | `browser_uptime_*` | Beacon |
+  | `accounts` | named sign-ins per site, switched without logging out, rotated to the next one, exported and imported as a JSON envelope; renamed, pinned and annotated; opened in a new tab or window as a given account; a health check of each saved session (expiry, session-only cookies); the site signed out while the saved accounts stay (on the cookie tools; export, import, next, launch and clear ask first) | `browser_account_*` | Harbor |
+  | `audit` | identity report: what the site sees, device profile and proxy consistency; the exit address through the current proxy (Cloudflare trace) against the profile; leak checks in the tab (WebRTC, time zone, languages, screen, webdriver, UA vs client hints); the fingerprint a script would read (canvas, WebGL, audio, fonts, hardware) against the device profile, with a combined hash to compare two profiles | `browser_identity_*` | Harbor |
+  | `styles` | restyle a site: inspect an element's styles, apply CSS overrides the site keeps (content script), reset; presets (reading, focus, compact, dyslexia, print), a font swap (Google Fonts @import allowed), UserCSS export for Stylus and import; an override paused and resumed without deleting it; the site's design tokens (CSS custom properties) overridden on :root | `browser_style_*` | Palette |
+  | `palette` | the page's colours, fonts and type scale, contrast check, a dark theme for the site, colour harmonies from the accent with their contrast and CSS variables; the page's design tokens read with their use counts; a colour recoloured to another across the site; the dominant colours of an image (on `styles`) | `browser_palette_*` | Palette |
+  | `elements` | add, edit, hide, move and duplicate elements on a page and keep them per site (content script); a developer hand-off of the edits as Markdown, CSS or a JSON patch, and the patch imported back; a designer's inspector of one element (box model, typography, distances); a screenshot of one element; named variants of a site's edits for A/B demos | `browser_element_*` | Stencil |
+  | `overlay` | layout overlays for review: column and baseline grids, measurements, numbered notes to screenshot, a design image laid over the page at an opacity, the window resized to phone / tablet / laptop / desktop widths; labelled outlines of headings, links, buttons, images, forms or landmarks; screenshots at several widths in one call | `browser_overlay_*` | Stencil |
+  | `skills` | the playbooks a brand ships with (`browser/playbooks/*.md`), served to the model on demand, a 🎓 tab, one quick command each | `browser_skill_*` | Palette, Stencil |
+
+  **Playbooks** make a brand an expert rather than a generalist. Each is a
+  Markdown file with a front matter (title, summary, when to read it, the quick
+  command it brings and that command's prompt) and a body of process, numbers,
+  checklists and CSS patterns. A brand lists the ones it carries in
+  `"playbooks"`; the build packs them into `skills.json`, the system prompt tells
+  the model to read the matching one before a design task, and the model fetches
+  it with `browser_skill_read`, so the prompt stays short. Shipped: design-review,
+  typography, color, layout, dark-mode, accessibility, readability (Palette's
+  shelf); design-review, layout, components, landing-page, ux-writing,
+  typography, accessibility (Stencil's). `tests/brand.test.mjs` checks every
+  playbook is complete and every brand packs only its own.
+
+  An extra that must act on pages while the panel is closed ships a content
+  script, `browser/extras/<id>.cs.js`: the build copies it to
+  `extras-<id>.cs.js` in the brands that have the extra and the feature's module
+  registers it with `chrome.scripting.registerContentScripts`.
+
+- **Logo** — the icon and avatar the brand points at. `browser/brands/make-logo.mjs`
+  draws a vector mark (several styles: monogram, orbit, quill, beacon, harbor,
+  palette, stencil) and
+  renders the two PNGs in headless Chromium, so a brand gets a clean, distinct
+  logo from one command; real artwork can replace the files any time.
+- Only the default brand carries the manifest `key` (a fixed id for unpacked
+  installs); every other brand gets its id from the store.
+
+```bash
+npm run build:brands                 # every brand → dist-browser/brands/<id>/extension (default → dist-browser/extension)
+node browser/build.mjs --brand orbit # one brand
+npm run package:brands               # production build + dist-browser/store/<id>-<version>.zip per brand (manifest at the zip root)
+node browser/brands/make-logo.mjs orbit --style orbit --bg "#0b1d3a" --fg "#e8eefc" --accent "#ff7a59"
+```
+
+`tests/brand.test.mjs` checks every brand file, the permission and tool cuts;
+`tests/e2e/brands.e2e.mjs` loads each built brand in Chromium and checks name,
+colours, assistant, skin, permissions, declared tools, hidden controls, the
+extras' runtime and the settings page; `tests/e2e/extras-<brand>.e2e.mjs` drive
+each brand's extras against fixture pages. The brands besides Tali are
+placeholders (invented names and texts, generated marks) — replace them before
+any of them goes anywhere.
+
+**Before publishing more than one of them under one developer account, read
+the Chrome Web Store policy on repetitive content.** The store does not allow a
+developer (or related accounts) to publish multiple extensions with the same
+functionality under different names, and enforcement takes down every listing
+involved, the published one included. Brands exist for white-label use — a
+partner publishing under their own, unrelated account, unlisted or private
+distribution — and the feature profiles are what makes a brand a different
+product rather than a renamed copy.
+
 ## Install for development
 
 ```bash

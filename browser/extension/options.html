@@ -5,15 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link href="theme.css" rel="stylesheet" />
   <link href="options.css" rel="stylesheet" />
-  <title>Tali — settings</title>
+  <link href="skin.css" rel="stylesheet" />
+  <title>{{brand.shortName}} — settings</title>
 </head>
-<body>
+<body class="options">
   <main>
     <header class="brand-head">
       <img class="brand-icon" src="icon.png" alt="" width="44" height="44" />
       <div>
-        <p class="brand-name">Tali <span>&middot; AI Browser Agent</span></p>
-        <p class="brand-sub">Your AI agent in the browser &mdash; reads, clicks, types &amp; fills forms for you.</p>
+        <p class="brand-name">{{brand.shortName}} <span>&middot; {{brand.tagline}}</span></p>
+        <p class="brand-sub">{{brand.subtitle}}</p>
       </div>
     </header>
     <h1>How the agent runs</h1>
@@ -79,6 +80,7 @@
         <p class="hint">Stored on this computer in this browser profile's extension storage; only ever sent to the address above. Get a key at console.anthropic.com.</p>
       </div>
 
+<div data-feature="helper">
       <label class="mode">
         <input type="radio" name="mode" value="subscription" />
         <span><b>My Claude subscription</b> <span class="hint">— uses the Claude Code signed in on this computer. Needs the small local helper.</span></span>
@@ -96,6 +98,7 @@
         <p class="hint">Sign-in happens in Anthropic's own flow (claude.ai) inside Claude Code; this extension never sees or stores your Claude login.</p>
       </div>
 
+</div>
       <div class="actions">
         <button type="submit" id="saveMode" class="primary">Save</button>
         <span id="modeResult" class="result" role="status"></span>
@@ -104,10 +107,11 @@
 
     <hr />
 
+<div data-feature="proxy">
     <h1>Proxy for this browser profile</h1>
     <p class="lead">
       Sends all traffic of <b>this browser profile</b> through your proxy. For a separate address for the agent,
-      create a dedicated Chrome/Edge profile, install Tali there and set the proxy here.
+      create a dedicated Chrome/Edge profile, install {{brand.shortName}} there and set the proxy here.
     </p>
 
     <div id="status" class="status off"><span class="dot"></span><span id="statusText">Proxy is off</span></div>
@@ -168,9 +172,11 @@
       The password is stored on this computer, in this browser profile's extension storage. SOCKS5 with a username and
       password is handled by the local agent host (it must be installed); other types are handled by the browser itself.
     </p>
+</div>
 
     <hr />
 
+<div data-feature="remote">
     <h1 id="remote">Remote: phone &amp; Telegram</h1>
     <p class="lead">
       Work with this browser's agent from your phone — no VS Code needed. Works while the side panel is
@@ -227,6 +233,7 @@
       </div>
     </form>
     <p class="hint">Tokens are stored in this browser profile's extension storage. Anyone with the bot or relay token can drive the agent — keep them private.</p>
+</div>
 
     <hr />
 
@@ -239,10 +246,11 @@
     <div id="incognitoStatus" class="status off"><span class="dot"></span><span id="incognitoStatusText">Checking…</span></div>
     <p class="hint">
       Chrome keeps this off by default for every extension. Turn it on once at
-      <code>chrome://extensions</code> → Tali → Details → "Allow in Incognito" — otherwise the
+      <code>chrome://extensions</code> → {{brand.shortName}} → Details → "Allow in Incognito" — otherwise the
       private-window tool will fail and say so.
     </p>
   </main>
+  <script src="brand.js"></script>
   <script src="agentLocal.js"></script>
   <script src="proxyConfig.js"></script>
   <script src="options.js"></script>

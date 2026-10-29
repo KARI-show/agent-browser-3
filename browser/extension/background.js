@@ -5,9 +5,10 @@ chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(consol
 // Watchers run here, on chrome.alarms, with the panel closed: the same tool
 // runtime the panel uses (browserTools.js has no DOM dependency) plus the
 // automation module that knows how to check a page and report a change.
-importScripts("fingerprint.js", "converter.js", "browserTools.js", "automation.js");
+importScripts("brand.js", "fingerprint.js", "converter.js", "browserTools.js", "automation.js");
 
-chrome.alarms.onAlarm.addListener(function (alarm) {
+// A brand without watchers has no alarms/notifications permission — the APIs are then undefined.
+if (chrome.alarms) chrome.alarms.onAlarm.addListener(function (alarm) {
   if (alarm.name.indexOf(AgentAutomation.ALARM_PREFIX) !== 0) return;
   AgentAutomation.runWatcherById(alarm.name.slice(AgentAutomation.ALARM_PREFIX.length)).catch(function (e) {
     console.warn("[watch]", alarm.name, e);
@@ -15,7 +16,7 @@ chrome.alarms.onAlarm.addListener(function (alarm) {
 });
 
 // A notification names the watcher: clicking it opens the watched page.
-chrome.notifications.onClicked.addListener(function (id) {
+if (chrome.notifications) chrome.notifications.onClicked.addListener(function (id) {
   var m = /^watch:(\w+):/.exec(id);
   chrome.notifications.clear(id);
   if (!m) return;
@@ -26,8 +27,10 @@ chrome.notifications.onClicked.addListener(function (id) {
 });
 
 // Alarms don't survive an update of the extension, storage does.
-chrome.runtime.onInstalled.addListener(function () { AgentAutomation.syncAlarms().catch(console.warn); });
-chrome.runtime.onStartup.addListener(function () { AgentAutomation.syncAlarms().catch(console.warn); });
+if (chrome.alarms) {
+  chrome.runtime.onInstalled.addListener(function () { AgentAutomation.syncAlarms().catch(console.warn); });
+  chrome.runtime.onStartup.addListener(function () { AgentAutomation.syncAlarms().catch(console.warn); });
+}
 
 // ---------------------------------------------------------------------------
 // Proxy for this browser profile (set up on the options page).
@@ -42,6 +45,8 @@ chrome.runtime.onStartup.addListener(function () { AgentAutomation.syncAlarms().
 
 importScripts("proxyConfig.js"); // the same validation the options page runs before saving
 
+// A brand without the proxy feature has no proxy/webRequest/privacy permission: everything below is inert.
+var PROXY_OK = !!(chrome.proxy && chrome.webRequest);
 var CONFIG_KEY = "agentProxy";
 var STATUS_KEY = "agentProxyStatus";
 var HOST = "com.kari.agent_browser";
@@ -60,7 +65,7 @@ function setStatus(state, message) {
   chrome.storage.session.set({ [STATUS_KEY]: s }).catch(function () {});
   chrome.action.setBadgeBackgroundColor({ color: state === "error" ? "#cf222e" : "#1a7f37" }).catch(function () {});
   chrome.action.setBadgeText({ text: state === "off" ? "" : state === "error" ? "!" : "P" }).catch(function () {});
-  chrome.action.setTitle({ title: "Tali" + (state === "active" ? " — proxy on" : state === "error" ? " — proxy problem" : "") }).catch(function () {});
+  chrome.action.setTitle({ title: AGENT_BRAND.shortName + (state === "active" ? " — proxy on" : state === "error" ? " — proxy problem" : "") }).catch(function () {});
 }
 
 function randomToken() {
@@ -139,6 +144,7 @@ function bypassList(cfg) {
 
 async function applyPrivacy(cfg, on) {
   // Both are profile-wide settings; clearing hands control back to the user.
+  if (!chrome.privacy) return;
   try {
     if (on) {
       // Without this, WebRTC can reveal the real address around the proxy.
@@ -156,6 +162,7 @@ async function applyPrivacy(cfg, on) {
 // One apply at a time — startup events and storage changes can arrive together.
 var applyChain = Promise.resolve();
 function apply() {
+  if (!PROXY_OK) return Promise.resolve();
   applyChain = applyChain.then(doApply, doApply);
   return applyChain;
 }
@@ -199,7 +206,7 @@ async function doApply() {
 
 // Credentials: registered synchronously (MV3 requires it) and resolved lazily,
 // so it works after the worker restarts.
-chrome.webRequest.onAuthRequired.addListener(
+if (PROXY_OK) chrome.webRequest.onAuthRequired.addListener(
   function (details, callback) {
     if (!details.isProxy) return callback({});
     getConfig().then(function (cfg) {

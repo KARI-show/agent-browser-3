@@ -80,8 +80,10 @@ test("browser tool names and read-only set", () => {
   for (const t of ["browser_cookies_get", "browser_cookies_export"]) {
     assert.ok(!READ_ONLY_TOOLS.has(t), `${t} leaks session secrets — must not be auto-allowed`);
   }
-  // …and asks the user even in Agent mode, like running page scripts and reading API bodies.
-  assert.deepEqual([...ALWAYS_ASK_TOOLS].sort(), ["browser_cookies_export", "browser_cookies_get", "browser_cookies_import", "browser_network_capture", "browser_run_js"]);
+  // …and asks the user even in Agent mode, like running page scripts and reading API bodies. The accounts
+  // extra's save/switch/next copy and replace a site's session cookies and export/import move them, so
+  // they are gated the same way.
+  assert.deepEqual([...ALWAYS_ASK_TOOLS].sort(), ["browser_account_clear", "browser_account_export", "browser_account_import", "browser_account_launch", "browser_account_next", "browser_account_save", "browser_account_switch", "browser_cookies_export", "browser_cookies_get", "browser_cookies_import", "browser_network_capture", "browser_run_js"]);
   for (const t of ALWAYS_ASK_TOOLS) assert.ok(!READ_ONLY_TOOLS.has(t), `${t} can't be both read-only and always-ask`);
 });
 
@@ -151,6 +153,18 @@ test("every declared browser tool is implemented in the panel", () => {
   // Bundled into .test-dist/, one level below the repo root.
   const src = fs.readFileSync(path.join(__dirname, "..", "browser", "extension", "browserTools.js"), "utf8");
   const implemented = new Set([...src.matchAll(/^ {4}(browser_\w+): async function/gm)].map((m) => m[1]));
-  const missing = BROWSER_TOOLS.map((t) => t.name).filter((n) => !implemented.has(n));
-  assert.deepEqual(missing, [], "declared in browser/host/tools.ts but missing from browserTools.js");
+  // The extras register theirs (AgentBrowserTools.register) from browser/extras/<id>.js.
+  const extrasDir = path.join(__dirname, "..", "browser", "extras");
+  const registered = new Map<string, string>();
+  for (const f of fs.readdirSync(extrasDir).filter((f) => f.endsWith(".js"))) {
+    const code = fs.readFileSync(path.join(extrasDir, f), "utf8").replace(/^\s*\/\/.*$/gm, ""); // not the comments
+    for (const m of code.matchAll(/\.register\(\s*"(browser_\w+)"/g)) registered.set(m[1], f);
+  }
+  const missing = BROWSER_TOOLS.map((t) => t.name).filter((n) => !implemented.has(n) && !registered.has(n));
+  assert.deepEqual(missing, [], "declared in browser/host/tools.ts but implemented neither in browserTools.js nor in browser/extras/");
+  for (const t of BROWSER_TOOLS) {
+    if (registered.has(t.name)) assert.equal(registered.get(t.name), `${t.feature}.js`, `${t.name} must be registered by its own feature's module`);
+  }
+  const declared = new Set(BROWSER_TOOLS.map((t) => t.name));
+  for (const n of registered.keys()) assert.ok(declared.has(n), `${n} is registered by an extra but not declared in browser/host/extras/`);
 });

@@ -251,6 +251,8 @@ Connect the browser extension to a WebSocket relay hub for remote control via Te
 
 ```
 src/                          # VS Code extension source (TypeScript)
+browser/brands/               # Brands (white-label builds): <id>.json per name/icon/colours; make-icon.mjs
+browser/brand.mjs             # Fills the {{brand.*}} tokens at build time (see browser/README.md → Brands)
 media/                        # Webview styles + bundled JS
 browser/
   extension/                  # Browser extension (Manifest V3)

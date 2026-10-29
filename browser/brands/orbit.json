@@ -1,0 +1,25 @@
+{
+  "id": "orbit",
+  "name": "Orbit — AI Copilot for the Web",
+  "shortName": "Orbit",
+  "tagline": "AI Copilot for the Web",
+  "subtitle": "A copilot in your side panel that works in your real tabs: research clips, tab sessions, forms, exports, repeatable routines.",
+  "description": "AI copilot in your browser's side panel: reads pages, clips research, saves tab sessions, fills forms, replays routines.",
+  "mascot": "🪐",
+  "icon": "media/brands/orbit-icon.png",
+  "avatar": "media/brands/orbit-avatar.png",
+  "colors": {
+    "accent": "#ff6b57",
+    "accentLight": "#c93f2c",
+    "spark": "#dbe6ff",
+    "action": "#ffb347",
+    "ink": "#0d1b3e",
+    "radius": "16px"
+  },
+  "skin": "glass",
+  "features": {
+    "clips": true,
+    "sessions": true
+  },
+  "_note": "Placeholder brand: rename, rewrite the texts and replace the artwork before use. Logo: node browser/brands/make-logo.mjs orbit --style orbit --bg #0d1b3e --fg #dbe6ff --accent #ff6b57"
+}

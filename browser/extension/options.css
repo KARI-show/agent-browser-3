@@ -42,7 +42,7 @@ label.mode.disabled { opacity: 0.55; cursor: default; }
 .hint.block { display: block; margin-top: 2px; }
 input[readonly] { color: var(--vscode-descriptionForeground); }
 
-/* Tali brand header */
+/* Brand header */
 .brand-head { display: flex; gap: 12px; align-items: center; margin-bottom: 26px; }
 .brand-icon { border-radius: 11px; box-shadow: 0 2px 10px rgba(0,0,0,.28); flex: 0 0 auto; }
 .brand-name { margin: 0; font-size: 19px; font-weight: 700; letter-spacing: .01em; }
