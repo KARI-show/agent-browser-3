@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { launch, findChromium } from "./cdp.mjs";
-import { FEATURE_PERMISSIONS, OPT_IN_FEATURES, extrasContentScripts, featuresOf, optInOf, playbooksOf } from "../../browser/brand.mjs";
+import { FEATURE_PERMISSIONS, OPT_IN_FEATURES, extrasContentScripts, featuresOf, optInOf, playbooksOf, DEFAULT_BRAND } from "../../browser/brand.mjs";
 
 // Tool-name prefix per extra (tests/features.test.ts holds the declarations to the same table).
 const EXTRA_TOOL_PREFIX = { clips: /^browser_clip_/, sessions: /^browser_session_/, rewrite: /^browser_selection_/, snippets: /^browser_snippet_/, checks: /^browser_check_/, uptime: /^browser_uptime_/, accounts: /^browser_account_/, audit: /^browser_identity_/, styles: /^browser_style_/, palette: /^browser_palette_/, elements: /^browser_element_/, overlay: /^browser_overlay_/, skills: /^browser_skill_/ };
@@ -18,7 +18,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = dirname(dirname(here));
 const brandsDir = join(root, "browser", "brands");
 const brands = readdirSync(brandsDir).filter((f) => f.endsWith(".json")).map((f) => JSON.parse(readFileSync(join(brandsDir, f), "utf8")));
-const extDir = (b) => (b.id === "tali" ? join(root, "dist-browser", "extension") : join(root, "dist-browser", "brands", b.id, "extension"));
+const extDir = (b) => (b.id === DEFAULT_BRAND ? join(root, "dist-browser", "extension") : join(root, "dist-browser", "brands", b.id, "extension"));
 const skip = !findChromium() ? "no Chromium found (set CHROME_PATH)" : brands.some((b) => !existsSync(join(extDir(b), "manifest.json"))) ? "brands not built (npm run build && npm run build:brands)" : false;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

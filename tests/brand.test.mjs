@@ -7,7 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
-import { ALL_FEATURES, DEFAULT_BRAND, FEATURES, FEATURE_PERMISSIONS, OPT_IN_FEATURES, TOKEN_FILES, brandManifest, brandScript, extrasContentScripts, extrasScript, featuresOf, fillTokens, listBrands, loadBrand, optInOf, parsePlaybook, playbooksOf, toolDefsFor, validateBrand, validatePlaybook } from "../browser/brand.mjs";
+import { ALL_FEATURES, BASE_BRAND, DEFAULT_BRAND, FEATURES, FEATURE_PERMISSIONS, OPT_IN_FEATURES, TOKEN_FILES, brandManifest, brandScript, extrasContentScripts, extrasScript, featuresOf, fillTokens, listBrands, loadBrand, optInOf, parsePlaybook, playbooksOf, toolDefsFor, validateBrand, validatePlaybook } from "../browser/brand.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const ext = (f) => fs.readFileSync(path.join(root, "browser", "extension", f), "utf8");
@@ -15,6 +15,7 @@ const ext = (f) => fs.readFileSync(path.join(root, "browser", "extension", f), "
 test("every brand file loads, is complete, and names/ids/icons are distinct", () => {
   const ids = listBrands(root);
   assert.ok(ids.includes(DEFAULT_BRAND));
+  assert.ok(ids.includes(BASE_BRAND));
   assert.ok(ids.length >= 5, "five brands are configured");
   const brands = ids.map((id) => loadBrand(root, id));
   const uniq = (k) => new Set(brands.map((b) => (typeof k === "function" ? k(b) : b[k]))).size;
@@ -34,7 +35,7 @@ test("every brand file loads, is complete, and names/ids/icons are distinct", ()
 });
 
 test("features: a brand without a feature loses its permissions, tools and prompt sections; the default has everything", () => {
-  const tali = loadBrand(root, DEFAULT_BRAND);
+  const tali = loadBrand(root, BASE_BRAND);
   assert.deepEqual(featuresOf(tali), Object.fromEntries([...FEATURES.map((f) => [f, true]), ...OPT_IN_FEATURES.map((f) => [f, false])]), "the published brand keeps every base feature and has no extras");
   const full = JSON.parse(brandManifest(ext("manifest.json"), tali));
   for (const perms of Object.values(FEATURE_PERMISSIONS)) for (const p of perms) assert.ok(full.permissions.includes(p), `${p} in the full manifest`);
@@ -74,7 +75,7 @@ test("features: a brand without a feature loses its permissions, tools and promp
 });
 
 test("extras: an opt-in feature is off unless a brand switches it on; its tools, prompt, runtime and dependencies follow", () => {
-  const tali = loadBrand(root, DEFAULT_BRAND);
+  const tali = loadBrand(root, BASE_BRAND);
   assert.deepEqual(optInOf(tali), [], "Tali has no extras");
   const orbit = { ...tali, id: "orbit2", features: { clips: true, sessions: true } };
   delete orbit.key;
@@ -138,7 +139,7 @@ test("playbooks (the skills extra): every shipped playbook is complete, a brand 
   assert.deepEqual(validatePlaybook(pb), []);
   assert.deepEqual(validatePlaybook(parsePlaybook("# Just a body", "y")), ["front matter needs a title", "front matter needs a one-line summary (20+ chars)", "front matter needs 'when' (when the model should read it)", "the body is too short to be a playbook (400+ chars)"]);
   // A brand packs the playbooks it lists, in order; brands without the extra pack none.
-  const tali = loadBrand(root, DEFAULT_BRAND);
+  const tali = loadBrand(root, BASE_BRAND);
   assert.deepEqual(playbooksOf(tali, root), []);
   const palette = loadBrand(root, "palette");
   assert.deepEqual(playbooksOf(palette, root).map((p) => p.name), palette.playbooks);
@@ -153,7 +154,7 @@ test("playbooks (the skills extra): every shipped playbook is complete, a brand 
 });
 
 test("validateBrand: the reasons a brand is refused", () => {
-  const ok = loadBrand(root, DEFAULT_BRAND);
+  const ok = loadBrand(root, BASE_BRAND);
   assert.deepEqual(validateBrand(ok, root), []);
   const bad = { ...ok, id: "Bad Id", name: "x".repeat(80), description: "d".repeat(140), colors: { ...ok.colors, accent: "blue" }, icon: "media/nope.png" };
   const problems = validateBrand(bad, root);
@@ -164,7 +165,7 @@ test("validateBrand: the reasons a brand is refused", () => {
 });
 
 test("fillTokens: every {{brand.*}} in the source files has a value; an unknown token is an error", () => {
-  const brand = loadBrand(root, DEFAULT_BRAND);
+  const brand = loadBrand(root, BASE_BRAND);
   for (const f of TOKEN_FILES) {
     const src = ext(f);
     assert.match(src, /\{\{\s*brand\./, `${f} carries brand tokens`);
@@ -180,7 +181,7 @@ test("fillTokens: every {{brand.*}} in the source files has a value; an unknown 
 });
 
 test("the default brand reproduces the published strings; another brand replaces them everywhere", () => {
-  const tali = loadBrand(root, DEFAULT_BRAND);
+  const tali = loadBrand(root, BASE_BRAND);
   const m = JSON.parse(brandManifest(ext("manifest.json"), tali));
   assert.equal(m.name, "Tali — AI Browser Agent");
   assert.equal(m.action.default_title, "Tali — AI Browser Agent");

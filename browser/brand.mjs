@@ -8,7 +8,11 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
 
+// The brand a plain build produces (dist-browser/extension, the installer zip, the manifest key when the
+// brand carries one); a repository that ships one brand sets it to that brand. BASE_BRAND is the reference
+// every brand builds on (all base features, no extras) — the tests and the docs measure against it.
 export const DEFAULT_BRAND = "tali";
+export const BASE_BRAND = "tali";
 export const DEFAULT_SKIN = "default";
 const TOKEN = /\{\{\s*brand\.([\w.]+)\s*\}\}/g;
 const MANIFEST_DESCRIPTION_MAX = 132; // the Web Store's limit
