@@ -7,7 +7,7 @@
 // the manifest permissions it owns. Tali (the default brand) has every base feature and no extras.
 
 export const BASE_FEATURES = ["helper", "remote", "recipes", "watchers", "memory", "profiles", "cookies", "converter", "network", "proxy"] as const;
-export const OPT_IN_FEATURES = ["clips", "sessions", "rewrite", "snippets", "checks", "uptime", "accounts", "audit", "styles", "palette", "elements", "overlay", "skills", "autofill"] as const;
+export const OPT_IN_FEATURES = ["clips", "sessions", "rewrite", "snippets", "checks", "uptime", "accounts", "audit", "styles", "palette", "elements", "overlay", "skills", "autofill", "forms"] as const;
 export const FEATURES = [...BASE_FEATURES, ...OPT_IN_FEATURES] as const;
 
 export type BaseFeature = (typeof BASE_FEATURES)[number];

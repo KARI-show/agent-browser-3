@@ -10,8 +10,10 @@
 // the request takes the browser's proxy settings, so the exit it reports is the one sites see — and compares
 // it with the proxy the extension expects and the profile's language / time zone; browser_identity_leaks runs
 // one self-contained probe in the page (WebRTC candidates, time zone, languages, geometry, webdriver, client
-// hints…) and grades the findings. Pure helpers (verdict, checks, parseTrace, assessExit, leakFindings,
-// formatting) are exposed on AgentExtras.audit for tests.
+// hints…) and grades the findings; browser_identity_fingerprint runs the readings a fingerprinting script
+// takes (canvas, WebGL, audio, fonts, hardware — as short FNV-1a hashes) and compares them with the device
+// profile the tab presents, ending in one combined hash. Pure helpers (verdict, checks, parseTrace, assessExit,
+// leakFindings, fnv1a, fingerprintFindings, formatting) are exposed on AgentExtras.audit for tests.
 (function () {
   if (!globalThis.AGENT_BRAND || !globalThis.AGENT_BRAND.has("audit")) return;
   var T = globalThis.AgentBrowserTools;
@@ -113,7 +115,174 @@
     });
   }
 
+  // The fingerprint probe (MAIN world, self-contained): what a fingerprinting script reads — a fixed canvas scene hashed
+  // from its data URL, the WebGL strings (unmasked through the debug extension, as sites read them) and a hash of a fixed
+  // parameter list, an OfflineAudioContext rendering hashed from its samples (2 s limit), which of a fixed list of common
+  // fonts render differently from the generic fallbacks, and the plain navigator / screen values. Hashes are short FNV-1a.
+  function probeFingerprint() {
+    function fnv(s) {
+      var h = 0x811c9dc5;
+      for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+      return ("0000000" + (h >>> 0).toString(16)).slice(-8);
+    }
+    function fail(e) { return String((e && e.message) || e); }
+    var n = navigator;
+    var out = {
+      url: location.href, title: document.title,
+      canvas: { hash: "", error: "" },
+      webgl: { vendor: "", renderer: "", unmaskedVendor: "", unmaskedRenderer: "", paramsHash: "", extensions: 0, error: "" },
+      audio: { hash: "", sampleRate: 0, error: "" },
+      fonts: { present: [], tested: 0, error: "" },
+      screen: { width: screen.width, height: screen.height, colorDepth: screen.colorDepth }, dpr: window.devicePixelRatio,
+      hardwareConcurrency: n.hardwareConcurrency === undefined ? null : n.hardwareConcurrency, deviceMemory: n.deviceMemory === undefined ? null : n.deviceMemory,
+      timeZone: "", languages: Array.prototype.slice.call(n.languages || []), maxTouchPoints: n.maxTouchPoints === undefined ? null : n.maxTouchPoints,
+      plugins: n.plugins ? n.plugins.length : null, userAgent: n.userAgent, platform: n.platform,
+    };
+    try { out.timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (_) {}
+    // Canvas: the same scene every time (text, an emoji, overlapping arcs, a gradient), so only the renderer varies the bytes.
+    try {
+      var c = document.createElement("canvas");
+      c.width = 300;
+      c.height = 150;
+      var ctx = c.getContext("2d");
+      if (!ctx) throw new Error("no 2d context");
+      var TEXT = "Cwm fjordbank glyphs vext quiz, \ud83d\ude03";
+      ctx.textBaseline = "alphabetic";
+      ctx.fillStyle = "#f60";
+      ctx.fillRect(125, 1, 62, 20);
+      ctx.fillStyle = "#069";
+      ctx.font = "11pt Arial";
+      ctx.fillText(TEXT, 2, 15);
+      ctx.fillStyle = "rgba(102, 204, 0, 0.7)";
+      ctx.font = "18pt Arial";
+      ctx.fillText(TEXT, 4, 45);
+      var g = ctx.createLinearGradient(0, 100, 300, 150);
+      g.addColorStop(0, "#ff0");
+      g.addColorStop(0.5, "#0ff");
+      g.addColorStop(1, "#f0f");
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 100, 300, 50);
+      ctx.globalCompositeOperation = "multiply";
+      [["rgb(255,0,255)", 50, 50], ["rgb(0,255,255)", 100, 50], ["rgb(255,255,0)", 75, 100]].forEach(function (a) {
+        ctx.fillStyle = a[0];
+        ctx.beginPath();
+        ctx.arc(a[1], a[2], 50, 0, Math.PI * 2, true);
+        ctx.closePath();
+        ctx.fill();
+      });
+      ctx.fillStyle = "rgb(255,0,255)";
+      ctx.beginPath();
+      ctx.arc(75, 75, 75, 0, Math.PI * 2, true);
+      ctx.arc(75, 75, 25, 0, Math.PI * 2, true);
+      ctx.fill("evenodd");
+      out.canvas.hash = fnv(c.toDataURL());
+    } catch (e) { out.canvas.error = fail(e); }
+    // WebGL: vendor / renderer and a hash of fixed parameters plus the extension list.
+    try {
+      var gc = document.createElement("canvas");
+      var gl = gc.getContext("webgl") || gc.getContext("experimental-webgl");
+      if (!gl) throw new Error("no WebGL context");
+      out.webgl.vendor = String(gl.getParameter(gl.VENDOR));
+      out.webgl.renderer = String(gl.getParameter(gl.RENDERER));
+      var dbg = gl.getExtension("WEBGL_debug_renderer_info");
+      if (dbg) {
+        out.webgl.unmaskedVendor = String(gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL));
+        out.webgl.unmaskedRenderer = String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL));
+      }
+      var PARAMS = ["VERSION", "SHADING_LANGUAGE_VERSION", "MAX_TEXTURE_SIZE", "MAX_CUBE_MAP_TEXTURE_SIZE", "MAX_RENDERBUFFER_SIZE", "MAX_VIEWPORT_DIMS",
+        "MAX_VERTEX_ATTRIBS", "MAX_VARYING_VECTORS", "MAX_VERTEX_UNIFORM_VECTORS", "MAX_FRAGMENT_UNIFORM_VECTORS", "MAX_VERTEX_TEXTURE_IMAGE_UNITS",
+        "MAX_TEXTURE_IMAGE_UNITS", "MAX_COMBINED_TEXTURE_IMAGE_UNITS", "ALIASED_LINE_WIDTH_RANGE", "ALIASED_POINT_SIZE_RANGE",
+        "RED_BITS", "GREEN_BITS", "BLUE_BITS", "ALPHA_BITS", "DEPTH_BITS", "STENCIL_BITS", "SAMPLES"];
+      var parts = PARAMS.map(function (p) {
+        var v = gl.getParameter(gl[p]);
+        return p + "=" + (v && typeof v === "object" && v.length !== undefined ? Array.prototype.join.call(v, ",") : String(v));
+      });
+      var aniso = gl.getExtension("EXT_texture_filter_anisotropic") || gl.getExtension("WEBKIT_EXT_texture_filter_anisotropic");
+      parts.push("MAX_ANISOTROPY=" + (aniso ? String(gl.getParameter(aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT)) : "none"));
+      var exts = gl.getSupportedExtensions() || [];
+      out.webgl.extensions = exts.length;
+      out.webgl.paramsHash = fnv(parts.join("|") + "|" + exts.slice().sort().join(","));
+    } catch (e) { out.webgl.error = fail(e); }
+    // Fonts: a font is present when text set in it measures differently from the generic family it would fall back to.
+    try {
+      var FONTS = ["Arial", "Arial Black", "Arial Narrow", "Calibri", "Cambria", "Cantarell", "Comic Sans MS", "Consolas", "Courier New", "DejaVu Sans",
+        "Fira Sans", "Garamond", "Georgia", "Helvetica", "Helvetica Neue", "Impact", "Liberation Sans", "Lucida Console", "Lucida Sans Unicode", "Menlo",
+        "Microsoft Sans Serif", "Monaco", "Noto Sans", "Palatino Linotype", "Roboto", "Segoe UI", "Tahoma", "Times New Roman", "Trebuchet MS", "Ubuntu", "Verdana"];
+      var GENERIC = ["monospace", "sans-serif", "serif"];
+      var SAMPLE = "mmmmmmmmmmlli10OQ";
+      var fc = document.createElement("canvas").getContext("2d");
+      if (!fc) throw new Error("no 2d context");
+      var base = {};
+      GENERIC.forEach(function (gf) {
+        fc.font = "72px " + gf;
+        base[gf] = fc.measureText(SAMPLE).width;
+      });
+      out.fonts.tested = FONTS.length;
+      FONTS.forEach(function (f) {
+        var present = GENERIC.some(function (gf) {
+          fc.font = "72px '" + f + "', " + gf;
+          return fc.measureText(SAMPLE).width !== base[gf];
+        });
+        if (present) out.fonts.present.push(f);
+      });
+    } catch (e) { out.fonts.error = fail(e); }
+    // Audio: a fixed oscillator through a compressor, rendered offline; the samples' hash is the audio fingerprint. 2 s limit.
+    var AC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    if (typeof AC !== "function") {
+      out.audio.error = "OfflineAudioContext is not available";
+      return out;
+    }
+    return new Promise(function (resolve) {
+      var done = false;
+      function end(err) {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        if (err) out.audio.error = err;
+        resolve(out);
+      }
+      var timer = setTimeout(function () { end("timed out after 2 s"); }, 2000);
+      function finish(buf) {
+        if (done) return;
+        try {
+          var d = buf.getChannelData(0);
+          var s = "";
+          for (var i = 4000; i < 8000 && i < d.length; i++) s += d[i] + ",";
+          out.audio.hash = fnv(s);
+          end("");
+        } catch (e) { end(fail(e)); }
+      }
+      try {
+        var ac = new AC(1, 44100, 44100);
+        out.audio.sampleRate = ac.sampleRate;
+        var osc = ac.createOscillator();
+        osc.type = "triangle";
+        osc.frequency.value = 10000;
+        var comp = ac.createDynamicsCompressor();
+        comp.threshold.value = -50;
+        comp.knee.value = 40;
+        comp.ratio.value = 12;
+        comp.attack.value = 0;
+        comp.release.value = 0.25;
+        osc.connect(comp);
+        comp.connect(ac.destination);
+        osc.start(0);
+        var p = ac.startRendering();
+        if (p && p.then) p.then(finish, function (e) { end(fail(e)); });
+        else ac.oncomplete = function (e) { finish(e.renderedBuffer); };
+      } catch (e) { end(fail(e)); }
+    });
+  }
+
   // ── Pure helpers ───────────────────────────────────────────────────────
+
+  /** 32-bit FNV-1a of a string as 8 hex digits: the short hash the fingerprint report uses (the page probe inlines the same one). */
+  function fnv1a(s) {
+    s = String(s == null ? "" : s);
+    var h = 0x811c9dc5;
+    for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+    return ("0000000" + (h >>> 0).toString(16)).slice(-8);
+  }
 
   /** The registrable domain of a URL (the cookie scope a site uses); "" for a non-web address. */
   function siteOf(url) {
@@ -519,6 +688,104 @@
     return head.concat(findings.lines).join("\n");
   }
 
+  // ── The fingerprint check ──
+
+  /**
+   * What the device config a tab presents asks a fingerprinting script to find: { label, profile, source, gpuVendor, gpuRenderer,
+   * threads, memory, screen ("W×H"), colorDepth, timezone, languages, canvasNoise, audioNoise } — empty without one. A device config
+   * always noises the canvas (seeded per profile) and noises the audio samples when it carries an audio block (inject-fingerprint.js).
+   */
+  function fingerprintExpectations(r) {
+    if (!r || !r.cfg) return { label: "", profile: "", source: "", gpuVendor: "", gpuRenderer: "", threads: 0, memory: 0, screen: "", colorDepth: 0, timezone: "", languages: [], canvasNoise: false, audioNoise: false };
+    var cfg = r.cfg;
+    var langs = Array.isArray(cfg.langs) && cfg.langs.length ? cfg.langs.slice() : parseLangs(r.profile && r.profile.lang);
+    return {
+      label: cfg.label || cfg.id || "device profile", profile: r.profile ? String(r.profile.name || "") : "", source: r.source || "applied to this window",
+      gpuVendor: (cfg.webgl && (cfg.webgl.unmaskedVendor || cfg.webgl.vendor)) || "", gpuRenderer: (cfg.webgl && (cfg.webgl.unmaskedRenderer || cfg.webgl.renderer)) || "",
+      threads: cfg.hardwareConcurrency || 0, memory: cfg.deviceMemory || 0,
+      screen: cfg.screen && cfg.screen.width ? cfg.screen.width + "×" + cfg.screen.height : "", colorDepth: (cfg.screen && cfg.screen.colorDepth) || 0,
+      timezone: cfg.timezone || "", languages: langs, canvasNoise: true, audioNoise: !!cfg.audio,
+    };
+  }
+
+  /**
+   * The fingerprint report from probeFingerprint()'s data against the expectations → { lines, warnings, hash, verdict }. A ⚠ is a
+   * reading that differs from the profile, or one a site would find odd (no canvas, no WebGL, no audio); the rest get ✓. The
+   * combined hash folds every reading together: two tabs with different hashes are different devices to a site.
+   */
+  function fingerprintFindings(p, exp) {
+    p = p || {};
+    exp = exp || {};
+    var lines = [], warnings = [];
+    function ok(s) { lines.push("✓ " + s); }
+    function warn(s, short) { lines.push("⚠ " + s); warnings.push(short || s); }
+    var has = !!exp.label;
+    var profile = has ? "the device profile '" + exp.label + "'" : "";
+    var cv = p.canvas || {}, gl = p.webgl || {}, au = p.audio || {}, fo = p.fonts || {}, sc = p.screen || {};
+
+    if (cv.error) warn("Canvas: not readable (" + cv.error + ") — a site expects every browser to render its canvas", "canvas unreadable");
+    else ok("Canvas hash " + (cv.hash || "?") + " (300×150 scene: text, emoji, arcs, gradient)" +
+      (has ? (exp.canvasNoise ? " — noise on for " + profile + ": stable for this profile, different from every other" : " — no noise for " + profile + ": the real renderer's bytes") : " — the real renderer's bytes, no profile noise"));
+
+    if (gl.error) warn("WebGL: not available (" + gl.error + ") — nearly every real desktop browser has it", "no WebGL");
+    else {
+      var vendor = gl.unmaskedVendor || gl.vendor || "?", renderer = gl.unmaskedRenderer || gl.renderer || "?";
+      var reading = "WebGL " + vendor + " · " + renderer + " · parameters hash " + (gl.paramsHash || "?") + " (" + plural(gl.extensions || 0, "extension") + ")";
+      if (has && exp.gpuRenderer && renderer !== exp.gpuRenderer) warn(reading + " — " + profile + " presents '" + exp.gpuRenderer + "'", "GPU renderer differs from the profile");
+      else if (has && exp.gpuVendor && vendor !== exp.gpuVendor) warn(reading + " — " + profile + " presents vendor '" + exp.gpuVendor + "'", "GPU vendor differs from the profile");
+      else ok(reading + (has && (exp.gpuRenderer || exp.gpuVendor) ? ", matches " + profile : ""));
+    }
+
+    if (au.error) warn("Audio: no fingerprint (" + au.error + ")", "no audio fingerprint");
+    else ok("Audio hash " + (au.hash || "?") + (au.sampleRate ? " at " + au.sampleRate + " Hz" : "") +
+      (has ? (exp.audioNoise ? " — noise on for " + profile : " — no audio noise for " + profile + ": the real device's samples") : " — the real device's samples"));
+
+    var present = fo.present || [];
+    if (fo.error) warn("Fonts: not measured (" + fo.error + ")", "fonts not measured");
+    else ok("Fonts: " + present.length + " of " + (fo.tested || 0) + " common fonts present" + (present.length ? ": " + present.join(", ") : ""));
+
+    var screenStr = sc.width ? sc.width + "×" + sc.height : "?";
+    var geo = "Screen " + screenStr + (sc.colorDepth ? ", " + sc.colorDepth + "-bit" : "") + " · pixel ratio " + (p.dpr || "?");
+    if (has && exp.screen && sc.width && screenStr !== exp.screen) warn(geo + " — " + profile + " is " + exp.screen, "screen " + screenStr + " vs profile " + exp.screen);
+    else ok(geo + (has && exp.screen ? ", matches " + profile : ""));
+
+    var hw = "Hardware: " + (p.hardwareConcurrency || "?") + " CPU threads · " + (p.deviceMemory ? p.deviceMemory + " GB memory" : "memory not exposed");
+    if (has && exp.threads && p.hardwareConcurrency && p.hardwareConcurrency !== exp.threads) warn(hw + " — " + profile + " has " + exp.threads + " threads", "CPU threads " + p.hardwareConcurrency + " vs profile " + exp.threads);
+    else if (has && exp.memory && p.deviceMemory && p.deviceMemory !== exp.memory) warn(hw + " — " + profile + " has " + exp.memory + " GB", "memory " + p.deviceMemory + " GB vs profile " + exp.memory + " GB");
+    else ok(hw + (has && (exp.threads || exp.memory) ? ", matches " + profile : ""));
+
+    if (has && exp.timezone && p.timeZone && p.timeZone !== exp.timezone) warn("Time zone " + p.timeZone + " — " + profile + " sets " + exp.timezone, "time zone " + p.timeZone + " vs profile " + exp.timezone);
+    else ok("Time zone " + (p.timeZone || "?") + (has && exp.timezone ? ", matches " + profile : ""));
+
+    var langs = p.languages && p.languages.length ? p.languages : [];
+    var expLang = (exp.languages && exp.languages[0]) || "";
+    if (has && expLang && langs[0] && langs[0].toLowerCase() !== expLang.toLowerCase()) warn("Languages " + langs.join(", ") + " — " + profile + " says " + expLang, "language " + langs[0] + " vs profile " + expLang);
+    else ok("Languages " + (langs.length ? langs.join(", ") : "?") + (has && expLang ? ", matches " + profile : ""));
+
+    ok("Touch points " + (p.maxTouchPoints == null ? "unknown" : p.maxTouchPoints) + " · plugins " + (p.plugins == null ? "not available" : p.plugins));
+
+    var hash = fnv1a([cv.hash, gl.unmaskedVendor || gl.vendor, gl.unmaskedRenderer || gl.renderer, gl.paramsHash, au.hash, present.join(","), screenStr, p.dpr, sc.colorDepth,
+      p.hardwareConcurrency, p.deviceMemory, p.timeZone, langs.join(","), p.maxTouchPoints, p.plugins].join("|"));
+    var verdict = "Combined hash " + hash + (has
+      ? (warnings.length ? " — " + warnings.length + (warnings.length === 1 ? " warning" : " warnings") + " against " + profile + ": " + warnings.join("; ") : " — consistent with " + profile)
+      : " — no device profile on this window: the real machine's fingerprint");
+    return { lines: lines, warnings: warnings, hash: hash, verdict: verdict };
+  }
+
+  /** The fingerprint report as the model reads it: where, the verdict, what it was compared with, the lines, how to use the hash. */
+  function formatFingerprint(tab, page, exp, f) {
+    tab = tab || {};
+    page = page || {};
+    var head = ["Fingerprint of " + (tab.url || page.url || "?") + (tab.title || page.title ? " (" + (tab.title || page.title) + ")" : "")];
+    head.push("Verdict: " + f.verdict);
+    head.push("Compared with: " + (exp && exp.label
+      ? "device profile '" + exp.label + "'" + (exp.profile ? " (" + exp.profile + ")" : "") + " — " + (exp.source || "applied to this window") + ": GPU " + (exp.gpuRenderer || "not set") +
+        ", " + (exp.threads || "?") + " threads, " + (exp.memory ? exp.memory + " GB" : "memory not set") + ", screen " + (exp.screen || "?") + ", time zone " + (exp.timezone || "not set") +
+        ", canvas noise " + (exp.canvasNoise ? "on" : "off") + ", audio noise " + (exp.audioNoise ? "on" : "off")
+      : "no device profile on this window — the readings are the real machine's"));
+    return head.concat(f.lines).concat(["Different hash = different device to the site; run it in another profile's tab to compare the two."]).join("\n");
+  }
+
   // ── Extension side ─────────────────────────────────────────────────────
 
   async function storeOf(tab) {
@@ -574,6 +841,19 @@
   async function deviceOfWindow(tab) {
     var r = await rawDevice(tab);
     return r.cfg ? summarizeDevice(r.cfg, r.profile ? String(r.profile.name || "") : "") : null;
+  }
+  // The device config to compare a fingerprint with: the window's own (rawDevice), else the active profile's template when
+  // the panel has the engine — a plain window then shows how far it is from that profile, which the report says plainly.
+  async function deviceForFingerprint(tab) {
+    var r = await rawDevice(tab);
+    if (r.cfg) return { cfg: r.cfg, profile: r.profile, source: "applied to this window" };
+    var FE = globalThis.FingerprintEngine;
+    if (!FE || typeof FE.configFor !== "function" || !chrome.storage || !chrome.storage.local) return r;
+    var st = await chrome.storage.local.get(["agentProfiles", "agentActiveProfile"]).catch(function () { return {}; });
+    var id = st.agentActiveProfile, p = id && st.agentProfiles ? st.agentProfiles[id] : null;
+    var cfg = null;
+    try { cfg = p ? FE.configFor(p, id) : null; } catch (_) { cfg = null; }
+    return cfg ? { cfg: cfg, profile: p, source: "the active profile's template, not applied to this window — differences mean the profile is not in effect here" } : r;
   }
   /** What the window's device profile asks the page to show: { label, profile, timezone, languages } — empty without one. */
   function windowExpectations(r) {
@@ -650,6 +930,22 @@
     return { text: formatLeaks(tab, page, exp, findings), findings: findings };
   }
 
+  /** The fingerprint probe on a tab, graded against the device config it presents → { text, findings }. */
+  async function fingerprintCheck(tab) {
+    tab = tab || (await H.currentTab());
+    var results;
+    try {
+      results = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: probeFingerprint, args: [], world: "MAIN" });
+    } catch (e) {
+      throw new Error("This page (" + (tab.url || "browser page") + ") can't be inspected — navigate to a regular website first. (" + String((e && e.message) || e) + ")");
+    }
+    var page = results && results[0] ? results[0].result : null;
+    if (!page) throw new Error("The page did not answer — it may still be loading.");
+    var exp = fingerprintExpectations(await deviceForFingerprint(tab));
+    var f = fingerprintFindings(page, exp);
+    return { text: formatFingerprint(tab, page, exp, f), findings: f };
+  }
+
   async function proxyInfo() {
     if (!chrome.proxy || !chrome.proxy.settings) return { available: false };
     var s = await Promise.resolve(chrome.proxy.settings.get({})).catch(function () { return null; });
@@ -683,6 +979,9 @@
   });
   T.register("browser_identity_leaks", async function () {
     return text((await leakCheck(await H.currentTab())).text);
+  });
+  T.register("browser_identity_fingerprint", async function () {
+    return text((await fingerprintCheck(await H.currentTab())).text);
   });
 
   // ── 🧩 tab ─────────────────────────────────────────────────────────────
@@ -747,7 +1046,9 @@
     { group: "Accounts", icon: "🌐", name: "Check my exit IP",
       prompt: "Run browser_identity_proxy and tell me what the world sees as my exit: IP, country, latency, whether the request went through the proxy the extension expects, and whether the country fits my profile's language and time zone." },
     { group: "Accounts", icon: "🕳", name: "Leak check this tab",
-      prompt: "Run browser_identity_leaks on this tab and explain every ⚠ in plain words — what leaks, what a site could learn from it, and how to fix it (WebRTC policy, the profile's time zone or language, the window size) — before I sign in." }
+      prompt: "Run browser_identity_leaks on this tab and explain every ⚠ in plain words — what leaks, what a site could learn from it, and how to fix it (WebRTC policy, the profile's time zone or language, the window size) — before I sign in." },
+    { group: "Accounts", icon: "🧬", name: "Fingerprint of this tab",
+      prompt: "Run browser_identity_fingerprint on this tab and explain what a fingerprinting script reads here — canvas, WebGL, audio, fonts, screen, hardware, time zone — whether it matches the device profile this window presents (and whether canvas/audio noise is on), and give me the combined hash so I can compare it with another profile's tab." }
   );
 
   globalThis.AgentExtras.audit = {
@@ -757,5 +1058,7 @@
     probeLeaks: probeLeaks, parseLangs: parseLangs, langCountry: langCountry, tzCountry: tzCountry, parseTrace: parseTrace, assessExit: assessExit,
     candidateAddress: candidateAddress, webrtcLeaks: webrtcLeaks, zoneOffset: zoneOffset, leakFindings: leakFindings, formatLeaks: formatLeaks,
     windowExpectations: windowExpectations, expectedProxy: expectedProxy, fetchTrace: fetchTrace, exitCheck: exitCheck, leakCheck: leakCheck,
+    probeFingerprint: probeFingerprint, fnv1a: fnv1a, fingerprintExpectations: fingerprintExpectations, fingerprintFindings: fingerprintFindings, formatFingerprint: formatFingerprint,
+    deviceForFingerprint: deviceForFingerprint, fingerprintCheck: fingerprintCheck,
   };
 })();

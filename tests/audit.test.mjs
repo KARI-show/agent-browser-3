@@ -3,7 +3,8 @@
 // the report's formatting, what the extension side adds (cookie count, profile label, proxy — never
 // values or credentials), the exit check (a faked trace endpoint, the expected proxy, country vs language
 // and time zone), the leak check (WebRTC candidates, time zone, languages, geometry, webdriver, client
-// hints on fixed page data), the 🪪 tab and the quick commands.
+// hints on fixed page data), the fingerprint check (FNV-1a, the readings against the window's device
+// config or the active profile's template, the combined hash), the 🪪 tab and the quick commands.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -538,13 +539,182 @@ test("audit: browser_identity_leaks injects one self-contained probe into the pa
   await assert.rejects(run("browser_identity_leaks", {}), /The page did not answer/);
 });
 
+// ── The fingerprint check ──
+
+const RTX = "ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Direct3D11 vs_5_0 ps_5_0, D3D11)";
+/** What probeFingerprint() returns in a window presenting the win11 template (profile "Work"). */
+const FP = {
+  url: "http://localhost:4000/", title: "Whoami",
+  canvas: { hash: "1a2b3c4d", error: "" },
+  webgl: { vendor: "WebKit", renderer: "WebKit WebGL", unmaskedVendor: "Google Inc. (NVIDIA)", unmaskedRenderer: RTX, paramsHash: "deadbeef", extensions: 42, error: "" },
+  audio: { hash: "0badf00d", sampleRate: 48000, error: "" },
+  fonts: { present: ["Arial", "Calibri", "Segoe UI"], tested: 31, error: "" },
+  screen: { width: 2560, height: 1440, colorDepth: 24 }, dpr: 1, hardwareConcurrency: 24, deviceMemory: 32,
+  timeZone: "America/New_York", languages: ["en-US", "en"], maxTouchPoints: 0, plugins: 5, userAgent: WIN_UA, platform: "Win32",
+};
+/** The same probe on the real Linux machine. */
+const FP_REAL = {
+  ...FP, canvas: { hash: "99887766", error: "" },
+  webgl: { vendor: "WebKit", renderer: "WebKit WebGL", unmaskedVendor: "Google Inc. (Intel)", unmaskedRenderer: "ANGLE (Intel, Mesa Intel(R) UHD Graphics 620 (KBL GT2), OpenGL 4.6)", paramsHash: "cafebabe", extensions: 38, error: "" },
+  audio: { hash: "11112222", sampleRate: 44100, error: "" }, fonts: { present: ["DejaVu Sans", "Liberation Sans", "Ubuntu"], tested: 31, error: "" },
+  screen: { width: 1280, height: 900, colorDepth: 24 }, hardwareConcurrency: 8, deviceMemory: 8, timeZone: "Europe/Berlin", languages: ["de-DE", "de"], userAgent: LINUX_UA, platform: "Linux x86_64",
+};
+const FP_EXP = { label: CFG.label, profile: "Work", source: "applied to this window", gpuVendor: "Google Inc. (NVIDIA)", gpuRenderer: RTX, threads: 24, memory: 32, screen: "2560×1440", colorDepth: 24, timezone: "America/New_York", languages: ["en-US", "en"], canvasNoise: true, audioNoise: true };
+const PROFILE = "the device profile 'Windows 11 — i7-13700K / RTX 4060'";
+
+test("audit: fnv1a is the 32-bit FNV-1a hash as 8 hex digits, and the probe inlines the same one", () => {
+  const { U } = setup();
+  assert.deepEqual([U.fnv1a(""), U.fnv1a("a"), U.fnv1a("foobar"), U.fnv1a("\u0000"), U.fnv1a(undefined), U.fnv1a(42)], ["811c9dc5", "e40c292c", "bf9cf968", "050c5d1f", "811c9dc5", U.fnv1a("42")]);
+  assert.ok(U.fnv1a("x".repeat(100000)).length === 8);
+  const inlined = /function fnv\(s\) \{[\s\S]*?\n    \}/.exec(U.probeFingerprint.toString());
+  assert.ok(inlined, "the probe carries its own fnv");
+  const fnv = new Function("return " + inlined[0])();
+  assert.deepEqual([fnv(""), fnv("foobar")], ["811c9dc5", "bf9cf968"], "the same hash as the module's");
+});
+
+test("audit: fingerprintExpectations reduces a device config to what the probe should find", () => {
+  const { U } = setup();
+  assert.deepEqual(plain(U.fingerprintExpectations({ cfg: { ...CFG, audio: { sampleRate: 48000 }, webgl: { ...CFG.webgl, unmaskedVendor: "Google Inc. (NVIDIA)" } }, profile: { name: "Work", lang: "en-US,en;q=0.9" } })), FP_EXP);
+  const e = U.fingerprintExpectations({ cfg: { id: "x", screen: {}, webgl: { vendor: "V", renderer: "R" }, langs: ["fr-FR"] }, profile: null, source: "elsewhere" });
+  assert.deepEqual(plain(e), { label: "x", profile: "", source: "elsewhere", gpuVendor: "V", gpuRenderer: "R", threads: 0, memory: 0, screen: "", colorDepth: 0, timezone: "", languages: ["fr-FR"], canvasNoise: true, audioNoise: false });
+  assert.deepEqual(plain(U.fingerprintExpectations(null)), { label: "", profile: "", source: "", gpuVendor: "", gpuRenderer: "", threads: 0, memory: 0, screen: "", colorDepth: 0, timezone: "", languages: [], canvasNoise: false, audioNoise: false });
+  assert.equal(U.fingerprintExpectations({ cfg: null }).label, "");
+});
+
+test("audit: fingerprintFindings — a matching profile window passes, every difference is a ⚠, no profile means the real machine", () => {
+  const { U } = setup();
+  const clean = U.fingerprintFindings(FP, FP_EXP);
+  assert.deepEqual(plain(clean.warnings), []);
+  assert.match(clean.hash, /^[0-9a-f]{8}$/);
+  assert.equal(clean.verdict, "Combined hash " + clean.hash + " — consistent with " + PROFILE);
+  assert.deepEqual(plain(clean.lines), [
+    "✓ Canvas hash 1a2b3c4d (300×150 scene: text, emoji, arcs, gradient) — noise on for " + PROFILE + ": stable for this profile, different from every other",
+    "✓ WebGL Google Inc. (NVIDIA) · " + RTX + " · parameters hash deadbeef (42 extensions), matches " + PROFILE,
+    "✓ Audio hash 0badf00d at 48000 Hz — noise on for " + PROFILE,
+    "✓ Fonts: 3 of 31 common fonts present: Arial, Calibri, Segoe UI",
+    "✓ Screen 2560×1440, 24-bit · pixel ratio 1, matches " + PROFILE,
+    "✓ Hardware: 24 CPU threads · 32 GB memory, matches " + PROFILE,
+    "✓ Time zone America/New_York, matches " + PROFILE,
+    "✓ Languages en-US, en, matches " + PROFILE,
+    "✓ Touch points 0 · plugins 5",
+  ]);
+  // The combined hash is stable for the same readings and changes with any one of them.
+  assert.equal(U.fingerprintFindings({ ...FP }, {}).hash, clean.hash, "the expectations do not enter the hash");
+  assert.notEqual(U.fingerprintFindings({ ...FP, canvas: { hash: "1a2b3c4e", error: "" } }, FP_EXP).hash, clean.hash);
+  assert.notEqual(U.fingerprintFindings({ ...FP, fonts: { present: ["Arial"], tested: 31 } }, FP_EXP).hash, clean.hash);
+  assert.notEqual(U.fingerprintFindings(FP_REAL, FP_EXP).hash, clean.hash);
+  // The real machine in a window that should present the template: every difference named.
+  const real = U.fingerprintFindings(FP_REAL, FP_EXP);
+  assert.equal(real.verdict, "Combined hash " + real.hash + " — 5 warnings against " + PROFILE + ": GPU renderer differs from the profile; screen 1280×900 vs profile 2560×1440; CPU threads 8 vs profile 24; time zone Europe/Berlin vs profile America/New_York; language de-DE vs profile en-US");
+  assert.equal(real.lines[1], "⚠ WebGL Google Inc. (Intel) · ANGLE (Intel, Mesa Intel(R) UHD Graphics 620 (KBL GT2), OpenGL 4.6) · parameters hash cafebabe (38 extensions) — " + PROFILE + " presents '" + RTX + "'");
+  assert.equal(real.lines[4], "⚠ Screen 1280×900, 24-bit · pixel ratio 1 — " + PROFILE + " is 2560×1440");
+  assert.equal(real.lines[5], "⚠ Hardware: 8 CPU threads · 8 GB memory — " + PROFILE + " has 24 threads");
+  assert.equal(real.lines[6], "⚠ Time zone Europe/Berlin — " + PROFILE + " sets America/New_York");
+  assert.equal(real.lines[7], "⚠ Languages de-DE, de — " + PROFILE + " says en-US");
+  assert.equal(real.lines.filter((l) => l.startsWith("⚠")).length, 5);
+  const one = U.fingerprintFindings({ ...FP, deviceMemory: 16 }, FP_EXP);
+  assert.equal(one.verdict, "Combined hash " + one.hash + " — 1 warning against " + PROFILE + ": memory 16 GB vs profile 32 GB");
+  assert.deepEqual(plain(U.fingerprintFindings({ ...FP, webgl: { ...FP.webgl, unmaskedVendor: "Google Inc. (AMD)" } }, FP_EXP).warnings), ["GPU vendor differs from the profile"]);
+  // No profile: the readings stand on their own; nothing to match.
+  const alone = U.fingerprintFindings(FP_REAL, {});
+  assert.deepEqual(plain(alone.warnings), []);
+  assert.equal(alone.verdict, "Combined hash " + alone.hash + " — no device profile on this window: the real machine's fingerprint");
+  assert.equal(alone.lines[0], "✓ Canvas hash 99887766 (300×150 scene: text, emoji, arcs, gradient) — the real renderer's bytes, no profile noise");
+  assert.equal(alone.lines[2], "✓ Audio hash 11112222 at 44100 Hz — the real device's samples");
+  assert.equal(alone.lines[1], "✓ WebGL Google Inc. (Intel) · ANGLE (Intel, Mesa Intel(R) UHD Graphics 620 (KBL GT2), OpenGL 4.6) · parameters hash cafebabe (38 extensions)");
+  // Noise flags, readings a site would find odd, missing values.
+  assert.equal(U.fingerprintFindings(FP, { ...FP_EXP, audioNoise: false }).lines[2], "✓ Audio hash 0badf00d at 48000 Hz — no audio noise for " + PROFILE + ": the real device's samples");
+  const broken = U.fingerprintFindings({ ...FP, canvas: { hash: "", error: "no 2d context" }, webgl: { error: "no WebGL context" }, audio: { hash: "", error: "timed out after 2 s" }, fonts: { present: [], tested: 0, error: "no 2d context" } }, FP_EXP);
+  assert.deepEqual(plain(broken.warnings), ["canvas unreadable", "no WebGL", "no audio fingerprint", "fonts not measured"]);
+  assert.equal(broken.lines[0], "⚠ Canvas: not readable (no 2d context) — a site expects every browser to render its canvas");
+  assert.equal(broken.lines[1], "⚠ WebGL: not available (no WebGL context) — nearly every real desktop browser has it");
+  assert.equal(broken.lines[2], "⚠ Audio: no fingerprint (timed out after 2 s)");
+  const sparse = U.fingerprintFindings({ canvas: { hash: "abcdef01" }, webgl: { vendor: "V", renderer: "R", paramsHash: "" }, audio: { hash: "" }, fonts: {}, screen: null, languages: [] }, {});
+  assert.deepEqual(plain(sparse.lines).slice(1), ["✓ WebGL V · R · parameters hash ? (0 extensions)", "✓ Audio hash ? — the real device's samples", "✓ Fonts: 0 of 0 common fonts present", "✓ Screen ? · pixel ratio ?", "✓ Hardware: ? CPU threads · memory not exposed", "✓ Time zone ?", "✓ Languages ?", "✓ Touch points unknown · plugins not available"]);
+  assert.match(U.fingerprintFindings(undefined, undefined).verdict, /^Combined hash [0-9a-f]{8} — no device profile/);
+});
+
+test("audit: browser_identity_fingerprint injects one self-contained probe into the MAIN world and compares with the window's device config, else the active profile's template", async () => {
+  const { run, log, session, local, chrome, U } = setup();
+  chrome.scripting.result = (o) => (o.func.name === "probeFingerprint" ? FP_REAL : PAGE);
+  const src = U.probeFingerprint.toString();
+  assert.doesNotMatch(src, /\b(H|T|X|fnv1a|plural|dim|parseLangs|OS_NAMES)\b/, "the injected function closes over nothing of the module");
+  assert.match(src, /c\.width = 300;[\s\S]*c\.height = 150;[\s\S]*fillText[\s\S]*createLinearGradient[\s\S]*\.arc\([\s\S]*toDataURL\(\)/, "a fixed scene on a 300×150 canvas, hashed from its data URL");
+  assert.match(src, /WEBGL_debug_renderer_info[\s\S]*UNMASKED_VENDOR_WEBGL[\s\S]*UNMASKED_RENDERER_WEBGL/);
+  for (const piece of [/OfflineAudioContext/, /createOscillator/, /createDynamicsCompressor/, /startRendering/, /getChannelData\(0\)/]) assert.match(src, piece);
+  assert.match(src, /setTimeout\(function \(\) \{ end\("timed out after 2 s"\); \}, 2000\)/, "the audio rendering is cut off after 2 s");
+  const fonts = /var FONTS = \[([\s\S]*?)\];/.exec(src)[1].split(",").length;
+  assert.ok(fonts >= 28 && fonts <= 34, "about 30 fonts: " + fonts);
+  assert.match(src, /measureText/);
+
+  let out = await run("browser_identity_fingerprint", {});
+  assert.deepEqual(log.scripts, [{ tabId: 5, world: "MAIN", func: "probeFingerprint" }], "what the site itself reads");
+  const hash = U.fingerprintFindings(FP_REAL, {}).hash;
+  assert.equal(out.split("\n").slice(0, 4).join("\n"), [
+    "Fingerprint of http://localhost:4000/ (Whoami)",
+    "Verdict: Combined hash " + hash + " — no device profile on this window: the real machine's fingerprint",
+    "Compared with: no device profile on this window — the readings are the real machine's",
+    "✓ Canvas hash 99887766 (300×150 scene: text, emoji, arcs, gradient) — the real renderer's bytes, no profile noise",
+  ].join("\n"));
+  assert.match(out, /\nDifferent hash = different device to the site; run it in another profile's tab to compare the two\.$/);
+  assert.doesNotMatch(out, /s3cr3t|alice/);
+
+  // The window's device config: the page still shows the real machine, so every difference is flagged; no credentials, no noise seed.
+  session["agentDeviceWindow:1"] = { ...CFG, noiseSeed: "prof_1", audio: { sampleRate: 48000 } };
+  local.agentProfiles = { prof_1: { name: "Work", lang: "en-US,en;q=0.9", proxy: { enabled: true, host: "1.2.3.4", port: 8080, username: "user", password: "hunter2" } } };
+  out = await run("browser_identity_fingerprint", {});
+  assert.match(out, /^Verdict: Combined hash [0-9a-f]{8} — 5 warnings against the device profile 'Windows 11 — i7-13700K \/ RTX 4060': GPU renderer differs from the profile; screen 1280×900 vs profile 2560×1440; CPU threads 8 vs profile 24; time zone Europe\/Berlin vs profile America\/New_York; language de-DE vs profile en-US$/m);
+  assert.match(out, /^Compared with: device profile 'Windows 11 — i7-13700K \/ RTX 4060' \(Work\) — applied to this window: GPU ANGLE \(NVIDIA, NVIDIA GeForce RTX 4060 Direct3D11 vs_5_0 ps_5_0, D3D11\), 24 threads, 32 GB, screen 2560×1440, time zone America\/New_York, canvas noise on, audio noise on$/m);
+  assert.doesNotMatch(out, /hunter2|prof_1/);
+  // The same window once the page presents the template: consistent, and the hash differs from the real machine's.
+  chrome.scripting.result = (o) => (o.func.name === "probeFingerprint" ? FP : PAGE);
+  out = await run("browser_identity_fingerprint", {});
+  assert.match(out, /^Verdict: Combined hash ([0-9a-f]{8}) — consistent with the device profile 'Windows 11 — i7-13700K \/ RTX 4060'$/m);
+  assert.notEqual(/Combined hash ([0-9a-f]{8})/.exec(out)[1], hash);
+  assert.doesNotMatch(out, /^⚠/m);
+  // A config without an audio block: audio noise off, said so.
+  session["agentDeviceWindow:1"] = CFG;
+  out = await run("browser_identity_fingerprint", {});
+  assert.match(out, /canvas noise on, audio noise off$/m);
+  assert.match(out, /^✓ Audio hash 0badf00d at 48000 Hz — no audio noise for the device profile/m);
+  // The runtime's deviceOf is the fallback for a tab the panel gave an identity directly.
+  delete session["agentDeviceWindow:1"];
+  const T2 = setup();
+  T2.chrome.scripting.result = (o) => (o.func.name === "probeFingerprint" ? FP : PAGE);
+  T2.T.device = { ...CFG, profileId: "" };
+  assert.match(await T2.run("browser_identity_fingerprint", {}), /^Compared with: device profile 'Windows 11 — i7-13700K \/ RTX 4060' — applied to this window: /m);
+
+  // A plain window with the engine at hand: the active profile's template is the yardstick, and the report says it is not applied here.
+  const seen = [];
+  const E = setup({ globals: { FingerprintEngine: { configFor: (p, id) => { seen.push([plain(p), id]); return p.device === "win11-i7-rtx4060" ? { ...CFG, audio: { sampleRate: 48000 } } : null; } } } });
+  E.chrome.scripting.result = (o) => (o.func.name === "probeFingerprint" ? FP_REAL : PAGE);
+  E.local.agentProfiles = { prof_1: { name: "Work", lang: "en-US", device: "win11-i7-rtx4060" }, prof_2: { name: "UA only", device: "none" } };
+  E.local.agentActiveProfile = "prof_1";
+  out = await E.run("browser_identity_fingerprint", {});
+  assert.match(out, /^Compared with: device profile 'Windows 11 — i7-13700K \/ RTX 4060' \(Work\) — the active profile's template, not applied to this window — differences mean the profile is not in effect here: GPU /m);
+  assert.match(out, /^Verdict: Combined hash [0-9a-f]{8} — 5 warnings against the device profile/m);
+  assert.deepEqual(seen, [[{ name: "Work", lang: "en-US", device: "win11-i7-rtx4060" }, "prof_1"]]);
+  E.local.agentActiveProfile = "prof_2";
+  assert.match(await E.run("browser_identity_fingerprint", {}), /^Compared with: no device profile on this window — the readings are the real machine's$/m, "a UA-only profile has no template to compare with");
+  delete E.local.agentActiveProfile;
+  assert.match(await E.run("browser_identity_fingerprint", {}), /^Compared with: no device profile on this window/m);
+
+  // A page that cannot be scripted, and one that does not answer.
+  chrome.scripting.throws = new Error("Cannot access a chrome:// URL");
+  await assert.rejects(run("browser_identity_fingerprint", {}), /can't be inspected — navigate to a regular website first\. \(Cannot access a chrome:\/\/ URL\)/);
+  chrome.scripting.throws = null;
+  chrome.scripting.result = null;
+  await assert.rejects(run("browser_identity_fingerprint", {}), /The page did not answer/);
+});
+
 test("audit: tools and quick commands are registered under their names and group", () => {
   const { T, X } = setup();
-  assert.deepEqual(Object.keys(T.registered), ["browser_identity_report", "browser_identity_proxy", "browser_identity_leaks"]);
+  assert.deepEqual(Object.keys(T.registered), ["browser_identity_report", "browser_identity_proxy", "browser_identity_leaks", "browser_identity_fingerprint"]);
   const mine = X.commands.filter((c) => c.group === "Accounts");
-  assert.deepEqual(mine.map((c) => c.name), ["What does this site see?", "Check my identity before signing in", "Check my exit IP", "Leak check this tab"]);
+  assert.deepEqual(mine.map((c) => c.name), ["What does this site see?", "Check my identity before signing in", "Check my exit IP", "Leak check this tab", "Fingerprint of this tab"]);
   assert.match(mine[1].prompt, /browser_identity_report[\s\S]*compare it with the device profile and proxy[\s\S]*mismatch/);
   assert.match(mine[2].prompt, /browser_identity_proxy[\s\S]*exit/);
   assert.match(mine[3].prompt, /browser_identity_leaks[\s\S]*⚠/);
+  assert.match(mine[4].prompt, /browser_identity_fingerprint[\s\S]*canvas[\s\S]*combined hash/);
   for (const c of mine) assert.ok(c.icon && !c.partial, c.name);
 });

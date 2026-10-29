@@ -1,7 +1,9 @@
 // The "checks" extra (browser/extras/checks.js) against fakes of chrome.storage / tabs, of the tool
 // runtime (AgentBrowserTools.register + helpers) and of fetch: the HEAD → GET fallback, redirects,
 // 4xx/5xx, network errors and the timeout; the link collection filter and the reports; the 🔗 tab; the
-// SEO audit and the speed report on fixed page data; the sitemap check against fake robots.txt/sitemaps.
+// SEO audit and the speed report on fixed page data; the sitemap check against fake robots.txt/sitemaps;
+// the accessibility and mobile audits on fixed page data; the redirect chain (manual redirects, the opaque
+// case with and without webRequest) and the response headers against the fake fetch.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -11,8 +13,12 @@ import { fileURLToPath } from "node:url";
 const CHECKS_JS = fileURLToPath(new URL("../browser/extras/checks.js", import.meta.url));
 const plain = (x) => JSON.parse(JSON.stringify(x));
 
-/** A fetch answering from a route table: url → { status, headStatus, headers, redirectTo, fail, hang, delay, body (text) }. */
-function fakeFetch(routes) {
+/**
+ * A fetch answering from a route table: url → { status, headStatus, headers, redirectTo, fail, hang, delay, body (text),
+ * setCookie (lines for getSetCookie), opaque (a redirect: manual mode gets an opaque response, follow mode lands on
+ * redirectTo), hops ([{ url, status, location }] reported to hooks.redirect in follow mode, like webRequest) }.
+ */
+function fakeFetch(routes, hooks) {
   const calls = [];
   const f = async (url, init) => {
     init = init || {};
@@ -21,21 +27,27 @@ function fakeFetch(routes) {
     if (r.delay) await new Promise((res) => setTimeout(res, r.delay));
     if (r.fail) throw new TypeError("Failed to fetch");
     if (r.hang) return new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(Object.assign(new Error("The user aborted a request."), { name: "AbortError" }))));
+    if (r.opaque && init.redirect === "manual") return { status: 0, ok: false, type: "opaqueredirect", url: String(url), redirected: false, headers: { get: () => null, forEach: () => {} }, body: null, text: async () => "" };
+    if (r.hops && init.redirect !== "manual" && hooks && hooks.redirect) r.hops.forEach((h) => hooks.redirect({ requestId: "req-1", url: h.url, statusCode: h.status, redirectUrl: h.location, timeStamp: Date.now() }));
     let status = r.status === undefined ? 200 : r.status;
     if (init.method === "HEAD" && r.headStatus) status = r.headStatus;
     const headers = Object.fromEntries(Object.entries(r.headers || {}).map(([k, v]) => [k.toLowerCase(), String(v)]));
-    return { status, ok: status >= 200 && status < 300, url: r.redirectTo || String(url), redirected: !!r.redirectTo, headers: { get: (k) => (k.toLowerCase() in headers ? headers[k.toLowerCase()] : null) }, body: null, text: async () => (r.body == null ? "" : String(r.body)) };
+    const h = { get: (k) => (k.toLowerCase() in headers ? headers[k.toLowerCase()] : null), forEach: (fn) => Object.entries(headers).forEach(([k, v]) => fn(v, k)) };
+    if (r.setCookie) h.getSetCookie = () => r.setCookie.slice();
+    return { status, ok: status >= 200 && status < 300, url: r.redirectTo || String(url), redirected: !!r.redirectTo, headers: h, body: null, text: async () => (r.body == null ? "" : String(r.body)) };
   };
   f.calls = calls;
   return f;
 }
 
 /** Load checks.js the way extras.js is loaded in the panel, with a brand that has (or lacks) the feature. `page` is what an injected function returns, or a function of the injected function's name. */
-function load({ brand = ["checks"], routes = {}, page = null } = {}) {
+function load({ brand = ["checks"], routes = {}, page = null, cookies = null, webRequest = false } = {}) {
   const data = {};
   const tools = {};
   const created = [];
   const inTopCalls = [];
+  const cookieCalls = [];
+  const redirectListeners = [];
   const chrome = {
     storage: {
       local: {
@@ -45,7 +57,10 @@ function load({ brand = ["checks"], routes = {}, page = null } = {}) {
     },
     tabs: { async create(o) { created.push(o); return { id: 9 }; } },
   };
-  const fetch = fakeFetch(routes);
+  // chrome.cookies (the stored cookies of an address) and chrome.webRequest (redirects of a followed request) only when a test asks.
+  if (cookies) chrome.cookies = { async getAll(q) { cookieCalls.push(plain(q)); return plain(cookies); } };
+  if (webRequest) chrome.webRequest = { onBeforeRedirect: { addListener: (fn) => redirectListeners.push(fn), removeListener: (fn) => { const i = redirectListeners.indexOf(fn); if (i >= 0) redirectListeners.splice(i, 1); } } };
+  const fetch = fakeFetch(routes, { redirect: (d) => redirectListeners.slice().forEach((fn) => fn(d)) });
   const ctx = {
     console, setTimeout, clearTimeout, URL, AbortController, chrome, fetch,
     AGENT_BRAND: { has: (f) => brand.includes(f) },
@@ -68,7 +83,7 @@ function load({ brand = ["checks"], routes = {}, page = null } = {}) {
   const context = vm.createContext(ctx);
   vm.runInContext(fs.readFileSync(CHECKS_JS, "utf8"), context);
   const run = async (name, args) => (await tools[name](args)).filter((p) => p.type === "text").map((p) => p.text).join("\n");
-  return { ctx, tools, data, fetch, created, inTopCalls, X: ctx.AgentExtras.checks, run };
+  return { ctx, tools, data, fetch, created, inTopCalls, cookieCalls, redirectListeners, X: ctx.AgentExtras.checks, run };
 }
 
 // A fake DOM for the tab: ctx.el builds plain objects, textOf() reads them back.
@@ -126,9 +141,9 @@ test("a brand without the feature gets nothing: no tools, no tab, no commands, n
   assert.equal(ctx.AgentExtras.checks, undefined);
 });
 
-test("with the feature: the five tools, the 🔗 tab watching its storage key, the Monitoring quick commands", () => {
+test("with the feature: the nine tools, the 🔗 tab watching its storage key, the Monitoring quick commands", () => {
   const { tools, ctx } = load();
-  assert.deepEqual(Object.keys(tools).sort(), ["browser_check_links", "browser_check_seo", "browser_check_sitemap", "browser_check_speed", "browser_check_url"]);
+  assert.deepEqual(Object.keys(tools).sort(), ["browser_check_accessibility", "browser_check_headers", "browser_check_links", "browser_check_mobile", "browser_check_redirects", "browser_check_seo", "browser_check_sitemap", "browser_check_speed", "browser_check_url"]);
   assert.equal(ctx.AgentExtras.tabs.length, 1);
   assert.equal(ctx.AgentExtras.tabs[0].id, "checks");
   assert.equal(ctx.AgentExtras.tabs[0].label, "🔗 Checks");
@@ -141,8 +156,12 @@ test("with the feature: the five tools, the 🔗 tab watching its storage key, t
     ["Monitoring", "SEO audit of this page", false],
     ["Monitoring", "Page speed report", false],
     ["Monitoring", "Check the sitemap", false],
+    ["Monitoring", "Accessibility audit of this page", false],
+    ["Monitoring", "Mobile readiness of this page", false],
+    ["Monitoring", "Redirect chain of this URL", true],
+    ["Monitoring", "Response headers of this page", false],
   ]);
-  for (const c of ctx.AgentExtras.commands) assert.match(c.prompt, /browser_check_(url|links|seo|speed|sitemap)/, c.name + " names its tool");
+  for (const c of ctx.AgentExtras.commands) assert.match(c.prompt, /browser_check_(url|links|seo|speed|sitemap|accessibility|mobile|redirects|headers)/, c.name + " names its tool");
 });
 
 // ── browser_check_url ──────────────────────────────────────────────────────
@@ -699,4 +718,414 @@ test("readSitemaps: an index with more than 5 nested sitemaps reads 5 and says h
   assert.deepEqual([r.sitemaps[0].index, r.sitemaps[0].count, r.sitemaps[0].skipped], [true, 8, 3]);
   assert.deepEqual(r.locs, ["https://big.example/p0", "https://big.example/p1", "https://big.example/p2", "https://big.example/p3", "https://big.example/p4"]);
   assert.match(X.formatSitemapReport({ origin: "https://big.example", robots: { ok: true, status: 200, sitemaps: [], disallow: 0 }, sitemaps: r.sitemaps, locs: r.locs, checked: [] }), /index of 8 sitemaps, 3 not read \(limit 5\)\n/);
+});
+
+// ── browser_check_accessibility ────────────────────────────────────────────
+
+const EMPTY = { count: 0, samples: [] };
+const A11Y_GOOD = {
+  url: "https://site.example/page", lang: "en",
+  images: { total: 4, noAlt: EMPTY },
+  controls: { total: 3, unnamed: EMPTY },
+  links: { total: 20, empty: EMPTY, generic: EMPTY },
+  buttons: { total: 2, empty: EMPTY },
+  headings: { count: 8, skips: EMPTY },
+  landmarks: { main: true, nav: true, banner: true, contentinfo: true },
+  tabindex: EMPTY, duplicateIds: EMPTY,
+  iframes: { total: 1, untitled: EMPTY },
+  blank: { total: 2, noRel: EMPTY },
+  hiddenFocusable: EMPTY, autoplay: EMPTY,
+};
+const A11Y_BAD = {
+  url: "https://site.example/bad", lang: "",
+  images: { total: 9, noAlt: { count: 7, samples: ["img.hero (hero.png)", "img#logo (logo.svg)", "img (a.png)", "img (b.png)", "img (c.png)"] } },
+  controls: { total: 4, unnamed: { count: 2, samples: ['input[name="q"] (search)', "textarea (textarea)"] } },
+  links: { total: 12, empty: { count: 1, samples: ["a.icon → /settings"] }, generic: { count: 3, samples: ['a.more "Read more" → /post/1', 'a.more "Read more" → /post/2', 'a "click here" → /help'] } },
+  buttons: { total: 3, empty: { count: 2, samples: ["button.close", "button#menu"] } },
+  headings: { count: 5, skips: { count: 1, samples: ['h3.sub (h1 → h3 "Details")'] } },
+  landmarks: { main: false, nav: true, banner: false, contentinfo: false },
+  tabindex: { count: 2, samples: ["div.modal (tabindex=1)", "a#skip (tabindex=5)"] },
+  duplicateIds: { count: 2, samples: ["#row ×3", "#x ×2"] },
+  iframes: { total: 2, untitled: { count: 2, samples: ["iframe (www.youtube.com)", "iframe#ad"] } },
+  blank: { total: 3, noRel: { count: 1, samples: ["a.partner"] } },
+  hiddenFocusable: { count: 1, samples: ["div.carousel (3 focusable inside)"] },
+  autoplay: { count: 1, samples: ["video#promo (with sound)"] },
+};
+const A11Y_NAMES = ["html lang", "images", "form controls", "buttons and links without text", "link text", "heading order", "landmarks", "tabindex", "duplicate ids", "iframes", "target=_blank", "aria-hidden", "autoplay"];
+
+test("a11yFindings: a well-made page passes all 13 checks; the details carry the counts", () => {
+  const { X } = load();
+  const f = plain(X.a11yFindings(A11Y_GOOD));
+  assert.deepEqual(f.map((x) => x.name), A11Y_NAMES);
+  assert.ok(f.every((x) => x.ok), JSON.stringify(f.filter((x) => !x.ok)));
+  assert.deepEqual(f.map((x) => x.detail), [
+    "lang=en",
+    "4 images, all with alt",
+    "3 controls, all named",
+    "20 links and 2 buttons, all with a text or an aria-label",
+    "no generic link texts (click here, read more, here, …)",
+    "8 headings, levels in order",
+    "main, nav, banner and contentinfo present",
+    "no positive tabindex",
+    "all ids unique",
+    "1 iframe, all titled",
+    "all 2 links opening a new tab carry rel=noopener",
+    "no aria-hidden element hides focusable content",
+    "no autoplaying media",
+  ]);
+  assert.deepEqual(plain(X.GENERIC_LINK_TEXTS), ["click here", "read more", "here", "link", "more"]);
+});
+
+test("a11yFindings: every warning fires on a bad page, with up to 5 samples and an ellipsis beyond; the empty page object", () => {
+  const { X } = load();
+  const f = plain(X.a11yFindings(A11Y_BAD));
+  assert.equal(f.length, 13);
+  assert.ok(f.every((x) => !x.ok), JSON.stringify(f.filter((x) => x.ok)));
+  assert.deepEqual(f.map((x) => x.detail), [
+    "missing — screen readers can't pick the language",
+    "9 images, 7 without alt: img.hero (hero.png), img#logo (logo.svg), img (a.png), img (b.png), img (c.png), …",
+    '4 controls, 2 without an accessible name (no label, aria-label, title or placeholder): input[name="q"] (search), textarea (textarea)',
+    "1 of 12 links and 2 of 3 buttons icon-only without aria-label: a.icon → /settings, button.close, button#menu",
+    '3 generic link texts (say where they lead): a.more "Read more" → /post/1, a.more "Read more" → /post/2, a "click here" → /help',
+    '5 headings, 1 level skip: h3.sub (h1 → h3 "Details")',
+    "missing main, banner, contentinfo",
+    "2 elements with a positive tabindex (it breaks the natural tab order): div.modal (tabindex=1), a#skip (tabindex=5)",
+    "2 ids used more than once: #row ×3, #x ×2",
+    "2 iframes, 2 without title: iframe (www.youtube.com), iframe#ad",
+    "advice — 1 of 3 links opening a new tab without rel=noopener: a.partner",
+    "1 aria-hidden element with focusable content (keyboard users reach what screen readers can't): div.carousel (3 focusable inside)",
+    "1 autoplaying media element: video#promo (with sound)",
+  ]);
+  // Only buttons empty, only links empty.
+  const onlyButtons = plain(X.a11yFindings({ ...A11Y_GOOD, buttons: { total: 3, empty: { count: 1, samples: ["button.x"] } } }));
+  assert.equal(onlyButtons[3].detail, "1 of 3 buttons icon-only without aria-label: button.x");
+  const onlyLinks = plain(X.a11yFindings({ ...A11Y_GOOD, links: { total: 5, empty: { count: 2, samples: ["a.i", "a.j"] }, generic: EMPTY } }));
+  assert.equal(onlyLinks[3].detail, "2 of 5 links icon-only without aria-label: a.i, a.j");
+  // An empty page object: nothing on it, nothing to warn about except the language and the landmarks.
+  const empty = plain(X.a11yFindings({}));
+  assert.equal(empty.length, 13);
+  assert.deepEqual(empty.filter((x) => !x.ok).map((x) => x.name), ["html lang", "landmarks"]);
+  assert.deepEqual([empty[2].detail, empty[5].detail, empty[6].detail, empty[9].detail, empty[10].detail], ["none", "no headings", "missing main, nav, banner, contentinfo — add <main>, <nav>, <header> and <footer>", "none", "no links open a new tab"]);
+});
+
+test("browser_check_accessibility: one injected read with the sample and scan limits and the generic texts, the report with the verdict and the contrast caveat", async () => {
+  const { run, inTopCalls } = load({ page: (func) => (func === "readA11y" ? A11Y_GOOD : null) });
+  const out = await run("browser_check_accessibility", {});
+  assert.deepEqual(inTopCalls, [{ func: "readA11y", args: [5, 3000, ["click here", "read more", "here", "link", "more"]] }]);
+  const lines = out.split("\n");
+  assert.equal(lines[0], "Accessibility audit of https://site.example/page — 13 checks: 13 ok, 0 warnings.");
+  assert.equal(lines.length, 15);
+  assert.ok(lines.slice(1, 14).every((l) => l.startsWith("✓ ")), out);
+  assert.equal(lines[14], "Not checked here: text contrast (the palette tool reads the colours).");
+  const bad = load({ page: (func) => (func === "readA11y" ? A11Y_BAD : null) });
+  const report = await bad.run("browser_check_accessibility", {});
+  assert.equal(report.split("\n")[0], "Accessibility audit of https://site.example/bad — 13 checks: 0 ok, 13 warnings.");
+  assert.match(report, /\n⚠ html lang: missing — screen readers can't pick the language\n⚠ images: 9 images, 7 without alt: /);
+  await assert.rejects(load({ page: null }).run("browser_check_accessibility", {}), /can't be automated/);
+  await assert.rejects(load({ page: () => ({}) }).run("browser_check_accessibility", {}), /Couldn't read the page for the accessibility audit/);
+});
+
+// ── browser_check_mobile ───────────────────────────────────────────────────
+
+const MOBILE_GOOD = {
+  url: "https://site.example/page", innerWidth: 1280, innerHeight: 800, scrollWidth: 1280,
+  viewport: "width=device-width, initial-scale=1",
+  tapTargets: { total: 30, small: EMPTY },
+  smallText: { count: 0, samples: [], scanned: 210 },
+  wide: EMPTY, overlays: EMPTY, fixedWidth: EMPTY, plugins: EMPTY,
+};
+const MOBILE_BAD = {
+  url: "https://site.example/bad", innerWidth: 390, innerHeight: 844, scrollWidth: 1100,
+  viewport: "width=1024, maximum-scale=1, user-scalable=no",
+  tapTargets: { total: 40, small: { count: 12, samples: ["a.nav-link 60×18", "button.icon 24×24", "input#agree 13×13", "a 30×30", "a.tag 50×20"] } },
+  smallText: { count: 3, samples: ["small.legal 10px", "span.note 11px", "footer p 9.5px"], scanned: 300 },
+  wide: { count: 2, samples: ["table.data 1100 px wide, right edge at 1100", "img.banner 600 px wide, right edge at 620"] },
+  overlays: { count: 1, samples: ["div.cookie-banner 40% (fixed)"] },
+  fixedWidth: { count: 2, samples: ["div.container min-width 960px", ".wrapper { width: 1200px }"] },
+  plugins: { count: 1, samples: ["embed (application/x-shockwave-flash)"] },
+};
+const MOBILE_NAMES = ["viewport", "tap targets", "text size", "horizontal overflow", "wide elements", "overlays", "phone width", "plugins"];
+
+test("parseViewport: the pairs of a viewport meta, any order and separator; null for none", () => {
+  const { X } = load();
+  const v = plain(X.parseViewport("width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no"));
+  assert.deepEqual(v, { width: "device-width", initialScale: 1, maximumScale: 1, userScalable: "no" });
+  const w = X.parseViewport("initial-scale=1; width=1024");
+  assert.deepEqual([w.width, w.initialScale, Number.isNaN(w.maximumScale), w.userScalable], ["1024", 1, true, ""]);
+  assert.equal(X.parseViewport(null), null);
+  assert.equal(X.parseViewport("").width, "");
+});
+
+test("mobileFindings: a responsive page passes all 8 checks; every warning fires on a desktop-only page; the viewport variants", () => {
+  const { X } = load();
+  const good = plain(X.mobileFindings(MOBILE_GOOD));
+  assert.deepEqual(good.map((x) => x.name), MOBILE_NAMES);
+  assert.ok(good.every((x) => x.ok), JSON.stringify(good.filter((x) => !x.ok)));
+  assert.deepEqual(good.map((x) => x.detail), [
+    '"width=device-width, initial-scale=1"',
+    "all 30 at least 44×44 px",
+    "no visible text under 12 px (210 text elements checked)",
+    "none at 1280 px",
+    "none wider than the viewport (1280 px)",
+    "no fixed/sticky element covers over 25% of the viewport",
+    "no fixed width or min-width over 375 px (inline styles, width attributes and same-origin stylesheets checked)",
+    "no legacy plugins",
+  ]);
+  const bad = plain(X.mobileFindings(MOBILE_BAD));
+  assert.ok(bad.every((x) => !x.ok), JSON.stringify(bad.filter((x) => x.ok)));
+  assert.deepEqual(bad.map((x) => x.detail), [
+    '"width=1024, maximum-scale=1, user-scalable=no" — width=1024 instead of device-width; user-scalable=no blocks pinch zoom; maximum-scale=1 blocks pinch zoom',
+    "12 of 40 under 44×44 px: a.nav-link 60×18, button.icon 24×24, input#agree 13×13, a 30×30, a.tag 50×20, …",
+    "3 elements with text under 12 px: small.legal 10px, span.note 11px, footer p 9.5px",
+    "the page scrolls sideways at 390 px (content 1100 px wide)",
+    "2 elements wider than the viewport (390 px), widest: table.data 1100 px wide, right edge at 1100, img.banner 600 px wide, right edge at 620",
+    "1 fixed/sticky element covering over 25% of the viewport: div.cookie-banner 40% (fixed)",
+    "2 elements with a fixed width or min-width over 375 px (would overflow a phone unless a media query changes them): div.container min-width 960px, .wrapper { width: 1200px }",
+    "1 legacy plugin (object/embed/applet) — phones don't run them: embed (application/x-shockwave-flash)",
+  ]);
+  const vp = (viewport) => plain(X.mobileFindings({ ...MOBILE_GOOD, viewport }))[0];
+  assert.deepEqual([vp(null).ok, vp(null).detail], [false, "no meta viewport — phones render the page at desktop width and shrink it"]);
+  assert.equal(vp("initial-scale=1").detail, '"initial-scale=1" — no width=device-width');
+  assert.equal(vp("width=device-width, user-scalable=0").detail, '"width=device-width, user-scalable=0" — user-scalable=0 blocks pinch zoom');
+  assert.equal(vp("width=device-width, maximum-scale=0.5").detail, '"width=device-width, maximum-scale=0.5" — maximum-scale=0.5 blocks pinch zoom');
+  assert.equal(vp("width=device-width, maximum-scale=5").ok, true);
+  assert.equal(plain(X.mobileFindings({ ...MOBILE_GOOD, tapTargets: { total: 0, small: EMPTY } }))[1].detail, "none found");
+  assert.equal(plain(X.mobileFindings({}))[2].detail, "no visible text under 12 px");
+  assert.deepEqual(plain(X.MOBILE), { tap: 44, minFont: 12, phoneWidth: 375, overlayPct: 25, samples: 5, scan: 3000, rules: 5000 });
+});
+
+test("browser_check_mobile: one injected read with the limits, the report with the size, the verdict and the resize caveat", async () => {
+  const { run, inTopCalls } = load({ page: (func) => (func === "readMobile" ? MOBILE_GOOD : null) });
+  const out = await run("browser_check_mobile", {});
+  assert.deepEqual(inTopCalls, [{ func: "readMobile", args: [{ tap: 44, minFont: 12, phoneWidth: 375, overlayPct: 25, samples: 5, scan: 3000, rules: 5000 }] }]);
+  const lines = out.split("\n");
+  assert.equal(lines[0], "Mobile readiness of https://site.example/page at 1280×800 px — 8 checks: 8 ok, 0 warnings.");
+  assert.equal(lines.length, 10);
+  assert.equal(lines[9], "The tab was not resized: the phone-width check comes from declared widths, the others from the current size.");
+  const bad = load({ page: () => MOBILE_BAD });
+  assert.match(await bad.run("browser_check_mobile", {}), /^Mobile readiness of https:\/\/site\.example\/bad at 390×844 px — 8 checks: 0 ok, 8 warnings\.\n⚠ viewport: "width=1024/);
+  await assert.rejects(load({ page: null }).run("browser_check_mobile", {}), /can't be automated/);
+  await assert.rejects(load({ page: () => ({}) }).run("browser_check_mobile", {}), /Couldn't read the page for the mobile audit/);
+});
+
+// ── browser_check_redirects ────────────────────────────────────────────────
+
+test("describeChain: one line per hop with the scheme notes, the summary; a downgrade, a loop, the hop limit, a hidden hop, a dead address, no redirect", () => {
+  const { X } = load();
+  const d = plain(X.describeChain([
+    { url: "http://x.example/", status: 301, location: "https://x.example/", ms: 120, type: "" },
+    { url: "https://x.example/", status: 302, location: "https://x.example/home", ms: 90, type: "text/html" },
+    { url: "https://x.example/home", status: 200, ms: 200, type: "text/html" },
+  ], ""));
+  assert.deepEqual(d.lines, [
+    "1. ↪ 301  http://x.example/  →  https://x.example/  (120 ms, http → https)",
+    "2. ↪ 302  https://x.example/  →  https://x.example/home  (90 ms)",
+    "3. ✓ 200  https://x.example/home  (200 ms, text/html)",
+  ]);
+  assert.deepEqual([d.summary, d.warnings, d.redirects, d.total], ["2 redirects, 3 requests, 410 ms in all; final: https://x.example/home (200).", [], 2, 410]);
+  const down = plain(X.describeChain([{ url: "https://a.example/", status: 302, location: "http://a.example/", ms: 10 }, { url: "http://a.example/", status: 200, ms: 5 }], ""));
+  assert.equal(down.lines[0], "1. ↪ 302  https://a.example/  →  http://a.example/  (10 ms, ⚠ https → http)");
+  assert.deepEqual(down.warnings, ["Hop 1 sends the visitor from https back to http (insecure, mixed content for anything embedding it)."]);
+  const loop = plain(X.describeChain([{ url: "https://l.example/a", status: 302, location: "https://l.example/b", ms: 1 }, { url: "https://l.example/b", status: 302, location: "https://l.example/a", ms: 1 }], "loop"));
+  assert.deepEqual(loop.warnings, ["Loop: https://l.example/a was already visited — the chain never ends."]);
+  assert.equal(loop.summary, "2 redirects, 2 requests, 2 ms in all; final: still redirecting to https://l.example/a.");
+  const max = plain(X.describeChain([{ url: "https://m.example/1", status: 301, location: "https://m.example/2", ms: 4 }, { url: "https://m.example/2", status: 301, location: "https://m.example/3", ms: 4 }], "max"));
+  assert.deepEqual(max.warnings, ["Stopped after 2 redirects (the limit) — still redirecting to https://m.example/3."]);
+  const hidden = plain(X.describeChain([{ url: "https://h.example/", status: 0, location: "https://h.example/final", hidden: true, ms: 0 }, { url: "https://h.example/final", status: 200, ms: 50, type: "text/html" }], ""));
+  assert.equal(hidden.lines[0], "1. ↪ redirect  https://h.example/  →  https://h.example/final  (0 ms, hidden)");
+  assert.deepEqual(hidden.warnings, ["The browser hid the intermediate hops; the redirect is shown as one step to the final address."]);
+  const dead = plain(X.describeChain([{ url: "https://d.example/", error: "Failed to fetch", ms: 3 }], ""));
+  assert.deepEqual([dead.lines, dead.summary], [["1. ✗ down: Failed to fetch  https://d.example/  (3 ms)"], "no redirect, 1 request, 3 ms in all; final: down: Failed to fetch."]);
+  const direct = plain(X.describeChain([{ url: "https://p.example/", status: 404, ms: 40, type: "text/html" }], ""));
+  assert.deepEqual([direct.lines, direct.summary], [["1. ✗ 404  https://p.example/  (40 ms, text/html)"], "no redirect, 1 request, 40 ms in all; final: https://p.example/ (404)."]);
+  assert.equal(plain(X.describeChain([], "")).summary, "no redirect, 0 requests, 0 ms in all; final: no response.");
+});
+
+test("browser_check_redirects: the chain hop by hop (relative Location resolved), the current tab by default, a loop, max, a dead hop, bad input", async () => {
+  const routes = {
+    "http://x.example/": { status: 301, headers: { location: "https://x.example/" } },
+    "https://x.example/": { status: 302, headers: { location: "/home" } },
+    "https://x.example/home": { headers: { "content-type": "text/html; charset=utf-8" } },
+    "https://site.example/page": { headers: { "content-type": "text/html" } },
+    "https://l.example/a": { status: 307, headers: { location: "https://l.example/b" } },
+    "https://l.example/b": { status: 307, headers: { location: "https://l.example/a" } },
+    "https://dead.example/": { fail: true },
+  };
+  for (let i = 0; i < 25; i++) routes[`https://m.example/${i}`] = { status: 301, headers: { location: `https://m.example/${i + 1}` } };
+  const { run, fetch } = load({ routes });
+  let lines = (await run("browser_check_redirects", { url: "x.example", max: 5 })).split("\n");
+  // "x.example" becomes https://x.example/ — start there.
+  assert.match(lines[0], /^Redirect chain of https:\/\/x\.example\/ — 1 redirect, 2 requests, \d+ ms in all; final: https:\/\/x\.example\/home \(200\)\.$/);
+  lines = (await run("browser_check_redirects", { url: "http://x.example/" })).split("\n");
+  assert.match(lines[0], /^Redirect chain of http:\/\/x\.example\/ — 2 redirects, 3 requests, \d+ ms in all; final: https:\/\/x\.example\/home \(200\)\.$/);
+  assert.match(lines[1], /^  1\. ↪ 301  http:\/\/x\.example\/  →  https:\/\/x\.example\/  \(\d+ ms, http → https\)$/);
+  assert.match(lines[2], /^  2\. ↪ 302  https:\/\/x\.example\/  →  https:\/\/x\.example\/home  \(\d+ ms\)$/);
+  assert.match(lines[3], /^  3\. ✓ 200  https:\/\/x\.example\/home  \(\d+ ms, text\/html\)$/);
+  assert.equal(lines.length, 4);
+  assert.ok(fetch.calls.every((c) => c.method === "GET"), "redirect hops are GETs");
+  // No url: the current tab.
+  assert.match(await run("browser_check_redirects", {}), /^Redirect chain of https:\/\/site\.example\/page — no redirect, 1 request, \d+ ms in all; final: https:\/\/site\.example\/page \(200\)\.\n  1\. ✓ 200  https:\/\/site\.example\/page  \(\d+ ms, text\/html\)$/);
+  // A loop stops at the second visit and says so.
+  const loop = await run("browser_check_redirects", { url: "https://l.example/a" });
+  assert.match(loop, /^Redirect chain of https:\/\/l\.example\/a — 2 redirects, 2 requests, \d+ ms in all; final: still redirecting to https:\/\/l\.example\/a\.\n/);
+  assert.match(loop, /\n⚠ Loop: https:\/\/l\.example\/a was already visited — the chain never ends\.$/);
+  // max: the default 10, clamped to 20.
+  fetch.calls.length = 0;
+  assert.match(await run("browser_check_redirects", { url: "https://m.example/0" }), /— 10 redirects, 10 requests, \d+ ms in all; final: still redirecting to https:\/\/m\.example\/10\.\n[\s\S]*\n⚠ Stopped after 10 redirects \(the limit\) — still redirecting to https:\/\/m\.example\/10\.$/);
+  assert.equal(fetch.calls.length, 10);
+  assert.match(await run("browser_check_redirects", { url: "https://m.example/0", max: 100 }), /— 20 redirects, 20 requests/);
+  assert.match(await run("browser_check_redirects", { url: "https://m.example/0", max: 1 }), /— 1 redirect, 1 request/);
+  // A dead hop ends the chain as down.
+  assert.match(await run("browser_check_redirects", { url: "https://dead.example/" }), /^Redirect chain of https:\/\/dead\.example\/ — no redirect, 1 request, \d+ ms in all; final: down: Failed to fetch\.\n  1\. ✗ down: Failed to fetch  https:\/\/dead\.example\/  \(\d+ ms\)$/);
+  await assert.rejects(run("browser_check_redirects", { url: "ftp://x.example/" }), /Not an http\(s\) address/);
+});
+
+test("browser_check_redirects: a redirect the browser hides (opaque response) is observed through webRequest, or shown as one hidden hop without it", async () => {
+  const routes = {
+    "https://o.example/": { opaque: true, redirectTo: "https://o.example/final", headers: { "content-type": "text/html" }, hops: [{ url: "https://o.example/", status: 301, location: "https://o.example/mid" }, { url: "https://o.example/mid", status: 302, location: "https://o.example/final" }] },
+  };
+  const plain_ = load({ routes });
+  let lines = (await plain_.run("browser_check_redirects", { url: "https://o.example/" })).split("\n");
+  assert.match(lines[0], /^Redirect chain of https:\/\/o\.example\/ — 1 redirect, 2 requests, \d+ ms in all; final: https:\/\/o\.example\/final \(200\)\.$/);
+  assert.equal(lines[1], "  1. ↪ redirect  https://o.example/  →  https://o.example/final  (0 ms, hidden)");
+  assert.match(lines[2], /^  2\. ✓ 200  https:\/\/o\.example\/final  \(\d+ ms, text\/html\)$/);
+  assert.equal(lines[3], "⚠ The browser hid the intermediate hops; the redirect is shown as one step to the final address.");
+  assert.equal(plain_.fetch.calls.length, 2, "the manual request, then one followed GET");
+  const observed = load({ routes, webRequest: true });
+  lines = (await observed.run("browser_check_redirects", { url: "https://o.example/" })).split("\n");
+  assert.match(lines[0], /^Redirect chain of https:\/\/o\.example\/ — 2 redirects, 3 requests, \d+ ms in all; final: https:\/\/o\.example\/final \(200\)\.$/);
+  assert.match(lines[1], /^  1\. ↪ 301  https:\/\/o\.example\/  →  https:\/\/o\.example\/mid  \(\d+ ms\)$/);
+  assert.match(lines[2], /^  2\. ↪ 302  https:\/\/o\.example\/mid  →  https:\/\/o\.example\/final  \(\d+ ms\)$/);
+  assert.match(lines[3], /^  3\. ✓ 200  https:\/\/o\.example\/final  \(\d+ ms, text\/html\)$/);
+  assert.equal(lines.length, 4, "nothing hidden, no warning");
+  assert.equal(observed.redirectListeners.length, 0, "the listener is removed after the request");
+});
+
+// ── browser_check_headers ──────────────────────────────────────────────────
+
+const GOOD_HEADERS = {
+  server: "nginx", "content-type": "text/html; charset=utf-8", "content-encoding": "br",
+  "cache-control": "max-age=600, must-revalidate", etag: '"abc"', "last-modified": "Tue, 01 Oct 2026 10:00:00 GMT",
+  "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+  "content-security-policy": "default-src 'self'; frame-ancestors 'none'",
+  "x-content-type-options": "nosniff", "referrer-policy": "strict-origin-when-cross-origin", "permissions-policy": "camera=(), microphone=()",
+};
+const HEADER_NAMES = ["server", "content-type", "compression", "caching", "strict-transport-security", "content-security-policy", "frame protection", "x-content-type-options", "referrer-policy", "permissions-policy", "cookies", "http version"];
+
+test("headerFindings: a well-configured https response passes everything, the 7 security entries are marked; the bad http response trips every warning", () => {
+  const { X } = load();
+  const f = plain(X.headerFindings(GOOD_HEADERS, "https://site.example/", { cookies: [{ secure: true, httpOnly: true, sameSite: "Lax" }], cookieSource: "set by this response", protocol: "h2" }));
+  assert.deepEqual(f.map((x) => x.name), HEADER_NAMES);
+  assert.ok(f.every((x) => x.ok), JSON.stringify(f.filter((x) => !x.ok)));
+  assert.deepEqual(f.map((x) => x.security), [false, false, false, false, true, true, true, true, true, true, true, false]);
+  assert.deepEqual(f.map((x) => x.detail), [
+    "nginx",
+    "text/html; charset=utf-8",
+    "content-encoding br",
+    "cache-control max-age=600, must-revalidate; validators: etag, last-modified",
+    "max-age 31536000 (365 days), includeSubDomains, preload",
+    "present, " + GOOD_HEADERS["content-security-policy"].length + " chars",
+    "CSP frame-ancestors 'none'",
+    "nosniff",
+    "strict-origin-when-cross-origin",
+    "present, 24 chars",
+    "1 cookie set by this response: Secure 1, HttpOnly 1, SameSite Lax 1 / Strict 0 / None 0 / unset 0",
+    "HTTP/2",
+  ]);
+  const bad = plain(X.headerFindings(
+    { Server: "Apache/2.4.41 (Ubuntu)", "X-Powered-By": "PHP/7.4", "Content-Type": "text/html", "Content-Security-Policy-Report-Only": "default-src 'self'", "Feature-Policy": "camera 'none'" },
+    "http://site.example/",
+    { cookies: [{ secure: false, httpOnly: false, sameSite: "" }, { secure: false, httpOnly: true, sameSite: "None" }], cookieSource: "stored for this address", protocol: "http/1.1" }
+  ));
+  assert.deepEqual(bad.filter((x) => x.ok).map((x) => x.name), ["http version"], "header names are matched regardless of case");
+  assert.deepEqual(bad.map((x) => x.detail), [
+    "Apache/2.4.41 (Ubuntu); x-powered-by PHP/7.4 — drop it, it advertises the stack",
+    "text/html — no charset declared, add ; charset=utf-8",
+    "none — enable gzip or brotli for text/html",
+    "no cache-control or expires — browsers guess the lifetime",
+    "missing (the address is http — serve it over https first)",
+    "report-only (18 chars) — not enforced",
+    "missing — add x-frame-options: DENY or CSP frame-ancestors (clickjacking)",
+    "missing — add nosniff",
+    "missing — e.g. strict-origin-when-cross-origin",
+    "only the legacy feature-policy — add permissions-policy",
+    "2 cookies stored for this address: Secure 0, HttpOnly 1, SameSite Lax 0 / Strict 0 / None 1 / unset 1 — 1 without SameSite, SameSite=None needs Secure",
+    "HTTP/1.1",
+  ]);
+});
+
+test("headerFindings: the in-between cases — no headers at all, a short HSTS, unsafe-inline, x-frame-options, expires only, an image, cookies without Secure on https", () => {
+  const { X } = load();
+  const none = plain(X.headerFindings({}, "https://site.example/"));
+  assert.deepEqual(none.map((x) => [x.ok, x.detail]), [
+    [true, "not disclosed"],
+    [false, "missing"],
+    [true, "none (not a text type, fine)"],
+    [false, "no cache-control or expires — browsers guess the lifetime"],
+    [false, "missing — add max-age=31536000; includeSubDomains"],
+    [false, "missing"],
+    [false, "missing — add x-frame-options: DENY or CSP frame-ancestors (clickjacking)"],
+    [false, "missing — add nosniff"],
+    [false, "missing — e.g. strict-origin-when-cross-origin"],
+    [false, "missing — e.g. camera=(), microphone=(), geolocation=()"],
+    [true, "none set by this response"],
+    [true, "not exposed"],
+  ]);
+  const mixed = plain(X.headerFindings(
+    { "strict-transport-security": "max-age=86400", "content-security-policy": "default-src 'self' 'unsafe-inline' 'unsafe-eval'", "x-frame-options": "SAMEORIGIN", expires: "Thu, 01 Jan 2027 00:00:00 GMT", "content-type": "image/png", "content-encoding": "" },
+    "https://site.example/a.png",
+    { cookies: [{ secure: false, httpOnly: true, sameSite: "Strict" }, { secure: true, httpOnly: false, sameSite: "Lax" }], cookieSource: "stored for this address", protocol: "h3" }
+  ));
+  assert.deepEqual([mixed[1].ok, mixed[1].detail], [true, "image/png"]);
+  assert.deepEqual([mixed[2].ok, mixed[2].detail], [true, "none (not a text type, fine)"]);
+  assert.deepEqual([mixed[3].ok, mixed[3].detail], [true, "expires Thu, 01 Jan 2027 00:00:00 GMT (no cache-control); no etag or last-modified — add one so revalidation is cheap"]);
+  assert.deepEqual([mixed[4].ok, mixed[4].detail], [false, "max-age 86400 (1 day, short — aim for a year)"]);
+  assert.deepEqual([mixed[5].ok, mixed[5].detail], [true, "present, 48 chars, allows 'unsafe-inline', allows 'unsafe-eval'"]);
+  assert.deepEqual([mixed[6].ok, mixed[6].detail], [true, "x-frame-options SAMEORIGIN"]);
+  assert.deepEqual([mixed[10].ok, mixed[10].detail], [false, "2 cookies stored for this address: Secure 1, HttpOnly 1, SameSite Lax 1 / Strict 1 / None 0 / unset 0 — 1 without Secure"]);
+  assert.equal(mixed[11].detail, "HTTP/3");
+  assert.equal(plain(X.headerFindings({ "content-type": "application/json" }, "https://api.example/"))[2].detail, "none — enable gzip or brotli for application/json");
+  assert.equal(plain(X.headerFindings({ "cache-control": "no-store" }, "https://x.example/"))[3].detail, "cache-control no-store; no etag or last-modified — add one so revalidation is cheap");
+  assert.equal(plain(X.headerFindings({}, "https://x.example/", { cookies: [], cookieSource: "stored for this address" }))[10].detail, "none stored for this address");
+  // The cookie flag parsers: names and values never come through.
+  assert.deepEqual(plain(X.cookieFlags(["sid=secret123; Path=/; Secure; HttpOnly; SameSite=Lax", "t=1", "u=2; samesite=none; secure"])), [
+    { secure: true, httpOnly: true, sameSite: "Lax" }, { secure: false, httpOnly: false, sameSite: "" }, { secure: true, httpOnly: false, sameSite: "None" },
+  ]);
+  assert.deepEqual(plain(X.storedCookieFlags([{ name: "a", value: "v", secure: true, httpOnly: false, sameSite: "no_restriction" }, { sameSite: "lax" }, { sameSite: "unspecified", httpOnly: true }])), [
+    { secure: true, httpOnly: false, sameSite: "None" }, { secure: false, httpOnly: false, sameSite: "Lax" }, { secure: false, httpOnly: true, sameSite: "" },
+  ]);
+  assert.ok(!JSON.stringify(X.cookieFlags(["sid=secret123; Secure"])).includes("secret123"));
+});
+
+test("browser_check_headers: one GET, the report with the security count; Set-Cookie when readable, else the cookies stored for the address; a redirect, a dead address, bad input", async () => {
+  const routes = {
+    "https://site.example/page": { headers: GOOD_HEADERS, setCookie: ["a=1; Secure; HttpOnly; SameSite=Lax", "b=2; Secure; SameSite=Strict"] },
+    "https://site.example/other": { headers: { ...GOOD_HEADERS, "content-security-policy": undefined, "x-frame-options": "DENY" } },
+    "https://r.example/": { redirectTo: "https://r.example/home", headers: { "content-type": "text/plain" } },
+    "https://dead.example/": { fail: true },
+  };
+  delete routes["https://site.example/other"].headers["content-security-policy"];
+  const { run, fetch, cookieCalls } = load({ routes, cookies: [{ name: "s", value: "x", secure: false, httpOnly: false, sameSite: "unspecified" }] });
+  let lines = (await run("browser_check_headers", {})).split("\n");
+  assert.deepEqual(fetch.calls, [{ url: "https://site.example/page", method: "GET" }], "the current tab, one GET");
+  assert.match(lines[0], /^Response headers of https:\/\/site\.example\/page — HTTP 200, \d+ ms — security headers 7\/7; 12 checks: 12 ok, 0 warnings\.$/);
+  assert.equal(lines.length, 13);
+  assert.equal(lines[11], "✓ cookies: 2 cookies set by this response: Secure 2, HttpOnly 1, SameSite Lax 1 / Strict 1 / None 0 / unset 0");
+  assert.equal(lines[12], "✓ http version: not exposed");
+  assert.deepEqual(cookieCalls, [], "Set-Cookie was readable — the cookie store is not consulted");
+  // No Set-Cookie exposed (the browser case): the stored cookies, flags only.
+  lines = (await run("browser_check_headers", { url: "https://site.example/other" })).split("\n");
+  assert.deepEqual(cookieCalls, [{ url: "https://site.example/other" }]);
+  assert.match(lines[0], /security headers 5\/7; 12 checks: 10 ok, 2 warnings\.$/);
+  assert.equal(lines[6], "⚠ content-security-policy: missing");
+  assert.equal(lines[7], "✓ frame protection: x-frame-options DENY");
+  assert.equal(lines[11], "⚠ cookies: 1 cookie stored for this address: Secure 0, HttpOnly 0, SameSite Lax 0 / Strict 0 / None 0 / unset 1 — 1 without Secure, 1 without SameSite");
+  assert.ok(!lines.join("\n").includes("value"), "no cookie value in the report");
+  // A redirect is followed and named; the stored cookie (no Secure, no SameSite) costs the seventh security point.
+  assert.match(await run("browser_check_headers", { url: "r.example" }), /^Response headers of https:\/\/r\.example\/home — HTTP 200 \(after redirect from https:\/\/r\.example\/\), \d+ ms — security headers 0\/7; 12 checks: 2 ok, 10 warnings\.\n/);
+  await assert.rejects(run("browser_check_headers", { url: "https://dead.example/" }), /No response from https:\/\/dead\.example\/: Failed to fetch/);
+  await assert.rejects(run("browser_check_headers", { url: "javascript:alert(1)" }), /Not an http\(s\) address/);
+  // A build without chrome.cookies: the cookie line stays neutral.
+  const bare = load({ routes });
+  assert.match(await bare.run("browser_check_headers", { url: "https://site.example/other" }), /\n✓ cookies: none set by this response\n/);
 });

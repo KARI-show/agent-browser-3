@@ -1,7 +1,8 @@
-// Fakes for unit-testing the Quill extras (tests/rewrite.test.mjs, tests/snippets.test.mjs) in node: a chrome with
-// storage.local / tabs / scripting (executeScript answers by the injected function's name), the
-// AgentBrowserTools registry with its helpers and run(), an AgentExtras registry, the brand flag,
-// and a tiny DOM stand-in for the 🧩 tab's ctx.el. Same approach as tests/automation.test.mjs.
+// Fakes for unit-testing the Quill extras (tests/rewrite.test.mjs, tests/snippets.test.mjs,
+// tests/autofill.test.mjs, tests/forms.test.mjs) in node: a chrome with storage.local / tabs / scripting
+// (executeScript answers by the injected function's name), the AgentBrowserTools registry with its
+// helpers and run(), an AgentExtras registry, the brand flag, and a tiny DOM stand-in for the 🧩 tab's
+// ctx.el. Same approach as tests/automation.test.mjs.
 import fs from "node:fs";
 import vm from "node:vm";
 import { fileURLToPath } from "node:url";
@@ -142,22 +143,26 @@ export function fakeCtx(dom) {
 
 /**
  * Load browser/extras/<id>.js in a vm against the fakes. `features` is the brand's feature map
- * (default: only this extra on). Returns the fakes, the tab and the commands the module added.
+ * (default: this extra and its `deps` on); `deps` are the extras run first in the same context, the
+ * way extras.js concatenates them (forms.js reads AgentExtras.autofill). Returns the fakes, the tab
+ * and the commands the modules added (the deps' commands come first).
  */
-export function loadExtra(id, { features } = {}) {
+export function loadExtra(id, { features, deps = [] } = {}) {
   const f = fakeChrome();
   const T = fakeTools(f.chrome);
   const AgentExtras = { tabs: [], commands: [] };
-  const feats = features || { [id]: true };
+  const feats = features || Object.fromEntries([...deps, id].map((d) => [d, true]));
   const AGENT_BRAND = { shortName: "Test", features: feats, has: (x) => feats[x] === true };
   const copied = [];
   const context = vm.createContext({
-    chrome: f.chrome, AgentBrowserTools: T, AgentExtras, AGENT_BRAND, console, setTimeout, clearTimeout,
+    chrome: f.chrome, AgentBrowserTools: T, AgentExtras, AGENT_BRAND, console, setTimeout, clearTimeout, URL,
     confirm: () => true,
     navigator: { clipboard: { async writeText(t) { copied.push(t); } } },
   });
-  const file = fileURLToPath(new URL(`../../browser/extras/${id}.js`, import.meta.url));
-  vm.runInContext(fs.readFileSync(file, "utf8"), context, { filename: `${id}.js` });
+  for (const mod of [...deps, id]) {
+    const file = fileURLToPath(new URL(`../../browser/extras/${mod}.js`, import.meta.url));
+    vm.runInContext(fs.readFileSync(file, "utf8"), context, { filename: `${mod}.js` });
+  }
   const tab = AgentExtras.tabs.find((t) => t.id === id);
   return { ...f, T, AgentExtras, X: AgentExtras[id], tab, commands: AgentExtras.commands, copied, context };
 }

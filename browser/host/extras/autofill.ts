@@ -12,7 +12,8 @@ export const autofill: ExtraFeature = {
   id: "autofill",
   prompt: `## Autofill
 - Identities are the user's own details saved for forms (browser_autofill_save, e.g. "remember my details: …" or the values they typed into a form, as key → value such as firstName, email, phone, company, address, city, zip, country). Save one when the user asks to remember their details; browser_autofill_list shows what is saved. Never save or fill passwords, PINs, card numbers or other secrets — the save tool refuses such keys, and a secret stays with the user.
-- To fill a form: browser_autofill_apply with the identity's name (or id) matches the page's fields by their labels and attributes and fills them, selects included, without touching fields that already hold a value (overwrite=true changes that) and without submitting anything. Use dryRun=true to show the plan first when the form is long or the match is unsure. Then say what was filled and what was not — the user checks the form and fills the rest (or you type it with browser_type), and only the user submits.`,
+- To fill a form: browser_autofill_apply with the identity's name (or id) matches the page's fields by their labels and attributes and fills them, selects included, without touching fields that already hold a value (overwrite=true changes that) and without submitting anything. Use dryRun=true to show the plan first when the form is long or the match is unsure. Then say what was filled and what was not — the user checks the form and fills the rest (or you type it with browser_type), and only the user submits.
+- browser_autofill_from_page builds an identity from what the user already typed into the page's form (the fields it recognises — name, email, phone, address…; never passwords, card numbers or other secrets) and saves it under a name, merging into an existing identity of that name unless merge=false. Use it for "remember what I entered here"; tell the user which values were kept and which fields were not.`,
   tools: [
     {
       name: "browser_autofill_save",
@@ -63,6 +64,23 @@ export const autofill: ExtraFeature = {
       shape: {
         name: z.string().optional().describe("Identity name"),
         id: z.string().optional().describe("Or its id"),
+      },
+    },
+    {
+      name: "browser_autofill_from_page",
+      feature: "autofill",
+      readOnly: false,
+      description:
+        "Save an identity from the values the user already typed into the current page's form (all frames): " +
+        "each filled field is mapped to an identity key by its label, name, placeholder and autocomplete " +
+        "attribute (first name, email, phone, company, address, city, zip, country…); fields that match no " +
+        "key are listed as not kept, and password fields or anything that looks like a card number, CVV, " +
+        "IBAN, SSN or other secret is never kept. Merges into an existing identity of that name (merge=true, " +
+        "the default) or replaces its fields (merge=false). Returns the keys kept with their values and what " +
+        "was skipped.",
+      shape: {
+        name: z.string().describe("Identity name to save under, e.g. 'Personal' or 'Work'"),
+        merge: z.boolean().optional().describe("Merge into an existing identity of that name (default true); false replaces its fields"),
       },
     },
   ],

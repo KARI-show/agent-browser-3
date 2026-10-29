@@ -1,6 +1,7 @@
 // Extra feature "snippets" (side panel): texts the user saved — a signature, a standard reply, an
 // address, a form answer — inserted into forms and editors, with {{placeholders}} filled at insert
-// time, and edited in place (browser_snippet_update keeps the id and the history). Stored in
+// time, and edited in place (browser_snippet_update keeps the id and the history); browser_snippet_export
+// and browser_snippet_import move them as an agent-snippets/1 JSON envelope, merged by name. Stored in
 // chrome.storage.local under one key (capped). Built into extras.js only for brands that switch the
 // feature on; the tools are declared in browser/host/extras/snippets.ts. Also adds the ✂️ Snippets
 // tab of the 🧩 panel and two "Writing" quick commands.
@@ -17,6 +18,8 @@
   var MAX = 200; // snippets kept
   var MAX_TEXT = 20000; // characters per snippet
   var PLACEHOLDER = /\{\{\s*([\w.-]+)\s*\}\}/g;
+  var FORMAT = "agent-snippets/1"; // the export envelope's format tag
+  var MAX_NAMES = 10; // names listed per bucket in the import report
 
   // ── Pure helpers ─────────────────────────────────────────────────────────
 
@@ -100,6 +103,87 @@
     var id;
     do { id = "snp_" + Math.random().toString(36).slice(2, 8); } while (list.some(function (s) { return s.id === id; }));
     return id;
+  }
+
+  // ── Export and import (pure) ─────────────────────────────────────────────
+
+  /** The export envelope of a list (optionally one tag), sorted by name: { format, exported, snippets: [{ name, text, tags, created, updated }] }. */
+  function exportSnippets(list, tag, now) {
+    tag = String(tag || "").trim().toLowerCase().replace(/^#/, "");
+    var items = (tag ? list.filter(function (s) { return (s.tags || []).indexOf(tag) !== -1; }) : list.slice()).sort(function (a, b) { return a.name.localeCompare(b.name); });
+    return {
+      format: FORMAT,
+      exported: new Date(now || Date.now()).toISOString(),
+      snippets: items.map(function (s) { return { name: s.name, text: s.text, tags: s.tags || [], created: s.created, updated: s.updated }; }),
+    };
+  }
+
+  /**
+   * The snippets in an import text → { snippets: [{ name, text, tags, created }], invalid: ["#3 ('x'): no text", …] }.
+   * Takes the agent-snippets/1 envelope or a bare array; a text that is not one, or holds no valid entry, throws.
+   */
+  function parseImport(json) {
+    if (typeof json !== "string" || !json.trim()) throw new Error("json is required — the text browser_snippet_export produced.");
+    var data;
+    try { data = JSON.parse(json); } catch (e) { throw new Error("The JSON could not be parsed: " + String((e && e.message) || e) + "."); }
+    var arr = Array.isArray(data) ? data : data && typeof data === "object" && Array.isArray(data.snippets) ? data.snippets : null;
+    if (!arr) throw new Error("Expected an " + FORMAT + " envelope ({ format, snippets: [...] }) or an array of { name, text, tags }.");
+    if (!Array.isArray(data) && data.format != null && String(data.format).indexOf("agent-snippets/") !== 0) throw new Error("Unknown format '" + String(data.format) + "' — not a snippets export.");
+    var out = [], invalid = [];
+    arr.forEach(function (e, i) {
+      var n = "#" + (i + 1);
+      if (!e || typeof e !== "object" || Array.isArray(e)) { invalid.push(n + ": not an object"); return; }
+      var name = String(e.name == null ? "" : e.name).replace(/\s+/g, " ").trim().slice(0, 60);
+      if (!name) { invalid.push(n + ": no name"); return; }
+      var body = typeof e.text === "string" ? e.text : "";
+      if (!body.trim()) { invalid.push(n + " ('" + name + "'): no text"); return; }
+      if (body.length > MAX_TEXT) { invalid.push(n + " ('" + name + "'): text too long (" + body.length + " chars; the limit is " + MAX_TEXT + ")"); return; }
+      out.push({ name: name, text: body, tags: normTags(e.tags), created: typeof e.created === "number" && e.created > 0 ? e.created : undefined });
+    });
+    if (!out.length) throw new Error("Nothing to import: " + (arr.length ? "none of the " + arr.length + " entries is valid (" + invalid.join("; ") + ")." : "the list is empty."));
+    return { snippets: out, invalid: invalid };
+  }
+
+  /**
+   * Merge imported snippets into a list by name (case-insensitive) → { list, added, replaced, skipped, overLimit }
+   * (names). A name already there is skipped, or with opts.replace its text and tags are overwritten (id, creation
+   * date and use count stay); new ones get a fresh id and opts.now (or their own creation date) and fill the list
+   * up to MAX — the rest is overLimit. The lists are never mutated.
+   */
+  function mergeSnippets(existing, imported, opts) {
+    opts = opts || {};
+    var now = opts.now || Date.now();
+    var list = (existing || []).slice();
+    var added = [], replaced = [], skipped = [], overLimit = [];
+    (imported || []).forEach(function (s) {
+      var i = -1;
+      list.forEach(function (x, k) { if (i === -1 && x.name.toLowerCase() === s.name.toLowerCase()) i = k; });
+      if (i !== -1) {
+        if (opts.replace !== true) { skipped.push(list[i].name); return; }
+        list[i] = Object.assign({}, list[i], { name: s.name, text: s.text, tags: s.tags || [], updated: now });
+        replaced.push(s.name);
+        return;
+      }
+      if (list.length >= MAX) { overLimit.push(s.name); return; }
+      list.push({ id: newId(list), name: s.name, text: s.text, tags: s.tags || [], created: s.created || now, updated: now, uses: 0 });
+      added.push(s.name);
+    });
+    return { list: list, added: added, replaced: replaced, skipped: skipped, overLimit: overLimit };
+  }
+
+  function nameList(names) {
+    return names.slice(0, MAX_NAMES).map(function (n) { return "'" + n + "'"; }).join(", ") + (names.length > MAX_NAMES ? " … (" + names.length + " in all)" : "");
+  }
+  /** The browser_snippet_import report for a parse result and a merge result. */
+  function formatImport(p, m) {
+    var parts = [];
+    if (m.added.length) parts.push("added " + m.added.length + " (" + nameList(m.added) + ")");
+    if (m.replaced.length) parts.push("replaced " + m.replaced.length + " (" + nameList(m.replaced) + ")");
+    if (m.skipped.length) parts.push("skipped " + m.skipped.length + " already saved (" + nameList(m.skipped) + " — pass replace=true to overwrite them)");
+    if (m.overLimit.length) parts.push("not imported, the limit of " + MAX + " is reached (" + nameList(m.overLimit) + ")");
+    var out = "Imported " + (m.added.length + m.replaced.length) + " of " + p.snippets.length + " snippet" + (p.snippets.length === 1 ? "" : "s") + ": " + parts.join("; ") + ".";
+    if (p.invalid.length) out += "\nLeft out as invalid: " + p.invalid.join("; ") + ".";
+    return out + "\n" + m.list.length + " snippet" + (m.list.length === 1 ? "" : "s") + " saved now.";
   }
 
   /** Save (or replace, by name) a snippet → { snippet, replaced }. */
@@ -311,6 +395,22 @@
     return text("Deleted snippet '" + s.name + "'.");
   });
 
+  T.register("browser_snippet_export", async function (a) {
+    var tag = a && a.tag ? String(a.tag).trim() : "";
+    var env = exportSnippets(await load(), tag);
+    var n = env.snippets.length;
+    if (!n) return text(tag ? "No snippets tagged '" + tag.replace(/^#/, "") + "' — nothing to export." : "No snippets saved yet — nothing to export.");
+    return text("Exported " + n + " snippet" + (n === 1 ? "" : "s") + (tag ? " tagged '" + tag.replace(/^#/, "") + "'" : "") + " as " + FORMAT + " JSON — keep it as a file; browser_snippet_import brings it back:\n" + JSON.stringify(env, null, 2));
+  });
+
+  T.register("browser_snippet_import", async function (a) {
+    a = a || {};
+    var p = parseImport(a.json);
+    var m = mergeSnippets(await load(), p.snippets, { replace: a.replace === true, now: Date.now() });
+    if (m.added.length || m.replaced.length) await store(m.list);
+    return text(formatImport(p, m));
+  });
+
   // ── The ✂️ Snippets tab ──────────────────────────────────────────────────
 
   function item(el, icon, name, desc, onclick) {
@@ -439,5 +539,10 @@
     insertSnippet: insertSnippet,
     pageInsertAtCaret: pageInsertAtCaret,
     pageSelectedText: pageSelectedText,
+    FORMAT: FORMAT,
+    exportSnippets: exportSnippets,
+    parseImport: parseImport,
+    mergeSnippets: mergeSnippets,
+    formatImport: formatImport,
   };
 })();

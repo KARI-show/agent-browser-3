@@ -1,5 +1,6 @@
 // Fakes for unit-testing the Stencil extras (tests/elements.test.mjs, tests/overlay.test.mjs) in node:
-// a chrome with storage.local (promise and callback forms, onChanged) / tabs / windows (get, update recorded) / scripting (executeScript
+// a chrome with storage.local (promise and callback forms, onChanged) / tabs (captureVisibleTab answers a fake data URL and
+// records the call) / windows (get, update recorded) / downloads (recorded) / scripting (executeScript
 // answers by the injected function's name, or records a file injection; content-script registration is
 // recorded), the AgentBrowserTools registry with its helpers (refTarget included) and run(), an
 // AgentExtras registry, the brand flag — and a small DOM: enough of the DOM API (createElement, template
@@ -20,6 +21,10 @@ export function fakeChrome() {
   const listeners = [];
   // scripting.results[funcName] = value | (…args) => value — what the injected function "returns".
   const scripting = { results: {}, calls: [], files: [], registered: [] };
+  // captures = [{ windowId, options }] of captureVisibleTab; chrome.tabs.capture(n) gives its n-th answer — a fake data URL whose
+  // "FAKE:<w>x<h>" fakeCanvas()'s Image reads as the image's size. downloads.calls = [{ url, filename, conflictAction }].
+  const captures = [];
+  const downloads = { calls: [], fail: null, nextId: 41 };
   const chrome = {
     storage: {
       local: {
@@ -45,6 +50,17 @@ export function fakeChrome() {
       current: { id: 7, url: "https://www.example.com/page", title: "Example", windowId: 1, active: true },
       async query() { return [chrome.tabs.current]; },
       async get(id) { return { ...chrome.tabs.current, id }; },
+      async update(id, info) { Object.assign(chrome.tabs.current, info); return plain(chrome.tabs.current); },
+      captures,
+      capture: () => "data:image/png;base64,FAKE:1600x1000",
+      async captureVisibleTab(windowId, options) { captures.push({ windowId, options: plain(options || {}) }); return chrome.tabs.capture(captures.length); },
+    },
+    downloads: {
+      async download(o) {
+        downloads.calls.push(plain(o));
+        if (downloads.fail) throw new Error(downloads.fail);
+        return downloads.nextId++;
+      },
     },
     // windows.list[id] is the window as chrome.windows.get returns it; update() changes it in place and records the call.
     windows: {
@@ -70,7 +86,7 @@ export function fakeChrome() {
     },
     runtime: { getURL: (p) => "chrome-extension://abc/" + p },
   };
-  return { chrome, data, scripting, listeners };
+  return { chrome, data, scripting, listeners, captures, downloads };
 }
 
 /** AgentBrowserTools as browserTools.js exposes it to the extras, over the fake chrome. `refs` maps ref → { documentId, local, loc }. */
@@ -481,6 +497,38 @@ export function loadContentScript({ document, hostname = "example.com", chrome, 
   const file = fileURLToPath(new URL("../../browser/extras/elements.cs.js", import.meta.url));
   vm.runInContext(fs.readFileSync(file, "utf8"), context, { filename: "elements.cs.js" });
   return { ...f, context, document: doc, cs: () => sandbox.__agentElementsCS };
+}
+
+// ── Canvas and Image of the panel page, for the capture tools ─────────────
+
+/**
+ * Give a loaded module (loadExtra's result) an Image that "loads" on the next tick with the size a fake data URL carries
+ * ("FAKE:<w>x<h>" or "CANVAS:<w>x<h>…"; a URL with "bad" fails) and a <canvas> whose 2d context records drawImage calls and
+ * whose toDataURL gives "data:image/png;base64,CANVAS:<w>x<h>:<draws>". Returns the canvases made: [{ width, height, draws }].
+ */
+export function fakeCanvas(m) {
+  const canvases = [];
+  m.context.Image = class FakeImage {
+    set src(v) {
+      this._src = v;
+      const s = /(\d+)x(\d+)/.exec(v);
+      setTimeout(() => {
+        if (!s || /bad/.test(v)) { if (this.onerror) this.onerror(); return; }
+        this.naturalWidth = this.width = Number(s[1]);
+        this.naturalHeight = this.height = Number(s[2]);
+        if (this.onload) this.onload();
+      }, 0);
+    }
+    get src() { return this._src; }
+  };
+  const create = (m.document._createElement = m.document._createElement || m.document.createElement);
+  m.document.createElement = (name) => {
+    if (name !== "canvas") return create(name);
+    const c = { width: 0, height: 0, draws: [], getContext: () => ({ drawImage: (img, ...args) => c.draws.push([img.src, ...args]) }), toDataURL: () => `data:image/png;base64,CANVAS:${c.width}x${c.height}:${c.draws.length}` };
+    canvases.push(c);
+    return c;
+  };
+  return canvases;
 }
 
 // ── The ctx automations.js hands an extra's render() ──────────────────────

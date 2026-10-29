@@ -4,9 +4,13 @@
 // persists like any other override and shows up in the 🎨 tab. Built into extras.js only for brands that
 // switch the feature on (which need "styles" too — browser/brand.mjs FEATURE_REQUIRES); the tools are
 // declared in browser/host/extras/palette.ts. Colour harmonies of an accent (browser_palette_harmony:
-// wheel rotations, tints, shades, each with its contrast) come from the same colour maths. Also adds the
-// 🧪 Palette tab of the 🧩 panel and the "Design" quick commands. styles.js is concatenated before this file (OPT_IN_FEATURES order), so
-// AgentExtras.styles is defined by now.
+// wheel rotations, tints, shades, each with its contrast) come from the same colour maths, as do the
+// page's design tokens (browser_palette_tokens: the custom properties its stylesheets declare, grouped and
+// counted by use), a recolouring of the page (browser_palette_recolor: the elements near one colour get an
+// override that sets another) and the dominant colours of an image (browser_palette_from_image: drawn on a
+// canvas in the page, median cut). Also adds the 🧪 Palette tab of the 🧩 panel and the "Design" quick
+// commands. styles.js is concatenated before this file (OPT_IN_FEATURES order), so AgentExtras.styles is
+// defined by now.
 //
 // Page-side functions are injected with chrome.scripting.executeScript, so each is self-contained (no
 // closures over this file). The tab's DOM is built with ctx.el, never innerHTML; a swatch is an element
@@ -19,6 +23,11 @@
   var MAX_SAMPLE = 3000; // elements looked at in the top frame
   var THEME_PREFIX = "theme:";
   var HEX = /^#[0-9a-f]{6}$/;
+  var MAX_TOKENS = 400; // custom properties collected from the page's stylesheets
+  var TOP_TOKENS = 40; // the ones reported, most used first
+  var MAX_SELECTORS = 60; // selectors a recolour override may carry
+  var IMAGE_SIDE = 64; // an image is read at most this many px on its long side (≤ 4 096 pixels)
+  var STALE = "That element is gone — the page changed. Call browser_read_page again.";
 
   function S() {
     var s = globalThis.AgentExtras && globalThis.AgentExtras.styles;
@@ -297,6 +306,215 @@
       st.n++;
     }
     return { url: location.href, total: total, checked: checked, styles: Object.keys(styles).map(function (k) { return styles[k]; }) };
+  }
+
+  // The page's design tokens: every custom property declared in a readable stylesheet rule (cross-origin
+  // sheets throw on cssRules and are counted as unreadable) or in the style attribute of <html> / <body>,
+  // with the declared value (the :root / html / body declaration preferred), where it is declared, how many
+  // rules declare it and how many var(--name) uses the readable rules make of it; the value resolved on
+  // :root (then body) where it resolves. Tokens only used (declared in an unreadable sheet) are listed too.
+  function pageTokens(maxTokens) {
+    var decl = {}, order = [], uses = {}, sheets = 0, readable = 0, unreadable = 0, rules = 0, totalUses = 0;
+    var ROOTISH = /^(:root|html|body)(\s*,\s*(:root|html|body))*$/;
+    var VAR_RE = /var\(\s*(--[\w-]+)/g;
+    function sheetName(sheet) {
+      if (!sheet.href) { var o = sheet.ownerNode; return o && o.hasAttribute && o.hasAttribute("data-agent-styles") ? "your override" : "inline <style>"; }
+      try { var u = new URL(sheet.href); var f = u.pathname.split("/").pop() || u.host; return f.length > 40 ? f.slice(0, 37) + "…" : f; } catch (_) { return sheet.href.slice(0, 40); }
+    }
+    function take(style, selector, sheet) {
+      var rootish = ROOTISH.test(selector.trim());
+      for (var k = 0; k < style.length; k++) {
+        var name = style[k];
+        if (name.indexOf("--") !== 0) continue;
+        var d = decl[name];
+        if (!d) { if (order.length >= maxTokens) continue; d = decl[name] = { value: "", selector: "", sheet: "", root: false, decls: 0 }; order.push(name); }
+        d.decls++;
+        if ((rootish && !d.root) || !d.selector) { d.value = (style.getPropertyValue(name) || "").trim().slice(0, 200); d.selector = selector; d.sheet = sheet; d.root = rootish; }
+      }
+      var txt = "", m;
+      try { txt = style.cssText || ""; } catch (_) {}
+      VAR_RE.lastIndex = 0;
+      while ((m = VAR_RE.exec(txt))) { uses[m[1]] = (uses[m[1]] || 0) + 1; totalUses++; }
+    }
+    function walk(list, sheet, depth) {
+      for (var i = 0; i < list.length; i++) {
+        var r = list[i];
+        if (r.style && typeof r.selectorText === "string") { rules++; take(r.style, r.selectorText, sheet); }
+        else if (r.cssRules && depth < 6) walk(r.cssRules, sheet, depth + 1); // @media, @supports, @layer, @container
+      }
+    }
+    for (var s = 0; s < document.styleSheets.length; s++) {
+      var sh = document.styleSheets[s];
+      sheets++;
+      if (sh.disabled) continue;
+      var list;
+      try { list = sh.cssRules; } catch (_) { unreadable++; continue; }
+      if (!list) { unreadable++; continue; }
+      readable++;
+      walk(list, sheetName(sh), 0);
+    }
+    if (document.documentElement.style) take(document.documentElement.style, "html (style attribute)", "inline");
+    if (document.body && document.body.style) take(document.body.style, "body (style attribute)", "inline");
+    var rootCs = getComputedStyle(document.documentElement), bodyCs = document.body ? getComputedStyle(document.body) : null;
+    function resolved(name) { return ((rootCs.getPropertyValue(name) || (bodyCs ? bodyCs.getPropertyValue(name) : "")) || "").trim().slice(0, 200); }
+    var tokens = order.map(function (name) {
+      var d = decl[name];
+      return { name: name, declared: d.value, value: resolved(name), selector: d.selector.length > 80 ? d.selector.slice(0, 77) + "…" : d.selector, sheet: d.sheet, root: d.root, decls: d.decls, uses: uses[name] || 0 };
+    });
+    Object.keys(uses).forEach(function (name) { if (!decl[name] && tokens.length < maxTokens) tokens.push({ name: name, declared: "", value: resolved(name), selector: "", sheet: "", root: false, decls: 0, uses: uses[name] }); });
+    return { url: location.href, tokens: tokens, sheets: sheets, readable: readable, unreadable: unreadable, rules: rules, totalUses: totalUses };
+  }
+
+  // The visible elements of the top frame (sampled evenly when there are more than `maxEls`) whose text
+  // colour (elements with their own text), background colour and/or border colour lie within `tolerance`
+  // of `from` ({ r, g, b }; the distance is sqrt of the summed squared channel differences on a 0–100
+  // scale, 100 = black vs white), grouped under minimal selectors: an id, or the tag with its stable
+  // classes, a semantic bare tag, else the parent's classes + tag. The panel writes the override.
+  function pageRecolor(maxEls, from, tolerance, props, maxSelectors) {
+    var all = document.body ? [document.documentElement, document.body].concat(Array.prototype.slice.call(document.body.querySelectorAll("*"))) : [];
+    var total = all.length;
+    var SKIP = /^(script|style|noscript|template|svg|path|g|use|meta|link|head|br|wbr|title|iframe|object|embed|option)$/;
+    var BARE = /^(html|body|main|header|footer|nav|aside|section|article|h[1-6]|p|li|a|button|label|td|th|input|select|textarea|blockquote|pre|code|small|strong|em|figcaption|summary|legend|caption|hr)$/;
+    function saneId(id) { return !!id && /^[A-Za-z][\w-]{0,40}$/.test(id) && !/\d{3,}|^(ember|react|radix|headlessui|mui|yui|ext|__)/i.test(id); }
+    function stableClass(c) {
+      if (!/^[a-zA-Z][\w-]{0,40}$/.test(c) || /^(css|sc|jsx|emotion|_)-/.test(c)) return false;
+      return !c.split(/[-_]/).some(function (seg) { return seg.length >= 5 && /\d/.test(seg) && /[a-zA-Z]/.test(seg); });
+    }
+    function esc(s) { return window.CSS && CSS.escape ? CSS.escape(s) : String(s).replace(/([^\w-])/g, "\\$1"); }
+    function own(el) { var cls = Array.prototype.filter.call(el.classList, stableClass).map(esc).slice(0, 3); return cls.length ? el.localName + "." + cls.join(".") : ""; }
+    function selectorOf(el) {
+      if (saneId(el.id)) return "#" + esc(el.id);
+      var o = own(el);
+      if (o) return o;
+      if (BARE.test(el.localName)) return el.localName;
+      var p = el.parentElement;
+      if (p) { var po = saneId(p.id) ? "#" + esc(p.id) : own(p); if (po) return po + " > " + el.localName; }
+      return "";
+    }
+    function parse(c) {
+      var m = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+)\s*)?\)$/.exec(c || "");
+      if (!m || (m[4] !== undefined && parseFloat(m[4]) <= 0)) return null;
+      return { r: +m[1], g: +m[2], b: +m[3] };
+    }
+    function hex(c) { return "#" + [c.r, c.g, c.b].map(function (v) { var h = Math.min(255, v).toString(16); return h.length < 2 ? "0" + h : h; }).join(""); }
+    function dist(c) { var dr = c.r - from.r, dg = c.g - from.g, db = c.b - from.b; return Math.sqrt(dr * dr + dg * dg + db * db) * 100 / 441.673; }
+    var want = {};
+    (props || []).forEach(function (p) { want[p] = true; });
+    var bySel = {}, order = [], elements = 0, unselectable = 0, shades = {}, closest = null, scanned = 0;
+    function check(c) {
+      if (!c) return false;
+      var d = dist(c);
+      if (!closest || d < closest.distance) closest = { hex: hex(c), distance: Math.round(d * 10) / 10 };
+      return d <= tolerance;
+    }
+    var step = total > maxEls ? total / maxEls : 1;
+    for (var i = 0; i < total; i += step) {
+      var el = all[Math.floor(i)];
+      if (!el || SKIP.test(el.localName)) continue;
+      var rect = el.getBoundingClientRect();
+      if (rect.width < 1 || rect.height < 1) continue;
+      var cs = getComputedStyle(el);
+      if (cs.visibility === "hidden" || cs.display === "none") continue;
+      scanned++;
+      var hits = [];
+      if (want.color) {
+        var hasText = false;
+        for (var c = el.firstChild; c; c = c.nextSibling) if (c.nodeType === 3 && c.nodeValue.trim()) { hasText = true; break; }
+        var tc = hasText ? parse(cs.color) : null;
+        if (tc && check(tc)) hits.push(["color", hex(tc)]);
+      }
+      if (want.background) { var bc = parse(cs.backgroundColor); if (bc && check(bc)) hits.push(["background", hex(bc)]); }
+      if (want.border) {
+        var seen = {};
+        for (var k = 0; k < 4; k++) {
+          var side = ["Top", "Right", "Bottom", "Left"][k];
+          if (!(parseFloat(cs["border" + side + "Width"]) > 0) || cs["border" + side + "Style"] === "none") continue;
+          var v = cs["border" + side + "Color"];
+          if (seen[v]) continue;
+          seen[v] = 1;
+          var rc = parse(v);
+          if (rc && check(rc)) { hits.push(["border", hex(rc)]); break; }
+        }
+      }
+      if (!hits.length) continue;
+      elements++;
+      hits.forEach(function (h) { shades[h[1]] = (shades[h[1]] || 0) + 1; });
+      var sel = selectorOf(el);
+      if (!sel) { unselectable++; continue; }
+      var e = bySel[sel];
+      if (!e) { e = bySel[sel] = { selector: sel, props: {}, n: 0 }; order.push(sel); }
+      e.n++;
+      hits.forEach(function (h) { e.props[h[0]] = 1; });
+    }
+    var list = order.map(function (s) { return bySel[s]; }).sort(function (a, b) { return b.n - a.n; });
+    var truncated = Math.max(0, list.length - maxSelectors);
+    list = list.slice(0, maxSelectors).map(function (e) { return { selector: e.selector, props: ["color", "background", "border"].filter(function (p) { return e.props[p]; }), n: e.n }; });
+    return { url: location.href, total: total, scanned: scanned, elements: elements, unselectable: unselectable, shades: shades, selectors: list, truncated: truncated, closest: closest };
+  }
+
+  // The pixels of an image on the page: the element behind a ref (window.__agentRefs[local - 1]), a
+  // selector, or — by default — the largest visible <img> or element with a background-image. It is
+  // drawn on a canvas at most `maxSide` px on the long side and read back; a cross-origin image taints
+  // the canvas (getImageData throws a SecurityError), in which case the image is loaded again with
+  // crossOrigin="anonymous" (works when its server sends CORS headers) — otherwise { unreadable, reason }.
+  // Returns a flat [r, g, b, …] array of the opaque pixels, the sizes and the page background.
+  async function pageImagePixels(local, selector, maxSide, maxScan) {
+    function visible(el) { var r = el.getBoundingClientRect(); return r.width >= 2 && r.height >= 2 ? r : null; }
+    function bgUrl(el) { var m = /url\(\s*["']?([^"')]+)["']?\s*\)/.exec(getComputedStyle(el).backgroundImage || ""); return m ? m[1] : ""; }
+    var el = null, how = "";
+    if (local) {
+      el = (window.__agentRefs || [])[local - 1];
+      if (!el || !el.isConnected) return { error: "stale" };
+      how = "ref";
+    } else if (selector) {
+      try { el = document.querySelector(selector); } catch (e) { return { error: "\"" + selector + "\" is not a valid CSS selector: " + String((e && e.message) || e).replace(/^Failed to execute 'querySelector' on 'Document':\s*/, "") }; }
+      if (!el) return { error: "No element matches \"" + selector + "\" on this page (top frame). Check the selector with browser_read_page, or pass a ref." };
+      how = "selector";
+    } else {
+      var best = null, bestArea = 0, imgs = document.images;
+      for (var i = 0; i < imgs.length; i++) { var r = visible(imgs[i]); if (r && imgs[i].complete && imgs[i].naturalWidth > 0 && r.width * r.height > bestArea) { best = imgs[i]; bestArea = r.width * r.height; } }
+      var els = document.body ? document.body.querySelectorAll("*") : [];
+      for (var j = 0; j < els.length && j < maxScan; j++) { var e2 = els[j]; if (e2.localName === "img") continue; var r2 = visible(e2); if (!r2 || r2.width * r2.height <= bestArea) continue; if (bgUrl(e2)) { best = e2; bestArea = r2.width * r2.height; } }
+      if (!best) return { error: "No visible image on this page (no loaded <img> and no element with a background-image) — pass a ref or a selector." };
+      el = best; how = "largest";
+    }
+    if (el.localName === "picture") el = el.querySelector("img") || el;
+    var src = "", source = null, kind = el.localName;
+    if (el.localName === "img") { src = el.currentSrc || el.src || ""; source = el; }
+    else if (el.localName === "canvas" || el.localName === "video") { src = el.currentSrc || el.src || ""; source = el; }
+    else { src = bgUrl(el); if (!src) return { error: "<" + el.localName + "> is not an image and has no background-image — pass an <img> or an element with one." }; kind = "background"; }
+    var rect = el.getBoundingClientRect();
+    var origin = "";
+    try { origin = new URL(src, location.href).origin; } catch (_) {}
+    var info = { tag: el.localName, kind: kind, src: src.slice(0, 300), alt: (el.getAttribute("alt") || el.getAttribute("aria-label") || "").slice(0, 120), shown: { width: Math.round(rect.width), height: Math.round(rect.height) }, how: how, crossOrigin: !!origin && origin !== location.origin && !/^data:|^blob:/.test(src) };
+    function load(url) { return new Promise(function (resolve, reject) { var im = new Image(); im.crossOrigin = "anonymous"; im.onload = function () { resolve(im); }; im.onerror = function () { reject(new Error("the image could not be loaded with CORS")); }; im.src = url; }); }
+    function pixelsOf(img) {
+      var w = img.naturalWidth || img.videoWidth || img.width, h = img.naturalHeight || img.videoHeight || img.height;
+      if (!w || !h) throw new Error("the image has no size yet (not loaded)");
+      var scale = Math.min(1, maxSide / Math.max(w, h));
+      var cw = Math.max(1, Math.round(w * scale)), ch = Math.max(1, Math.round(h * scale));
+      var canvas = document.createElement("canvas");
+      canvas.width = cw; canvas.height = ch;
+      var ctx = canvas.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0, cw, ch);
+      var data = ctx.getImageData(0, 0, cw, ch).data; // SecurityError when the canvas is tainted
+      var px = [], skipped = 0;
+      for (var p = 0; p < data.length; p += 4) { if (data[p + 3] < 128) { skipped++; continue; } px.push(data[p], data[p + 1], data[p + 2]); }
+      return { pixels: px, natural: { width: w, height: h }, sampled: { width: cw, height: ch }, transparent: skipped };
+    }
+    var result = null, tainted = false, loadError = "";
+    if (source && (source.localName !== "img" || (source.complete && source.naturalWidth > 0))) {
+      try { result = pixelsOf(source); } catch (e) { if (e && e.name === "SecurityError") tainted = true; else loadError = String((e && e.message) || e); }
+    }
+    if (!result && src && !/^blob:/.test(src)) {
+      try { result = pixelsOf(await load(src)); } catch (e) { if (e && e.name === "SecurityError") tainted = true; else loadError = loadError || String((e && e.message) || e); }
+    }
+    var bodyCs = document.body ? getComputedStyle(document.body) : null;
+    var bg = bodyCs && bodyCs.backgroundColor && bodyCs.backgroundColor !== "rgba(0, 0, 0, 0)" ? bodyCs.backgroundColor : getComputedStyle(document.documentElement).backgroundColor;
+    info.pageBg = bg;
+    if (!result) { info.unreadable = true; info.reason = tainted ? "tainted" : info.crossOrigin && /CORS/.test(loadError) ? "cors" : "load"; info.loadError = loadError; return info; }
+    info.pixels = result.pixels; info.natural = result.natural; info.sampled = result.sampled; info.transparent = result.transparent;
+    return info;
   }
 
   // ── The summary (pure) ───────────────────────────────────────────────────
@@ -614,6 +832,208 @@
     return lines.join("\n");
   }
 
+
+  // ── Design tokens, recolouring, image colours (pure) ─────────────────────
+
+  var LENGTH_UNIT = "(?:px|r?em|%|vw|vh|vmin|vmax|ch|ex|pt|pc|cm|mm|in|q|svh|lvh|dvh|svw|lvw|dvw|cqw|cqh|lh|rlh|fr)";
+  var ONE_LENGTH = new RegExp("^-?(?:\\d+\\.?\\d*|\\.\\d+)" + LENGTH_UNIT + "$|^0$", "i");
+  var FAMILY_LIST = /^(?:"[^"]*"|'[^']*'|[-\w][-\w ]*)(?:\s*,\s*(?:"[^"]*"|'[^']*'|[-\w][-\w ]*))*$/;
+  var GENERIC_FAMILY = /\b(serif|sans-serif|monospace|system-ui|ui-sans-serif|ui-serif|ui-monospace|ui-rounded|cursive|fantasy|emoji|math|fangsong)\b/i;
+  /** What a token's value looks like → "colour" | "length" | "font" | "other" (the name settles a bare family or weight). */
+  function tokenKind(name, value) {
+    var v = String(value == null ? "" : value).trim(), n = String(name == null ? "" : name).toLowerCase();
+    if (!v) return "other";
+    if (normalizeColor(v) || /^(rgba?|hsla?|hwb|lab|lch|oklab|oklch|color|color-mix|light-dark)\(/i.test(v)) return "colour";
+    if (v.split(/\s+/).every(function (p) { return ONE_LENGTH.test(p); })) return "length";
+    if (/^(calc|clamp|min|max)\(/i.test(v) && new RegExp("\\d" + LENGTH_UNIT + "\\b", "i").test(v) && !/,\s*(rgba?|hsla?|#)/i.test(v)) return "length";
+    if (FAMILY_LIST.test(v) && (v.indexOf(",") !== -1 || GENERIC_FAMILY.test(v) || /font|family|typeface/.test(n)) && !/^(none|auto|inherit|initial|unset|normal|solid|dashed|dotted|block|flex|grid)$/i.test(v)) return "font";
+    if (/^[1-9]00$/.test(v) && /weight/.test(n)) return "font";
+    if (/^(bold|bolder|lighter|italic|oblique|small-caps)$/i.test(v)) return "font";
+    return "other";
+  }
+  /** Tokens by what they look like → { colour, length, font, other }: each a copy with `kind` (and `hex` for a colour), the input order kept. */
+  function groupTokens(list) {
+    var groups = { colour: [], length: [], font: [], other: [] };
+    (list || []).forEach(function (t) {
+      var value = t.value || t.declared || "";
+      var kind = tokenKind(t.name, value) === "other" && t.declared && t.declared !== value ? tokenKind(t.name, t.declared) : tokenKind(t.name, value);
+      var copy = {};
+      Object.keys(t).forEach(function (k) { copy[k] = t[k]; });
+      copy.kind = kind;
+      if (kind === "colour") copy.hex = normalizeColor(value) || null;
+      groups[kind].push(copy);
+    });
+    return groups;
+  }
+  /** Most used first (then most declared, then by name). */
+  function rankTokens(list) {
+    return (list || []).slice().sort(function (a, b) { return (b.uses || 0) - (a.uses || 0) || (b.decls || 0) - (a.decls || 0) || String(a.name).localeCompare(String(b.name)); });
+  }
+  function tokenLine(t) {
+    var value = t.value || t.declared || "(empty)";
+    var s = t.name + ": " + (t.declared && t.value && t.declared !== t.value ? t.declared + " → " + value : value);
+    if (t.kind === "colour" && t.hex && t.hex !== value.toLowerCase()) s += " (" + t.hex + ")";
+    s += "  ×" + fmtN(t.uses || 0) + " use" + (t.uses === 1 ? "" : "s");
+    if (t.selector) s += "  (" + t.selector + (t.sheet ? ", " + t.sheet : "") + (t.decls > 1 ? ", " + t.decls + " declarations" : "") + ")";
+    else s += "  (declared in a stylesheet that could not be read)";
+    return s;
+  }
+  /** The browser_palette_tokens report: the top tokens by use in four groups, how to change one. */
+  function formatTokens(raw, filter) {
+    raw = raw || {};
+    var host = hostOfUrl(raw.url) || "this page";
+    var all = raw.tokens || [], q = String(filter || "").trim().toLowerCase();
+    var list = q ? all.filter(function (t) { return String(t.name).toLowerCase().indexOf(q) !== -1; }) : all;
+    var unread = raw.unreadable ? raw.unreadable + " cross-origin stylesheet" + (raw.unreadable === 1 ? "" : "s") + " could not be read (tokens declared or used there are not counted)" : "";
+    var sheetsWords = (raw.readable || 0) + " readable stylesheet" + (raw.readable === 1 ? "" : "s");
+    if (!list.length) {
+      if (q && all.length) return "None of the " + all.length + " custom properties of " + host + " is named like '" + q + "' — browser_palette_tokens without filter lists them.";
+      return "No CSS custom properties found in the " + sheetsWords + " of " + host + (unread ? " (" + unread + ")" : "") + ". The site styles its elements directly: browser_palette_extract shows its colours and fonts, browser_style_apply changes them.";
+    }
+    var top = rankTokens(list).slice(0, TOP_TOKENS);
+    var groups = groupTokens(top);
+    var head = "Design tokens of " + host + ": " + all.length + " custom propert" + (all.length === 1 ? "y" : "ies") + " in " + sheetsWords + (raw.rules ? " (" + fmtN(raw.rules) + " rules" + (raw.totalUses !== undefined ? ", " + fmtN(raw.totalUses) + " var() uses" : "") + ")" : "") + (unread ? "; " + unread : "") + ".";
+    if (q) head += " Named like '" + q + "': " + list.length + ".";
+    if (list.length > top.length) head += " The " + top.length + " most used:";
+    var lines = [head];
+    [["colour", "Colours"], ["length", "Lengths"], ["font", "Fonts"], ["other", "Other"]].forEach(function (g) {
+      var items = groups[g[0]];
+      if (!items.length) return;
+      lines.push("", g[1] + " (" + items.length + "):");
+      items.forEach(function (t) { lines.push("  " + tokenLine(t)); });
+    });
+    var example = groups.colour[0] || top[0];
+    lines.push("", "Change one everywhere it is used: browser_style_tokens set={\"" + example.name + "\": \"" + (example.kind === "colour" ? "#0a7" : "…") + "\"} — saved as the site's 'Tokens' override, applied at once and kept on every visit. A token the site redeclares on a component keeps its own value there (a browser_style_apply rule for that selector fixes it).");
+    return lines.join("\n");
+  }
+
+  var RECOLOR_PROPS = ["color", "background", "border"];
+  var RECOLOR_CSS = { color: "color", background: "background-color", border: "border-color" };
+  /** Distance of two colours on a 0–100 scale: the sRGB channel differences summed in quadrature (0 = the same, 100 = black vs white), two decimals. Throws on a non-colour. */
+  function colorDistance(a, b) {
+    var ca = parseColor(a), cb = parseColor(b);
+    if (!ca) throw new Error("'" + a + "' is not a colour — use #rrggbb, rgb() or hsl().");
+    if (!cb) throw new Error("'" + b + "' is not a colour — use #rrggbb, rgb() or hsl().");
+    var dr = ca.r - cb.r, dg = ca.g - cb.g, db = ca.b - cb.b;
+    return Math.round(Math.sqrt(dr * dr + dg * dg + db * db) * 100 / (255 * Math.sqrt(3)) * 100) / 100;
+  }
+  /** The `properties` argument checked → ["color", "background", "border"] (all three by default). */
+  function recolorProps(list) {
+    if (list === undefined || list === null) return RECOLOR_PROPS.slice();
+    if (typeof list === "string") list = [list];
+    if (!Array.isArray(list) || !list.length) throw new Error("properties must be a list of color, background and/or border (default: all three).");
+    var out = [];
+    list.forEach(function (p) {
+      p = String(p).trim().toLowerCase().replace(/-color$/, "");
+      if (p === "background-color" || p === "bg") p = "background";
+      if (RECOLOR_PROPS.indexOf(p) === -1) throw new Error("properties: '" + p + "' is not one of color, background, border.");
+      if (out.indexOf(p) === -1) out.push(p);
+    });
+    return out;
+  }
+  /** The recolour rules: one !important rule per property, its selectors de-duplicated — matches = [{ selector, props: ["color" | "background" | "border"] }]. */
+  function recolorCss(matches, to) {
+    var hex = normalizeColor(to);
+    if (!hex || hex === "transparent") throw new Error("'" + to + "' is not a colour — use #rrggbb, rgb() or hsl().");
+    var by = { color: [], background: [], border: [] };
+    (matches || []).forEach(function (m) {
+      if (!m || !m.selector) return;
+      (m.props || []).forEach(function (p) { if (by[p] && by[p].indexOf(m.selector) === -1) by[p].push(m.selector); });
+    });
+    return RECOLOR_PROPS.filter(function (p) { return by[p].length; }).map(function (p) { return by[p].join(", ") + " { " + RECOLOR_CSS[p] + ": " + hex + " !important; }"; }).join("\n");
+  }
+  function recolorName(from, to) { return "Recolor " + from + "→" + to; }
+
+  /**
+   * The dominant colours of pixels (a flat [r, g, b, …] array, or [[r, g, b], …]) by median cut: the
+   * pixels are binned to 5 bits per channel (exact sums kept), the bins split along their widest
+   * channel at the weighted median (the box with the largest spread × population splits first) until
+   * `count` boxes exist (or no box can split), each box's weighted
+   * mean is a colour. → [{ hex, share (0–1), n }] most pixels first; [] for no pixels.
+   */
+  function quantize(pixels, count) {
+    count = Math.max(1, Math.min(64, Math.round(Number(count) || 5)));
+    var flat = pixels || [], triples = Array.isArray(flat[0]), n = triples ? flat.length : Math.floor(flat.length / 3);
+    var cells = {}, keys = [], total = 0;
+    for (var i = 0; i < n; i++) {
+      var r = triples ? flat[i][0] : flat[i * 3], g = triples ? flat[i][1] : flat[i * 3 + 1], b = triples ? flat[i][2] : flat[i * 3 + 2];
+      if (!(r >= 0 && r <= 255 && g >= 0 && g <= 255 && b >= 0 && b <= 255)) continue;
+      var k = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3);
+      var c = cells[k];
+      if (!c) { c = cells[k] = { r: 0, g: 0, b: 0, n: 0 }; keys.push(k); }
+      c.r += r; c.g += g; c.b += b; c.n++; total++;
+    }
+    if (!total) return [];
+    var entries = keys.map(function (k) { var c = cells[k]; return { r: c.r / c.n, g: c.g / c.n, b: c.b / c.n, sr: c.r, sg: c.g, sb: c.b, n: c.n }; });
+    function spread(box) {
+      var lo = { r: 255, g: 255, b: 255 }, hi = { r: 0, g: 0, b: 0 }, pop = 0;
+      box.forEach(function (e) { pop += e.n; ["r", "g", "b"].forEach(function (ch) { if (e[ch] < lo[ch]) lo[ch] = e[ch]; if (e[ch] > hi[ch]) hi[ch] = e[ch]; }); });
+      var span = { r: hi.r - lo.r, g: hi.g - lo.g, b: hi.b - lo.b };
+      var ch = span.r >= span.g && span.r >= span.b ? "r" : span.g >= span.b ? "g" : "b";
+      return { ch: ch, span: span[ch], pop: pop };
+    }
+    var boxes = [entries];
+    while (boxes.length < count) {
+      var pick = -1, best = -1, sp = null;
+      for (var j = 0; j < boxes.length; j++) {
+        if (boxes[j].length < 2) continue;
+        var s = spread(boxes[j]), score = s.span * s.pop;
+        if (score > best) { best = score; pick = j; sp = s; }
+      }
+      if (pick === -1) break;
+      var box = boxes[pick].slice().sort(function (a, b) { return a[sp.ch] - b[sp.ch]; });
+      // The cut between two bins whose cumulative weight comes closest to half the box's (the weighted median).
+      var half = sp.pop / 2, acc = 0, cut = 1, nearest = Infinity;
+      for (var m = 0; m < box.length - 1; m++) { acc += box[m].n; var diff = Math.abs(acc - half); if (diff < nearest) { nearest = diff; cut = m + 1; } }
+      boxes.splice(pick, 1, box.slice(0, cut), box.slice(cut));
+    }
+    return boxes.map(function (bx) {
+      var sr = 0, sg = 0, sb = 0, nn = 0;
+      bx.forEach(function (e) { sr += e.sr; sg += e.sg; sb += e.sb; nn += e.n; });
+      return { hex: toHex({ r: sr / nn, g: sg / nn, b: sb / nn }), share: Math.round((nn / total) * 10000) / 10000, n: nn };
+    }).sort(function (a, b) { return b.n - a.n; });
+  }
+  function fileOf(src) {
+    if (!src) return "";
+    if (/^data:/i.test(src)) return "a data: URL";
+    if (/^blob:/i.test(src)) return "a blob: URL";
+    try { var u = new URL(src); return (u.pathname.split("/").pop() || u.host).slice(0, 60); } catch (_) { return String(src).slice(0, 60); }
+  }
+  /** "the <img> hero.jpg (alt "…", 1200×800, shown at 600×400) — the largest visible image" */
+  function imageWords(r) {
+    var what = r.kind === "background" ? "the background image of <" + r.tag + ">" : "the <" + r.tag + ">";
+    var bits = [];
+    if (r.alt) bits.push('alt "' + (r.alt.length > 60 ? r.alt.slice(0, 59) + "…" : r.alt) + '"');
+    if (r.natural) bits.push(r.natural.width + "×" + r.natural.height);
+    if (r.shown) bits.push("shown at " + r.shown.width + "×" + r.shown.height);
+    var file = fileOf(r.src);
+    return what + (file ? " " + file : "") + (bits.length ? " (" + bits.join(", ") + ")" : "") + (r.how === "largest" ? " — the largest visible image" : "");
+  }
+  /** The browser_palette_from_image report: the colours with share and contrast against the page background, a :root block; or why the image cannot be read. */
+  function formatImagePalette(r, count) {
+    r = r || {};
+    var bg = normalizeColor(r.pageBg);
+    if (!bg || bg === "transparent") bg = "#ffffff";
+    if (!r.pixels) {
+      var why = r.reason === "tainted" || r.reason === "cors"
+        ? "it comes from another origin" + (r.src ? " (" + (function () { try { return new URL(r.src).host; } catch (_) { return "elsewhere"; } })() + ")" : "") + " that does not allow cross-origin reads, so the browser taints the canvas and the pixels cannot be read in the page"
+        : "it could not be drawn" + (r.loadError ? " — " + r.loadError : "");
+      return "The colours of " + imageWords(r) + " cannot be read: " + why + ". Describe it instead: open " + (r.src || "the image") + " in a tab (browser_navigate) and look at it with browser_screenshot, or pass the URL to the agent for a description. browser_palette_extract still gives the page's own colours.";
+    }
+    var cols = quantize(r.pixels, count);
+    var px = Math.floor(r.pixels.length / 3);
+    if (!cols.length) return "The colours of " + imageWords(r) + " cannot be read: every pixel is transparent.";
+    var lines = ["Dominant colours of " + imageWords(r) + ": " + fmtN(px) + " pixels sampled" + (r.transparent ? " (" + fmtN(r.transparent) + " transparent skipped)" : "") + ", " + cols.length + " colour" + (cols.length === 1 ? "" : "s") + ", contrast against the page background " + bg + ":"];
+    cols.forEach(function (c, i) {
+      var h = hslOf(c.hex);
+      lines.push("  " + (i + 1) + ". " + c.hex + "  " + pad(Math.round(c.share * 100) + "%", 4) + " " + ratioMark(c.hex, bg) + "  (hue " + h.h + "°, " + h.s + "% sat, " + Math.round(h.l) + "% light)");
+    });
+    lines.push("", ":root {");
+    cols.forEach(function (c, i) { lines.push("  --image-" + (i + 1) + ": " + c.hex + "; /* " + Math.round(c.share * 100) + "% */"); });
+    lines.push("}");
+    lines.push("", "✓ AA = 4.5:1 or more, fine for text on the page background; ⚠ large only = 3:1 or more (large text, icons, borders); ⚠ = decorative use only. Use a colour with browser_style_tokens (set={\"--brand\": \"" + cols[0].hex + "\"}), browser_palette_theme mode=custom (overrides={ accent: \"…\" }) or a browser_style_apply rule; browser_palette_harmony color=" + cols[0].hex + " gives its harmonies.");
+    return lines.join("\n");
+  }
   // ── Doing it: extract, contrast, theme (shared by the tools and the tab) ───
 
   async function extract() {
@@ -711,6 +1131,65 @@
     }
     if (!bg) bg = p ? p.body.bg : "#ffffff";
     return text(formatHarmony(harmony(base), bg, words) + (!a.background && !p ? "\n(the page could not be read: " + pageErr + "; measured against white)" : ""));
+  });
+
+  T.register("browser_palette_tokens", async function (a) {
+    a = a || {};
+    var raw = await H.inTop(pageTokens, [MAX_TOKENS]);
+    return text(formatTokens(raw, a.filter));
+  });
+
+  T.register("browser_palette_recolor", async function (a) {
+    a = a || {};
+    var st = S();
+    var from = a.from ? normalizeColor(a.from) : null, to = a.to ? normalizeColor(a.to) : null;
+    if (!from || from === "transparent") throw new Error("from is required — the colour to replace, as #rrggbb, rgb() or hsl()" + (a.from ? " ('" + a.from + "' is not one)" : "") + ".");
+    if (!to || to === "transparent") throw new Error("to is required — the new colour, as #rrggbb, rgb() or hsl()" + (a.to ? " ('" + a.to + "' is not one)" : "") + ".");
+    var tol = a.tolerance === undefined || a.tolerance === null || a.tolerance === "" ? 12 : Number(a.tolerance);
+    if (!isFinite(tol) || tol < 0 || tol > 40) throw new Error("tolerance must be a number from 0 (the exact colour) to 40 (neighbouring shades too); the default is 12.");
+    var props = recolorProps(a.properties);
+    var tab = await H.currentTab();
+    var site = a.site ? st.normHost(a.site) : st.hostOf(tab && tab.url);
+    if (!site) throw new Error("The current tab is not a website (" + ((tab && tab.url) || "no URL") + ") — switch to one, or pass site.");
+    var c = parseColor(from);
+    var raw = await H.inTop(pageRecolor, [MAX_SAMPLE, { r: Math.round(c.r), g: Math.round(c.g), b: Math.round(c.b) }, tol, props, MAX_SELECTORS]);
+    var sels = raw.selectors || [];
+    var propWords = props.join(", ");
+    if (!sels.length) throw new Error("No visible element of " + (st.hostOf(raw.url) || "this page") + " uses a colour within " + tol + " of " + from + " for " + propWords + (raw.closest ? " (the closest is " + raw.closest.hex + ", at " + raw.closest.distance + ")" : "") + (raw.unselectable ? "; " + raw.unselectable + " matched but had no stable selector" : "") + " — raise tolerance (up to 40), check the colour with browser_palette_extract, or pass other properties. Nothing was saved.");
+    var shades = Object.keys(raw.shades || {}).sort(function (x, y) { return raw.shades[y] - raw.shades[x]; });
+    var css = "/* Recolor " + from + " → " + to + " (tolerance " + tol + "; " + propWords + "): " + raw.elements + " elements, " + sels.length + " selectors, " + new Date().toISOString().slice(0, 10) + " */\n" + recolorCss(sels, to);
+    var saved = await st.saveOverride({ site: site, name: recolorName(from, to), css: css });
+    var ap = await st.applyToTab(tab);
+    var perProp = props.map(function (p) { var k = sels.filter(function (s) { return s.props.indexOf(p) !== -1; }).length; return k ? p + " on " + k : null; }).filter(Boolean);
+    var lines = [(saved.replaced ? "Replaced" : "Saved") + " override '" + saved.name + "' for " + site + " (" + (saved.size / 1024).toFixed(1) + " KB, " + saved.rules + " rule" + (saved.rules === 1 ? "" : "s") + "): " + raw.elements + " element" + (raw.elements === 1 ? "" : "s") + " within " + tol + " of " + from +
+      " (" + shades.length + " shade" + (shades.length === 1 ? "" : "s") + ": " + shades.slice(0, 6).map(function (h) { return h + " ×" + raw.shades[h]; }).join(", ") + (shades.length > 6 ? ", …" : "") + ") in " + sels.length + " selector" + (sels.length === 1 ? "" : "s") + (raw.truncated ? " (the " + raw.truncated + " least used dropped)" : "") + " — " + perProp.join(", ") + " → " + to + "." +
+      (raw.unselectable ? " " + raw.unselectable + " element" + (raw.unselectable === 1 ? " has" : "s have") + " no stable selector and " + (raw.unselectable === 1 ? "is" : "are") + " not covered." : "") +
+      (ap.applies ? " Applied in the current tab;" : " Saved;") + " the site keeps it until browser_style_remove name=\"" + saved.name + "\"."];
+    lines.push("Selectors: " + sels.slice(0, 20).map(function (s) { return s.selector + " (" + s.props.join("+") + (s.n > 1 ? ", ×" + s.n : "") + ")"; }).join(", ") + (sels.length > 20 ? ", … " + (sels.length - 20) + " more (browser_style_list css=true shows the override)" : "") + ".");
+    lines.push("Check with browser_screenshot — a missed spot gets a browser_style_apply rule, a wrong one goes with browser_style_remove. For a colour the site keeps in a custom property, browser_style_tokens is the cleaner change (browser_palette_tokens lists them).");
+    return text(lines.join("\n"));
+  });
+
+  T.register("browser_palette_from_image", async function (a) {
+    a = a || {};
+    var count = a.count === undefined || a.count === null || a.count === "" ? 5 : Number(a.count);
+    if (!Number.isInteger(count) || count < 2 || count > 8) throw new Error("count must be a whole number from 2 to 8 (default 5).");
+    var r;
+    if (a.ref !== undefined && a.ref !== null) {
+      var t = H.refTarget ? H.refTarget(Number(a.ref)) : null;
+      if (!t) throw new Error("No element [" + a.ref + "] — call browser_read_page first (refs come from it).");
+      var tab = await H.currentTab();
+      var res;
+      try {
+        res = await chrome.scripting.executeScript({ target: { tabId: tab.id, documentIds: [t.documentId] }, func: pageImagePixels, args: [t.local, "", IMAGE_SIDE, MAX_SAMPLE], world: "ISOLATED" });
+      } catch (_) { throw new Error(STALE); }
+      r = res && res[0] ? res[0].result : null;
+      if (!r) throw new Error(STALE);
+      if (r.error) throw new Error(r.error === "stale" ? STALE : r.error);
+    } else {
+      r = await H.inTop(pageImagePixels, [0, String(a.selector || "").trim(), IMAGE_SIDE, MAX_SAMPLE]);
+    }
+    return text(formatImagePalette(r, count));
   });
 
   // ── The 🧪 Palette tab ───────────────────────────────────────────────────
@@ -817,7 +1296,10 @@
     { group: "Design", icon: "🧪", name: "What colours and fonts does this page use?", prompt: "What colours and fonts does this page use? Extract its palette (browser_palette_extract) and describe it: the main text and background colours, the accent, the font families and the type scale, the spacing rhythm — in a few lines, then the CSS variables block." },
     { group: "Design", icon: "🔍", name: "Check this page's contrast", prompt: "Check this page's text contrast against WCAG 2 AA (browser_palette_contrast). List what fails with the ratio and where it is, and propose a fix for each (a colour of the same hue that passes) — apply the fixes as style overrides only if I ask." },
     { group: "Design", icon: "🌙", name: "Dark theme for this site", prompt: "Give this site a dark theme: build it from the page's own palette with browser_palette_theme mode=dark (it is saved as the site's 'theme:dark' override and kept), take a screenshot, and fix anything that stayed light or became unreadable with targeted browser_style_apply rules — never an invert filter on the whole page, images must stay as they are." },
-    { group: "Design", icon: "🎯", name: "Colour harmonies from this site's accent", prompt: "Take this site's accent colour and show me its harmonies (browser_palette_harmony with no arguments picks the accent and the background from the page): complementary, split-complementary, analogous, triadic, tetradic, tints and shades, each with its contrast against the page background. Recommend one for a hover state and one for a secondary button, and give me the :root variables block." }
+    { group: "Design", icon: "🎯", name: "Colour harmonies from this site's accent", prompt: "Take this site's accent colour and show me its harmonies (browser_palette_harmony with no arguments picks the accent and the background from the page): complementary, split-complementary, analogous, triadic, tetradic, tints and shades, each with its contrast against the page background. Recommend one for a hover state and one for a secondary button, and give me the :root variables block." },
+    { group: "Design", icon: "🧬", name: "Design tokens of this page", prompt: "List this page's design tokens (browser_palette_tokens): the CSS custom properties its stylesheets declare — colours, lengths, fonts — with their values and how often each is used. Point out the ones worth changing for a different look (the accent, the background, the radius, the font) and how to change one everywhere with browser_style_tokens." },
+    { group: "Design", icon: "🖌", name: "Recolor this site…", prompt: "Recolor this site: replace one colour with another everywhere it is used for text, backgrounds and borders (browser_palette_recolor from=… to=…; when I name the colour loosely, find the exact one with browser_palette_extract first), take a screenshot and fix a missed or wrong spot with a small browser_style_apply rule. Replace: ", partial: true },
+    { group: "Design", icon: "🖼", name: "Palette from this image", prompt: "Take the dominant colours of the main image on this page (browser_palette_from_image; pass a ref if I point at an image) and show them with their share and their contrast against the page background. Suggest which could be the accent, the background and the text colour, and give me the :root variables block. If the image cannot be read in the page (another origin without CORS), say so and describe its colours from a screenshot instead." }
   );
 
   // ── Exports: the pure parts, for tests and other modules ──────────────────
@@ -830,7 +1312,11 @@
     evaluateContrast: evaluateContrast, formatContrast: formatContrast, suggestText: suggestText,
     tokensFor: tokensFor, mapBg: mapBg, mapText: mapText, mapBorder: mapBorder, themeCss: themeCss, formatMapping: formatMapping, themesOf: themesOf,
     harmony: harmony, accentOf: accentOf, harmonyVars: harmonyVars, formatHarmony: formatHarmony, mix: mix,
+    MAX_TOKENS: MAX_TOKENS, TOP_TOKENS: TOP_TOKENS, MAX_SELECTORS: MAX_SELECTORS, IMAGE_SIDE: IMAGE_SIDE, RECOLOR_PROPS: RECOLOR_PROPS,
+    tokenKind: tokenKind, groupTokens: groupTokens, rankTokens: rankTokens, formatTokens: formatTokens,
+    colorDistance: colorDistance, recolorProps: recolorProps, recolorCss: recolorCss, recolorName: recolorName,
+    quantize: quantize, formatImagePalette: formatImagePalette, imageWords: imageWords,
     extract: extract, contrast: contrast, applyTheme: applyTheme,
-    pageExtractPalette: pageExtractPalette, pageContrast: pageContrast,
+    pageExtractPalette: pageExtractPalette, pageContrast: pageContrast, pageTokens: pageTokens, pageRecolor: pageRecolor, pageImagePixels: pageImagePixels,
   };
 })();

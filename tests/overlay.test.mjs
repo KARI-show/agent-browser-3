@@ -1,14 +1,15 @@
 // Layout overlays (browser/extras/overlay.js) against fakes of chrome, the tool runtime and a small DOM: the
-// grid geometry, the measurement math and alignment hints, note numbering, the six tools' reports and what
-// they draw (the design image through a fake <img> loader, the viewport resize through a fake chrome.windows),
-// and the 📐 tab. The real page is exercised in tests/e2e/extras-stencil.e2e.mjs.
+// grid geometry, the measurement math and alignment hints, note numbering, the eight tools' reports and what
+// they draw (the design image through a fake <img> loader, the viewport resize through a fake chrome.windows,
+// labelled outlines per kind, responsive captures stitched on a fake canvas with the window put back), and the
+// 📐 tab. The real page is exercised in tests/e2e/extras-stencil.e2e.mjs.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 const plain = (x) => (x === undefined ? undefined : JSON.parse(JSON.stringify(x))); // values made inside the vm have another realm's prototypes
 const eq = (a, b, msg) => assert.deepEqual(plain(a), plain(b), msg);
-import { fakeCtx, fakeDocument, loadExtra, runTool, settle } from "./mocks/extras-stencil.mjs";
+import { fakeCanvas, fakeCtx, fakeDocument, loadExtra, runTool, settle } from "./mocks/extras-stencil.mjs";
 
-const PAGE_FNS = ["pageRects", "pageOverlayGrid", "pageDrawMeasure", "pageOverlayNotes", "pageOverlayNote", "pageOverlayNoteRemove", "pageOverlayClear", "pageOverlayImage"];
+const PAGE_FNS = ["pageRects", "pageOverlayGrid", "pageDrawMeasure", "pageOverlayNotes", "pageOverlayNote", "pageOverlayNoteRemove", "pageOverlayClear", "pageOverlayImage", "pageOverlayOutline"];
 
 /** The module over a fake page whose two boxes have the known geometry (A 200×100 at 100,100; B 150×100 at 340,100). */
 function setup(opts = {}) {
@@ -42,17 +43,20 @@ function imageLoader(page, sizes) {
 }
 const overlay = (page) => page.documentElement.querySelector("[data-agent-overlay]");
 
-test("loads only for a brand with the feature; registers six tools, the 📐 tab and five Design commands", () => {
+test("loads only for a brand with the feature; registers eight tools, the 📐 tab and seven Design commands", () => {
   const off = loadExtra("overlay", { features: { overlay: false, elements: true } });
   eq(off.T.names, []);
   assert.equal(off.X, undefined);
   const m = loadExtra("overlay");
-  eq(m.T.names, ["browser_overlay_grid", "browser_overlay_measure", "browser_overlay_note", "browser_overlay_clear", "browser_overlay_image", "browser_overlay_viewport"]);
+  eq(m.T.names, ["browser_overlay_grid", "browser_overlay_measure", "browser_overlay_note", "browser_overlay_clear", "browser_overlay_image", "browser_overlay_viewport", "browser_overlay_outline", "browser_overlay_responsive"]);
   assert.equal(m.tab.label, "📐 Overlay");
   eq(m.commands.map((c) => [c.group, c.name, !!c.partial]), [
     ["Design", "Show a 12-column grid", false], ["Design", "Measure the spacing between these two elements", true], ["Design", "Mark up this page for review", false],
     ["Design", "Compare with a design image", true], ["Design", "Preview at phone width", false],
+    ["Design", "Outline the headings", false], ["Design", "Responsive screenshots", false],
   ]);
+  assert.match(m.commands[5].prompt, /browser_overlay_outline \(what=headings\).*clear the outlines/);
+  assert.match(m.commands[6].prompt, /browser_overlay_responsive .*horizontal overflow/);
   assert.match(m.commands[0].prompt, /browser_overlay_grid .*screenshot/);
   assert.match(m.commands[2].prompt, /browser_overlay_note.*screenshot/);
   assert.match(m.commands[3].prompt, /browser_overlay_image .*clear the overlay/);
@@ -215,7 +219,7 @@ test("browser_overlay_clear removes one layer or everything", async () => {
   await runTool(m.T, "browser_overlay_grid", {});
   assert.equal(await runTool(m.T, "browser_overlay_clear", {}), "Removed all overlays; the page is clean.");
   assert.equal(overlay(m.page), null);
-  await assert.rejects(m.T.run("browser_overlay_clear", { only: "boxes" }), /only must be grid, measure, notes or image/);
+  await assert.rejects(m.T.run("browser_overlay_clear", { only: "boxes" }), /only must be grid, measure, notes, image or outline/);
 });
 
 test("the 📐 tab: grid controls draw and remove the grid, the notes list with remove, Clear all, Screenshot with overlays", async () => {
@@ -361,4 +365,169 @@ test("browser_overlay_viewport: presets and sizes, the chrome measured in the ta
   win.type = "popup";
   await assert.rejects(m.T.run("browser_overlay_viewport", { preset: "mobile" }), /sits in a popup window \(the panel's own, or an app window\), which is not resized/);
   assert.equal(m.chrome.windows.updates.length, n);
+});
+
+test("browser_overlay_outline: labelled boxes per kind in the overlay layer, the counts and the first ten with their text; all = a colour per kind; replaced, off, cleared; options", async () => {
+  const { X } = loadExtra("overlay");
+  eq(X.outlineOptions({ what: "headings" }), { what: "headings", kinds: ["headings"], colors: { headings: "#e00060" } });
+  eq(X.outlineOptions({ what: "all", color: " #abc " }).colors, { headings: "#abc", links: "#abc", buttons: "#abc", images: "#abc", forms: "#abc", landmarks: "#abc" });
+  eq(X.outlineOptions({ what: "all" }).kinds, X.OUTLINE_KINDS);
+  assert.throws(() => X.outlineOptions({}), /what is required — one of headings, links, buttons, images, forms, landmarks or all/);
+  assert.throws(() => X.outlineOptions({ what: "tables" }), /what must be one of headings, links, buttons, images, forms, landmarks or all/);
+  assert.throws(() => X.outlineOptions({ what: "links", color: "blue" }), /color must be a hex colour/);
+  assert.equal(X.formatOutline({ counts: { links: 0 }, items: {} }, X.outlineOptions({ what: "links" })), "No links on the page — nothing outlined.");
+  assert.equal(X.formatOutline({ counts: {}, items: {} }, X.outlineOptions({ what: "all" })), "No headings, links, buttons, images, forms or landmarks on the page — nothing outlined.");
+  const r = { counts: { headings: 2, links: 12 }, items: { headings: [{ label: "h1", text: "Welcome" }, { label: "h2", text: "" }], links: Array.from({ length: 10 }, (_, i) => ({ label: String(i + 1), text: "l" + i })) } };
+  assert.equal(X.formatOutline(r, { what: "all", kinds: ["headings", "links", "images"], colors: { headings: "#e00060", links: "#1e90ff", images: "#19a974" } }), [
+    "Outlined 14 elements: 2 headings, 12 links, 0 images.",
+    'Headings (2, #e00060): h1 "Welcome", h2',
+    'Links (12, first 10, #1e90ff): 1 "l0", 2 "l1", 3 "l2", 4 "l3", 5 "l4", 6 "l5", 7 "l6", 8 "l7", 9 "l8", 10 "l9"',
+    "Take a browser_screenshot to see the outlines; browser_overlay_clear only=outline (or off=true here) removes them, another call replaces them.",
+  ].join("\n"));
+
+  // A page with every kind; elements without a size (the hidden heading, the empty footer) and a link without href are left out.
+  const page = fakeDocument(
+    '<header id="hd"><h1 id="h1">Welcome</h1><nav id="nav"><a href="/a" id="a">A</a><a href="/b" id="b">B</a><a id="c">no href</a></nav></header>' +
+    '<main id="main"><h2 id="h2">Section</h2><img id="img" src="/pics/hero.png" alt="Hero"><form id="form" name="signup"><input type="hidden" name="t"><input name="email"><select></select><textarea></textarea><button id="go">Go</button></form>' +
+    '<div id="fake" role="button">Fake</div><h3 id="hidden">Hidden</h3></main><footer role="contentinfo"></footer>'
+  );
+  const rects = { hd: [0, 0, 1000, 80], h1: [10, 10, 300, 40], nav: [400, 10, 500, 40], a: [400, 10, 50, 40], b: [460, 10, 50, 40], c: [520, 10, 50, 40], main: [0, 100, 1000, 600], h2: [10, 110, 300, 30], img: [10, 150, 400, 300], form: [10, 460, 400, 200], go: [10, 600, 80, 30], fake: [500, 600, 80, 30] };
+  for (const id of Object.keys(rects)) { const [left, top, width, height] = rects[id]; page.querySelector("#" + id)._rect = { left, top, width, height }; }
+  const m = loadExtra("overlay", { document: page });
+  m.context.window.scrollX = 0; m.context.window.scrollY = 20;
+  for (const fn of PAGE_FNS) m.scripting.results[fn] = (...a) => m.X[fn](...a);
+  const out = await runTool(m.T, "browser_overlay_outline", { what: "all" });
+  assert.equal(out, [
+    "Outlined 11 elements: 2 headings, 2 links, 2 buttons, 1 image, 1 form, 3 landmarks.",
+    'Headings (2, #e00060): h1 "Welcome", h2 "Section"',
+    'Links (2, #1e90ff): 1 "A", 2 "B"',
+    'Buttons (2, #ff8c00): 1 "Go", 2 "Fake"',
+    'Images (1, #19a974): 400×300 "Hero"',
+    'Forms (1, #8e44ad): 3 fields "signup"',
+    'Landmarks (3, #555555): header "Welcome A B no href", nav "A B no href", main "Section Go Fake Hidden"',
+    "Take a browser_screenshot to see the outlines; browser_overlay_clear only=outline (or off=true here) removes them, another call replaces them.",
+  ].join("\n"));
+  const root = overlay(page);
+  assert.match(root.getAttribute("style"), /pointer-events:none;z-index:2147483646/);
+  const layer = root.querySelector("[data-agent-overlay-outline]");
+  assert.match(layer.getAttribute("style"), /pointer-events:none/);
+  const boxes = layer.querySelectorAll("[data-agent-outline]");
+  assert.equal(boxes.length, 11);
+  eq(boxes.map((b) => b.getAttribute("data-agent-outline")), ["headings", "headings", "links", "links", "buttons", "buttons", "images", "forms", "landmarks", "landmarks", "landmarks"]);
+  assert.match(boxes[0].getAttribute("style"), /left:10px;top:30px;width:300px;height:40px;.*outline:2px solid #e00060/, "document coordinates: the scroll is added");
+  assert.equal(boxes[0].textContent, "h1");
+  assert.equal(boxes[6].textContent, "400×300");
+  assert.match(boxes[6].getAttribute("style"), /outline:2px solid #19a974/);
+  assert.equal(boxes[7].textContent, "3 fields");
+  eq(boxes.slice(8).map((b) => b.textContent), ["header", "nav", "main"]);
+  // One kind in a given colour replaces the outlines; the first ten of many are listed.
+  const out2 = await runTool(m.T, "browser_overlay_outline", { what: "links", color: "#123456" });
+  assert.equal(out2, 'Outlined 2 elements: 2 links.\nLinks (2, #123456): 1 "A", 2 "B"\nTake a browser_screenshot to see the outlines; browser_overlay_clear only=outline (or off=true here) removes them, another call replaces them.');
+  assert.equal(root.querySelectorAll("[data-agent-overlay-outline]").length, 1);
+  assert.equal(root.querySelectorAll("[data-agent-outline]").length, 2);
+  assert.match(root.querySelector("[data-agent-outline]").getAttribute("style"), /outline:2px solid #123456/);
+  for (let i = 0; i < 12; i++) { const a = page.createElement("a"); a.setAttribute("href", "/l" + i); a.textContent = "L" + i; a._rect = { left: 0, top: 700 + i * 10, width: 50, height: 10 }; page.querySelector("main").appendChild(a); }
+  assert.match(await runTool(m.T, "browser_overlay_outline", { what: "links" }), /^Outlined 14 elements: 14 links\.\nLinks \(14, first 10, #1e90ff\): 1 "A", 2 "B", 3 "L0", .*, 10 "L7"\n/);
+  // off=true and browser_overlay_clear remove them; an emptied container goes, one that still holds notes stays.
+  assert.equal(await runTool(m.T, "browser_overlay_outline", { what: "headings", off: true }), "Outlines removed.");
+  assert.equal(overlay(page), null);
+  assert.equal(await runTool(m.T, "browser_overlay_outline", { what: "headings", off: true }), "No outlines were on the page.");
+  assert.equal(await runTool(m.T, "browser_overlay_clear", { only: "outline" }), "No outline overlay was on the page.");
+  await runTool(m.T, "browser_overlay_outline", { what: "headings" });
+  await runTool(m.T, "browser_overlay_note", { selector: "#h1", text: "n" });
+  assert.equal(await runTool(m.T, "browser_overlay_clear", { only: "outline" }), "Removed the outline overlay. Still on the page: notes.");
+  await runTool(m.T, "browser_overlay_outline", { what: "headings" });
+  assert.equal(await runTool(m.T, "browser_overlay_outline", { what: "headings", off: true }), "Outlines removed. Still on the page: notes.");
+  await runTool(m.T, "browser_overlay_outline", { what: "forms" });
+  assert.equal(await runTool(m.T, "browser_overlay_note", { remove: 1 }), "Removed note #1. No notes left.");
+  assert.equal(overlay(page).querySelectorAll("[data-agent-overlay-outline]").length, 1, "removing the last note keeps a container that still holds outlines");
+  assert.equal(await runTool(m.T, "browser_overlay_clear", {}), "Removed all overlays; the page is clean.");
+  assert.equal(overlay(page), null);
+  await assert.rejects(m.T.run("browser_overlay_outline", {}), /what is required/);
+  await assert.rejects(m.T.run("browser_overlay_outline", { what: "menus" }), /what must be one of/);
+  assert.equal(overlay(page), null, "nothing drawn for a refused call");
+});
+
+test("browser_overlay_responsive: one capture per width with the window resized and put back (also after an error), full-page stitching on a canvas, overflow notes, save; responsiveRequest and stitchPlan", async () => {
+  const { X } = loadExtra("overlay");
+  eq(X.responsiveRequest({}), { widths: [375, 768, 1280], fullPage: false, save: false });
+  eq(X.responsiveRequest({ widths: [1024, "600", 1024.4], fullPage: true, save: true }), { widths: [1024, 600], fullPage: true, save: true }, "duplicates dropped, whole px");
+  assert.throws(() => X.responsiveRequest({ widths: [] }), /widths must be an array of viewport widths in px/);
+  assert.throws(() => X.responsiveRequest({ widths: "375" }), /widths must be an array/);
+  assert.throws(() => X.responsiveRequest({ widths: [100] }), /each width must be a number between 320 and 3840/);
+  assert.throws(() => X.responsiveRequest({ widths: [375, null] }), /each width must be a number/);
+  assert.throws(() => X.responsiveRequest({ widths: [320, 400, 500, 600, 700, 800, 900] }), /widths: at most 6 per call/);
+  eq(X.stitchPlan(2140, 812, 8), { offsets: [0, 812, 1328], height: 2140, cut: false }, "the last screen ends at the page's bottom");
+  eq(X.stitchPlan(800, 812, 8), { offsets: [0], height: 800, cut: false });
+  eq(X.stitchPlan(812, 812, 8), { offsets: [0], height: 812, cut: false });
+  eq(X.stitchPlan(10000, 812, 8), { offsets: [0, 812, 1624, 2436, 3248, 4060, 4872, 5684], height: 6496, cut: true }, "capped at eight screens");
+  assert.match(X.responsiveName("example.com", 375, true, 0), /^example\.com-375px-full-\d{8}-\d{6}\.png$/);
+  assert.match(X.responsiveName("", 768, false, 0), /^page-768px-\d{8}-\d{6}\.png$/);
+
+  const m = setup();
+  const canvases = fakeCanvas(m);
+  const win = m.chrome.windows.list[1];
+  // The page as the fake window gives it (16 px of chrome beside the page, 120 above): 420 px wide under 400 (overflow), 2140 tall, dpr 2.
+  let scrollY = 0;
+  const layout = () => { const iw = win.width - 16, ih = win.height - 120; return { innerWidth: iw, innerHeight: ih, scrollWidth: iw < 400 ? 420 : iw, scrollHeight: 2140, scrollX: 0, scrollY, dpr: 2 }; };
+  m.scripting.results.pageLayoutInfo = layout;
+  m.scripting.results.pageScrollTo = (x, y) => { scrollY = Math.max(0, Math.min(y, 2140 - (win.height - 120))); return { scrollX: 0, scrollY }; };
+  m.chrome.tabs.capture = () => `data:image/png;base64,FAKE:${(win.width - 16) * 2}x${(win.height - 120) * 2}`;
+  const parts = await m.T.run("browser_overlay_responsive", {});
+  eq(parts.map((p) => p.type), ["image", "text", "image", "text", "image", "text", "text"]);
+  eq(parts[0], { type: "image", data: "CANVAS:750x1760:1", mimeType: "image/png" }, "the viewport at dpr 2");
+  assert.equal(parts[1].text, "375 px: 375×880, page 420×2140 — horizontal overflow: 45 px wider than the viewport");
+  assert.equal(parts[2].data, "CANVAS:1536x1760:1");
+  assert.equal(parts[3].text, "768 px: 768×880, page 768×2140");
+  assert.equal(parts[5].text, "1280 px: 1280×880, page 1280×2140");
+  assert.equal(parts[6].text, "Window restored to 1600 × 1000 px. Horizontal overflow at 375 px (the page is 420 px wide, 45 px over). fullPage=true captures the whole page (scrolled and stitched, up to 8 screens per width).");
+  eq(m.captures.map((c) => [c.windowId, c.options.format]), [[1, "png"], [1, "png"], [1, "png"]]);
+  eq(m.chrome.windows.updates, [
+    { id: 1, info: { state: "normal", width: 391 } }, { id: 1, info: { state: "normal", width: 784 } }, { id: 1, info: { state: "normal", width: 1296 } },
+    { id: 1, info: { state: "normal", left: 10, top: 20, width: 1600, height: 1000 } },
+  ], "each width through the viewport code (height unchanged), then the original bounds");
+  eq([win.width, win.height, win.state], [1600, 1000, "normal"]);
+  eq(canvases[0].draws, [["data:image/png;base64,FAKE:750x1760", 0, 0, 750, 1760, 0, 0, 750, 1760]]);
+  eq(m.downloads.calls, []);
+  assert.equal(m.scripting.calls.filter((c) => c.func === "pageScrollTo").length, 0, "no scrolling without fullPage");
+  assert.equal(m.data["agentOverlayViewport:1"], undefined, "browser_overlay_viewport's reset bounds are not touched");
+  // fullPage: three screens scrolled and stitched (scaled to the longest side allowed), saved to Downloads, the scroll put back.
+  m.chrome.windows.updates.length = 0; m.captures.length = 0;
+  const parts2 = await m.T.run("browser_overlay_responsive", { widths: [375], fullPage: true, save: true });
+  assert.equal(parts2.length, 3);
+  assert.match(parts2[1].text, /^375 px: 375×880, page 420×2140, 3 screens stitched, image scaled to 701×4000 — horizontal overflow: 45 px wider than the viewport — saved as example\.com-375px-full-\d{8}-\d{6}\.png \(download id 41\)$/);
+  assert.equal(parts2[0].data, "CANVAS:701x4000:3");
+  assert.equal(parts2[2].text, "Window restored to 1600 × 1000 px. Horizontal overflow at 375 px (the page is 420 px wide, 45 px over).");
+  assert.equal(m.captures.length, 3);
+  const stitched = canvases[canvases.length - 1];
+  eq(stitched.draws.map((d) => d[6]), [0, 1645, 2355], "each screen at its scroll offset, in device px, scaled");
+  eq(m.scripting.calls.filter((c) => c.func === "pageScrollTo").map((c) => c.args[1]), [0, 880, 1260, 0], "the planned offsets, then back to where the page was");
+  assert.equal(m.downloads.calls.length, 1);
+  assert.equal(m.downloads.calls[0].url, "data:image/png;base64,CANVAS:701x4000:3");
+  assert.match(m.downloads.calls[0].filename, /^example\.com-375px-full-\d{8}-\d{6}\.png$/);
+  assert.equal(m.downloads.calls[0].conflictAction, "uniquify");
+  eq([win.width, win.height], [1600, 1000]);
+  // A maximised window is brought back to maximised; a capture that fails still puts the window back.
+  win.state = "maximized";
+  m.chrome.windows.updates.length = 0;
+  await runTool(m.T, "browser_overlay_responsive", { widths: [768] });
+  eq(m.chrome.windows.updates.slice(-2), [{ id: 1, info: { state: "normal", left: 10, top: 20, width: 1600, height: 1000 } }, { id: 1, info: { state: "maximized" } }]);
+  assert.equal(win.state, "maximized");
+  win.state = "normal";
+  m.chrome.tabs.capture = () => { throw new Error("capture failed"); };
+  m.chrome.windows.updates.length = 0;
+  await assert.rejects(m.T.run("browser_overlay_responsive", { widths: [375, 768] }), /capture failed/);
+  eq(m.chrome.windows.updates, [{ id: 1, info: { state: "normal", width: 391 } }, { id: 1, info: { state: "normal", left: 10, top: 20, width: 1600, height: 1000 } }], "resized once, then restored after the error");
+  eq([win.width, win.height], [1600, 1000]);
+  // Refusals, before anything is resized.
+  m.chrome.windows.updates.length = 0;
+  await assert.rejects(m.T.run("browser_overlay_responsive", { widths: [100] }), /each width must be a number between 320 and 3840/);
+  delete m.chrome.downloads;
+  m.chrome.tabs.capture = () => "data:image/png;base64,FAKE:750x1760";
+  await assert.rejects(m.T.run("browser_overlay_responsive", { widths: [375], save: true }), /cannot save files \(no downloads permission\)/);
+  eq([win.width, win.height], [1600, 1000], "put back even when saving failed");
+  m.chrome.windows.updates.length = 0;
+  win.type = "popup";
+  await assert.rejects(m.T.run("browser_overlay_responsive", {}), /sits in a popup window .* which is not resized/);
+  eq(m.chrome.windows.updates, []);
 });

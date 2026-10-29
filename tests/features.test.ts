@@ -26,6 +26,7 @@ export const EXTRA_TOOL_PREFIX: Record<string, RegExp> = {
   overlay: /^browser_overlay_/,
   skills: /^browser_skill_/,
   autofill: /^browser_autofill_/,
+  forms: /^browser_form_/,
 };
 
 test("features.ts and brand.mjs list the same features, and the extras module covers every opt-in feature once", () => {

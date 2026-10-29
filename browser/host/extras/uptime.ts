@@ -4,14 +4,16 @@ import type { ExtraFeature } from "./types";
 // Uptime monitors: HTTP status checks on a schedule, built on the watcher machinery (chrome.alarms in
 // the service worker, system notifications, Telegram) — a watcher of mode "status" that fetches the URL
 // instead of opening a tab and keeps a history of status codes and latencies. browser/extras/uptime.js
-// implements the tools, the ⏱ Uptime tab and the quick commands; the check itself lives in
-// browser/extension/automation.js (doRun, mode === "status").
+// implements the tools (add, list, delete, toggle, report, export of the history as CSV/JSON), the
+// ⏱ Uptime tab and the quick commands; the check itself lives in browser/extension/automation.js (doRun,
+// mode === "status").
 export const uptime: ExtraFeature = {
   id: "uptime",
   prompt: `## Uptime
 - browser_uptime_add monitors a site's availability: an HTTP status check (HEAD, GET fallback, 15 s timeout) every few minutes in the background, with the panel closed and no model involved. The first check sets the baseline; afterwards every flip (200 → 503, a timeout, back to 200) is reported with a system notification and a Telegram message when the bot is set up. Use it when the user wants to know "when the site goes down / comes back"; browser_watch_create is for content changes.
 - browser_uptime_list shows each monitor's state (up/down), last status and latency, failures in a row and the uptime % over the stored history (24 h at 5 min); browser_uptime_delete stops one.
-- browser_uptime_toggle pauses or resumes a monitor by id (without enabled it flips the state; the history is kept). browser_uptime_report summarizes the stored history per monitor over the last hours (default 24): checks, availability %, average/median/p95 latency, flips and the longest outage with when it was. Use it when the user asks how a site did, for an availability number or about the last outage — quote its figures rather than estimating.`,
+- browser_uptime_toggle pauses or resumes a monitor by id (without enabled it flips the state; the history is kept). browser_uptime_report summarizes the stored history per monitor over the last hours (default 24): checks, availability %, average/median/p95 latency, flips and the longest outage with when it was. Use it when the user asks how a site did, for an availability number or about the last outage — quote its figures rather than estimating.
+- browser_uptime_export hands out the stored history itself (every check: monitor, url, time, status, ok, ms) over the last hours (default 168) as CSV or JSON — as text, or with save=true written to Downloads. Use it when the user wants the raw data, a spreadsheet or a file; browser_uptime_report is the summary.`,
   tools: [
     {
       name: "browser_uptime_add",
@@ -75,6 +77,23 @@ export const uptime: ExtraFeature = {
       shape: {
         id: z.string().optional().describe("One monitor's id (default: every monitor)"),
         hours: z.number().int().min(1).max(720).optional().describe("The window in hours (default 24, up to 720 = 30 days)"),
+      },
+    },
+    {
+      name: "browser_uptime_export",
+      feature: "uptime",
+      readOnly: true,
+      description:
+        "Export the stored check history of one monitor or of all of them over the last `hours` (default 168 = " +
+        "7 days): one row per check with monitor, url, time (ISO), status code (0 = no answer), ok and ms, as " +
+        "CSV (default) or JSON. Returned as text (capped at 200 kB, with a note), or with save=true written to " +
+        "Downloads as uptime-<monitor>-<date>.<csv|json> and the download id reported. Nothing is requested " +
+        "from the sites.",
+      shape: {
+        id: z.string().optional().describe("One monitor's id (default: every monitor)"),
+        hours: z.number().int().min(1).max(720).optional().describe("The window in hours (default 168 = 7 days, up to 720 = 30 days)"),
+        format: z.enum(["csv", "json"]).optional().describe("csv (default) or json"),
+        save: z.boolean().optional().describe("true writes the file to Downloads instead of returning the text (default false)"),
       },
     },
   ],

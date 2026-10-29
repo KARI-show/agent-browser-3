@@ -9,9 +9,13 @@
 // be listed and shown freely. Filling takes two injections: pageAutofillCollect runs in every frame
 // and describes the visible fields (keeping the elements in window.__agentAutofill of that frame's
 // isolated world), the panel matches them to the identity (matchFields, pure), and pageAutofillFill
-// sets the chosen values in the frames that got any. Page-side functions are self-contained (no
-// closures over this file); the tab's DOM is built with ctx.el, never innerHTML — labels come from
-// web pages.
+// sets the chosen values in the frames that got any. browser_autofill_from_page runs the collector the
+// other way round: the page's filled fields become an identity (fieldsToIdentity, pure). The collector
+// and the filler are shared with the forms extra (forms.js, after this file in extras.js) through
+// AgentExtras.autofill: with opts.all the collector describes every field the user sees (passwords as a
+// length only, checkboxes, radios, disabled ones, validity, the <form> they sit in). Page-side functions
+// are self-contained (no closures over this file); the tab's DOM is built with ctx.el, never innerHTML
+// — labels come from web pages.
 (function () {
   if (!globalThis.AGENT_BRAND || !globalThis.AGENT_BRAND.has("autofill")) return;
   var T = globalThis.AgentBrowserTools;
@@ -73,6 +77,9 @@
   // for pin/card ("pinCode", "cardNumber" — but not "shipping" or "discard").
   var SECRET = /password|passcode|cvv|cvc|iban|ssn|secret|token/i;
   var SECRET_START = /^(pin|card)/i;
+  // Words of a page field (whole words only) and autocomplete tokens that mark a secret field.
+  var SECRET_FIELD_WORD = /^(cc|cvn|otp)$/i;
+  var SECRET_AUTOCOMPLETE = /(^|\s)(cc-|one-time-code|new-password|current-password)/i;
 
   function wordsOf(key) {
     return String(key == null ? "" : key).replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
@@ -86,6 +93,15 @@
   }
   function isSecretKey(key) {
     return wordsOf(key).some(function (w) { return SECRET.test(w) || SECRET_START.test(w); });
+  }
+  /** A page field that must never be kept: a password, or one whose label, name, id, placeholder or autocomplete names a secret (card, CVV, IBAN, SSN, PIN, token…). */
+  function isSecretField(f) {
+    if (!f) return false;
+    if (f.type === "password") return true;
+    if (SECRET_AUTOCOMPLETE.test(String(f.autocomplete || ""))) return true;
+    return [f.label, f.name, f.id, f.placeholder].some(function (s) {
+      return !!s && (isSecretKey(s) || wordsOf(s).some(function (w) { return SECRET_FIELD_WORD.test(w); }));
+    });
   }
   /** The fields of a save call: keys normalised, values trimmed; secrets and over-long values refused, empty values dropped. */
   function normFields(fields) {
@@ -206,6 +222,44 @@
     };
   }
 
+  // ── Page fields to an identity (pure) ───────────────────────────────────
+
+  // The keys a page field can become ("name" shares fullName's phrases, so fullName stands for both).
+  var IDENTITY_KEYS = Object.keys(SYNONYMS).filter(function (k) { return k !== "name"; });
+
+  /**
+   * An identity from a page's filled fields → { fields, kept, notKept, secret }: every field that holds a
+   * value goes to the identity key it answers to best (the synonym table in reverse, each key used once
+   * — the best score wins, then page order); fields that fit no key, or whose key is taken, are notKept
+   * [{ field, why }]; password fields and secret-looking ones (isSecretField) are never kept.
+   */
+  function fieldsToIdentity(pageFields) {
+    var fields = {}, kept = [], notKept = [], secret = [], cands = [];
+    (pageFields || []).forEach(function (f, fi) {
+      if (!f) return;
+      var v = String(f.value == null ? "" : f.value).replace(/\r\n?/g, "\n").trim();
+      if (!v) return;
+      if (isSecretField(f)) { secret.push(f); return; }
+      if (v.length > MAX_VALUE) { notKept.push({ field: f, why: "too long (" + v.length + " chars; a value holds at most " + MAX_VALUE + ")", fi: fi }); return; }
+      var best = 0, bestKey = "";
+      IDENTITY_KEYS.forEach(function (k) { var s = scoreField(f, k); if (s > best) { best = s; bestKey = k; } });
+      if (!best) { notKept.push({ field: f, why: "no identity key fits it", fi: fi }); return; }
+      cands.push({ s: best, fi: fi, field: f, key: bestKey, value: v });
+    });
+    cands.sort(function (a, b) { return b.s - a.s || a.fi - b.fi; });
+    var keyTaken = {};
+    cands.forEach(function (c) {
+      if (keyTaken[c.key]) { notKept.push({ field: c.field, why: c.key + " is already taken", fi: c.fi }); return; }
+      keyTaken[c.key] = true;
+      kept.push({ field: c.field, key: c.key, value: c.value, fi: c.fi });
+    });
+    var byPage = function (a, b) { return a.fi - b.fi; };
+    kept.sort(byPage);
+    notKept.sort(byPage);
+    kept.forEach(function (k) { fields[k.key] = k.value; }); // in page order
+    return { fields: fields, kept: kept, notKept: notKept, secret: secret };
+  }
+
   // ── Words for the model (pure) ──────────────────────────────────────────
 
   function ago(ts) {
@@ -250,6 +304,21 @@
       : "Filled " + filled + " of " + r.fieldsCount + " fields on this page from identity '" + idn.name + "' (" + idn.id + "):";
     return head + "\n" + lines.join("\n") + (r.dryRun ? "" : "\nNothing was submitted — the user checks the form and sends it.");
   }
+  /** The browser_autofill_from_page report for a save result `s` and a fieldsToIdentity result `r`. */
+  function formatFromPage(s, r) {
+    var idn = s.identity, filled = r.kept.length + r.notKept.length + r.secret.length;
+    var head = (s.replaced ? "Updated" : "Saved") + " identity '" + idn.name + "' (id " + idn.id + ") from " + r.kept.length + " of " + filled + " filled field" + (filled === 1 ? "" : "s") + " on this page:";
+    var lines = r.kept.map(function (k) { return "kept: " + k.key + " = " + oneLine(k.value, 80) + "  ← " + fieldName(k.field); });
+    r.notKept.forEach(function (n) { lines.push("not kept: " + fieldName(n.field) + " (" + n.why + ")"); });
+    if (r.secret.length) lines.push("never kept (secret): " + r.secret.map(fieldName).join(", "));
+    var keys = Object.keys(idn.fields);
+    var tail = "Identity '" + idn.name + "' now holds " + keys.length + " field" + (keys.length === 1 ? "" : "s") + ": " + keys.join(", ") + ".";
+    if (s.replaced) {
+      var what = [].concat(s.changed.length ? ["changed " + s.changed.join(", ")] : []).concat(s.added.length ? ["added " + s.added.join(", ")] : []).concat(s.removed && s.removed.length ? ["removed " + s.removed.join(", ")] : []);
+      tail += " " + (what.length ? what.join("; ").replace(/^./, function (c) { return c.toUpperCase(); }) : "Nothing new, the values were the same") + ".";
+    }
+    return head + "\n" + lines.join("\n") + "\n" + tail;
+  }
 
   // ── Storage ─────────────────────────────────────────────────────────────
 
@@ -290,9 +359,13 @@
     throw new Error("name or id is required — " + list.length + " identities are saved: " + list.map(function (i) { return "'" + i.name + "'"; }).join(", ") + ".");
   }
 
-  /** Save a new identity, or merge the fields into the one with that name → { identity, replaced, added, changed }. */
-  async function saveIdentity(a) {
+  /**
+   * Save a new identity, or merge the fields into the one with that name → { identity, replaced, added, changed, removed }.
+   * With opts.replace the existing identity's fields are replaced instead of merged (id, creation date and uses stay).
+   */
+  async function saveIdentity(a, opts) {
     a = a || {};
+    opts = opts || {};
     var name = String(a.name || "").replace(/\s+/g, " ").trim().slice(0, 60);
     if (!name) throw new Error("name is required — what to call the identity, e.g. 'Personal' or 'Work'.");
     var fields = normFields(a.fields);
@@ -301,21 +374,22 @@
     var i = -1;
     list.forEach(function (idn, k) { if (i === -1 && idn.name.toLowerCase() === name.toLowerCase()) i = k; });
     if (i !== -1) {
-      var old = list[i], merged = Object.assign({}, old.fields), added = [], changed = [];
+      var old = list[i], merged = opts.replace === true ? {} : Object.assign({}, old.fields), added = [], changed = [], removed = [];
       Object.keys(fields).forEach(function (k) {
-        if (!(k in merged)) added.push(k); else if (merged[k] !== fields[k]) changed.push(k);
+        if (!(k in old.fields)) added.push(k); else if (old.fields[k] !== fields[k]) changed.push(k);
         merged[k] = fields[k];
       });
+      if (opts.replace === true) removed = Object.keys(old.fields).filter(function (k) { return !(k in fields); });
       if (Object.keys(merged).length > MAX_FIELDS) throw new Error("Too many fields (" + Object.keys(merged).length + "; an identity holds at most " + MAX_FIELDS + ").");
       list[i] = Object.assign({}, old, { fields: merged, updated: now });
       await store(list);
-      return { identity: list[i], replaced: true, added: added, changed: changed };
+      return { identity: list[i], replaced: true, added: added, changed: changed, removed: removed };
     }
     if (list.length >= MAX) throw new Error("Identity limit reached (" + MAX + "). Delete one with browser_autofill_delete first.");
     var idn = { id: newId(list), name: name, fields: fields, created: now, updated: now, uses: 0 };
     list.push(idn);
     await store(list);
-    return { identity: idn, replaced: false, added: Object.keys(fields), changed: [] };
+    return { identity: idn, replaced: false, added: Object.keys(fields), changed: [], removed: [] };
   }
 
   async function deleteIdentity(a) {
@@ -335,9 +409,37 @@
 
   // Every visible, enabled, writable text-like input, textarea and select of this frame (shadow roots
   // included), with what identifies it; the elements stay in window.__agentAutofill for pageAutofillFill.
-  function pageAutofillCollect(maxFields) {
+  // With opts.all (the forms extra) every field the user sees is described instead: passwords (as a
+  // length only), checkboxes and radios (checked), disabled and read-only ones (flagged), each with its
+  // required flag, validity and validation message, and the <form> it sits in (index into `forms`:
+  // name, id, action host, submit button labels); opts.maxValue is the characters kept of a value.
+  function pageAutofillCollect(maxFields, opts) {
+    opts = opts || {};
+    var all = opts.all === true, maxValue = opts.maxValue || 120;
     var TYPES = /^(text|email|tel|url|number|search|date)$/i;
+    var SKIP = /^(hidden|submit|button|reset|image|file)$/i;
     function clean(s) { return String(s || "").replace(/\s+/g, " ").trim().slice(0, 120); }
+    function hostOf(u) { try { return new URL(u || "", location.href).host; } catch (_) { return ""; } }
+    function buttonLabel(b) {
+      var t = b.getAttribute("aria-label") || (b.tagName === "INPUT" ? b.value || b.getAttribute("alt") : b.textContent) || b.getAttribute("title") || "";
+      return clean(t);
+    }
+    var forms = [], formIndex = [];
+    function formOf(el) {
+      var fm = el.form || (el.closest ? el.closest("form") : null);
+      if (!fm) return -1;
+      var k = formIndex.indexOf(fm);
+      if (k !== -1) return k;
+      var submits = [];
+      fm.querySelectorAll("button, input[type=submit], input[type=image]").forEach(function (b) {
+        if (b.tagName === "BUTTON" && /^(button|reset)$/i.test(b.getAttribute("type") || "")) return;
+        var l = buttonLabel(b);
+        if (l && submits.length < 5 && submits.indexOf(l) === -1) submits.push(l);
+      });
+      formIndex.push(fm);
+      forms.push({ i: forms.length, name: clean(fm.getAttribute("name")), id: clean(fm.id), action: hostOf(fm.getAttribute("action")), submits: submits });
+      return forms.length - 1;
+    }
     function visible(el) {
       if (!el.isConnected) return false;
       var cs = getComputedStyle(el);
@@ -363,8 +465,9 @@
       if (fields.length >= maxFields) return;
       var tag = el.tagName.toLowerCase();
       var type = tag === "input" ? String(el.type || "text").toLowerCase() : tag; // el.type reads unknown types as "text"
-      if (tag === "input" && !TYPES.test(type)) return;
-      if (el.disabled || el.readOnly || !visible(el)) return;
+      if (tag === "input" && (all ? SKIP.test(type) : !TYPES.test(type))) return;
+      if (!all && (el.disabled || el.readOnly)) return;
+      if (!visible(el)) return;
       var f = { i: kept.length, tag: tag, type: type, label: labelOf(el), name: clean(el.getAttribute("name")), id: clean(el.id), placeholder: clean(el.getAttribute("placeholder")), autocomplete: clean(el.getAttribute("autocomplete")).toLowerCase() };
       if (tag === "select") {
         f.options = Array.prototype.slice.call(el.options, 0, 300).map(function (o) { return { text: clean(o.textContent), value: String(o.value) }; });
@@ -372,18 +475,34 @@
         // A select holds a value unless its first option is chosen and that is a prompt ("Select…", empty).
         var prompt = !cur || (el.selectedIndex === 0 && (!String(cur.value) || !clean(cur.textContent) || /^(select|choose|please|pick|-|—|–|…|\()/i.test(clean(cur.textContent))));
         f.value = prompt ? "" : clean(cur.textContent);
+      } else if (all && (type === "checkbox" || type === "radio")) {
+        f.checked = !!el.checked;
+        f.value = el.checked ? "on" : "";
+        f.optionValue = clean(el.value);
+      } else if (all && type === "password") {
+        f.value = "";
+        f.passwordLength = String(el.value || "").length;
       } else {
-        f.value = String(el.value || "").slice(0, 120);
+        f.value = String(el.value || "").slice(0, maxValue);
+      }
+      if (all) {
+        f.required = !!el.required;
+        f.disabled = !!el.disabled;
+        f.readonly = !!el.readOnly;
+        f.valid = el.validity ? !!el.validity.valid : true;
+        f.message = f.valid ? "" : clean(el.validationMessage);
+        f.form = formOf(el);
       }
       kept.push(el);
       fields.push(f);
     });
     window.__agentAutofill = kept;
-    return { isTop: window === window.top, fields: fields };
+    return all ? { isTop: window === window.top, fields: fields, forms: forms } : { isTop: window === window.top, fields: fields };
   }
 
   // Set the planned values ([{ i, value, option }]) on this frame's collected elements through the native
-  // value setter plus input/change events, so React/Vue forms notice; reads them back after a beat.
+  // value setter plus input/change events, so React/Vue forms notice; reads them back after a beat. A
+  // checkbox or radio (the forms extra's drafts) is clicked when it is not checked yet.
   function pageAutofillFill(items) {
     var els = window.__agentAutofill || [];
     function fire(el, data) {
@@ -396,6 +515,10 @@
       if (el.type === "password") return { i: it.i, ok: false, why: "a password field is never filled" };
       if (el.disabled || el.readOnly) return { i: it.i, ok: false, why: "the field is disabled or read-only" };
       try {
+        if (el.type === "checkbox" || el.type === "radio") {
+          if (!el.checked) el.click();
+          return { i: it.i, ok: true, check: true };
+        }
         if (el.tagName === "SELECT") {
           var want = String(it.option == null ? it.value : it.option).trim().toLowerCase(), idx = -1;
           for (var k = 0; k < el.options.length && idx < 0; k++) {
@@ -422,8 +545,8 @@
         done.forEach(function (r) {
           if (!r.ok) return;
           var el = els[r.i];
-          r.verified = el.tagName === "SELECT" ? el.selectedIndex === r.idx : el.value === r.want;
-          delete r.idx; delete r.want;
+          r.verified = r.check ? el.checked === true : el.tagName === "SELECT" ? el.selectedIndex === r.idx : el.value === r.want;
+          delete r.idx; delete r.want; delete r.check;
         });
         resolve(done);
       }, 120);
@@ -432,14 +555,23 @@
 
   // ── Apply (shared by the tool and the tab) ──────────────────────────────
 
-  /** The fillable fields of every frame of the current tab, in page order (top frame first), each stamped with its frame. */
-  async function collectFields() {
-    var results = await H.inAllFrames(pageAutofillCollect, [MAX_PAGE_FIELDS]);
+  /**
+   * The fillable fields of every frame of the current tab, in page order (top frame first), each stamped
+   * with its frame. With opts ({ all, maxValue } of pageAutofillCollect) every field the user sees, its
+   * `form` resolved to { frame, i, name, id, action, submits } (null outside a form).
+   */
+  async function collectFields(opts) {
+    var results = await H.inAllFrames(pageAutofillCollect, opts ? [MAX_PAGE_FIELDS, opts] : [MAX_PAGE_FIELDS]);
     var frames = (results || []).filter(function (r) { return r && r.result && Array.isArray(r.result.fields); });
     frames.sort(function (a, b) { return (b.result.isTop ? 1 : 0) - (a.result.isTop ? 1 : 0) || (a.frameId || 0) - (b.frameId || 0); });
     var fields = [];
     frames.forEach(function (r, fi) {
-      r.result.fields.forEach(function (f) { f.frame = fi; f.frameId = r.frameId; f.documentId = r.documentId; fields.push(f); });
+      var forms = Array.isArray(r.result.forms) ? r.result.forms : [];
+      r.result.fields.forEach(function (f) {
+        f.frame = fi; f.frameId = r.frameId; f.documentId = r.documentId;
+        if (typeof f.form === "number") f.form = f.form >= 0 && forms[f.form] ? Object.assign({ frame: fi }, forms[f.form]) : null;
+        fields.push(f);
+      });
     });
     return fields;
   }
@@ -509,6 +641,22 @@
     return text("Deleted identity '" + r.identity.name + "' (" + r.identity.id + "). " + r.left + " left.");
   });
 
+  T.register("browser_autofill_from_page", async function (a) {
+    a = a || {};
+    var name = String(a.name || "").replace(/\s+/g, " ").trim();
+    if (!name) throw new Error("name is required — what to call the identity, e.g. 'Personal' or 'Work'.");
+    var fields = await collectFields();
+    if (!fields.length) throw new Error("No form field is visible on this page (enabled, writable text inputs, textareas or selects). Read the page with browser_read_page first.");
+    var r = fieldsToIdentity(fields);
+    if (!Object.keys(r.fields).length) {
+      var why = r.notKept.length ? " The filled fields fit no identity key: " + r.notKept.map(function (n) { return fieldName(n.field); }).join(", ") + "." : "";
+      if (r.secret.length) why += " Never kept (secret): " + r.secret.map(fieldName).join(", ") + ".";
+      throw new Error("Nothing to save: no filled field on this page fits an identity key." + why + " The user fills the form first — or browser_autofill_save takes the details from the chat.");
+    }
+    var s = await saveIdentity({ name: name, fields: r.fields }, { replace: a.merge === false });
+    return text(formatFromPage(s, r));
+  });
+
   // ── The 🪪 Identities tab ───────────────────────────────────────────────
 
   var FILL_PROMPT = "Fill this form with my saved details: look at browser_autofill_list, pick the identity that fits this page (ask me when it is not obvious), fill the form with browser_autofill_apply, then tell me what was filled and what I still have to enter myself. Don't submit anything.";
@@ -567,14 +715,15 @@
     { group: "Forms", icon: "💾", name: "Save my details from this form", prompt: SAVE_PROMPT }
   );
 
-  /** The pure parts and the storage functions, for tests and other modules. */
+  /** The pure parts and the storage functions, for tests and other modules (forms.js reads the page through collectFields/fillPlan). */
   X.autofill = {
-    KEY: KEY, MAX: MAX, MAX_VALUE: MAX_VALUE, MAX_FIELDS: MAX_FIELDS, MAX_UNMATCHED: MAX_UNMATCHED,
+    KEY: KEY, MAX: MAX, MAX_VALUE: MAX_VALUE, MAX_FIELDS: MAX_FIELDS, MAX_UNMATCHED: MAX_UNMATCHED, MAX_PAGE_FIELDS: MAX_PAGE_FIELDS,
     SYNONYMS: SYNONYMS, ALIASES: ALIASES,
-    normKey: normKey, isSecretKey: isSecretKey, normFields: normFields,
-    scoreField: scoreField, pickOption: pickOption, matchFields: matchFields, fieldName: fieldName,
-    formatList: formatList, formatApply: formatApply, findIdentity: findIdentity,
+    normKey: normKey, isSecretKey: isSecretKey, isSecretField: isSecretField, normFields: normFields,
+    scoreField: scoreField, pickOption: pickOption, matchFields: matchFields, fieldsToIdentity: fieldsToIdentity, fieldName: fieldName, oneLine: oneLine,
+    formatList: formatList, formatApply: formatApply, formatFromPage: formatFromPage, findIdentity: findIdentity,
     load: load, saveIdentity: saveIdentity, deleteIdentity: deleteIdentity, applyIdentity: applyIdentity,
+    collectFields: collectFields, fillPlan: fillPlan,
     pageAutofillCollect: pageAutofillCollect, pageAutofillFill: pageAutofillFill, render: render,
   };
 })();

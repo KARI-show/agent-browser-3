@@ -1,8 +1,10 @@
 // The account switcher (browser/extras/accounts.js) against fakes of chrome.* and the tools runtime: the
 // site key, save → list → switch (cookies cleared and restored in the tab's own store, the current marker)
 // → delete, unknown names, next (save the live session, then switch), export / import (the versioned
-// envelope, merging by site and name), the 👥 tab and the quick commands. Cookie values never leave
-// storage except in an export, which says so.
+// envelope, merging by site and name), update (rename, note, pin — a password-looking note is refused),
+// health (the per-account verdicts from the saved cookies' expiry), launch (save, switch, open the page
+// and work there), clear (sign the live browser out, keep the saved accounts), the 👥 tab and the quick
+// commands. Cookie values never leave storage except in an export, which says so.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -462,12 +464,276 @@ test("accounts: browser_account_import takes an export into storage without touc
   assert.equal(local[A.KEY]["example.com"].current, "bob");
 });
 
+test("accounts: update renames, notes and pins an account; a clash, a password-looking note and an overlong note are refused", async () => {
+  const { A, run, jar, local, log, X, tabs } = setup();
+  signedInAs(jar, "alice");
+  await run("browser_account_save", { name: "alice" });
+  signedInAs(jar, "bob");
+  await run("browser_account_save", { name: "bob" });
+  const entry = () => local[A.KEY]["example.com"];
+
+  // A note: shown in the list under the account; cookies and the live session untouched.
+  let out = await run("browser_account_update", { name: "alice", note: "  Marketing persona —  2FA by authenticator app " });
+  assert.equal(out, "Updated account 'alice' on example.com: note set.\nNote: Marketing persona — 2FA by authenticator app\nIts cookies and the site's live session are unchanged.");
+  assert.equal(entry().accounts.alice.note, "Marketing persona — 2FA by authenticator app");
+  assert.deepEqual(log.sets.concat(log.removes), [], "no cookie was touched");
+  const list = await run("browser_account_list", {});
+  assert.match(list, /^    alice  \|  2 cookies \(1 httpOnly\)  \|  saved just now  \|  https:\/\/www\.app\.example\.com\/account\n      note: Marketing persona — 2FA by authenticator app$/m);
+  noSecrets(out + list);
+  assert.match(await run("browser_account_update", { name: "alice", note: "Ops persona" }), /^Updated account 'alice' on example\.com: note replaced\.\nNote: Ops persona\n/);
+  assert.match(await run("browser_account_update", { name: "alice", note: "" }), /^Updated account 'alice' on example\.com: note removed\.\nIts cookies/);
+  assert.equal(entry().accounts.alice.note, undefined);
+
+  // Pinning lists the account first (and next rotates in that order); unpinning restores the name order.
+  out = await run("browser_account_update", { name: "bob", pin: true });
+  assert.equal(out, "Updated account 'bob' on example.com: pinned (listed first).\nIts cookies and the site's live session are unchanged; it is still the current account.");
+  assert.deepEqual(plain(A.sortedNames(entry())), ["bob", "alice"]);
+  assert.match(await run("browser_account_list", {}), /^example\.com — current: bob\n  \* bob 📌  \|  2 cookies[^\n]*\n    alice  \|/m);
+  assert.deepEqual(plain(A.nextAccount(entry())), { from: "bob", to: "alice", names: ["bob", "alice"] });
+  assert.equal(await run("browser_account_update", { name: "bob", pin: true }), "Nothing changed for 'bob' on example.com — pass newName, note or pin.", "already pinned");
+  assert.match(await run("browser_account_update", { name: "bob", pin: false }), /: unpinned\./);
+  assert.deepEqual(plain(A.sortedNames(entry())), ["alice", "bob"]);
+
+  // Renaming: the current marker follows; onto another account's name it fails; a case change of the same name is fine.
+  out = await run("browser_account_update", { name: "bob", newName: " Bob  Work " });
+  assert.equal(out, "Updated account 'Bob Work' on example.com: renamed 'bob' → 'Bob Work'.\nIts cookies and the site's live session are unchanged; it is still the current account.");
+  assert.deepEqual(Object.keys(entry().accounts).sort(), ["Bob Work", "alice"]);
+  assert.equal(entry().current, "Bob Work");
+  assert.equal(entry().accounts["Bob Work"].cookies.find((c) => c.name === "sid").value, "s3cr3t-bob", "the cookies moved with the name");
+  await assert.rejects(run("browser_account_update", { name: "alice", newName: "bob work" }), /^Error: An account named 'Bob Work' already exists for example\.com — pick another name, or delete that one first\.$/);
+  assert.deepEqual(Object.keys(entry().accounts).sort(), ["Bob Work", "alice"], "a refused rename changes nothing");
+  assert.match(await run("browser_account_update", { name: "alice", newName: "Alice" }), /^Updated account 'Alice' on example\.com: renamed 'alice' → 'Alice'\./);
+  assert.match(await run("browser_account_update", { name: "Alice", newName: "Alice", note: "x", pin: true }), /^Updated account 'Alice' on example\.com: note set, pinned \(listed first\)\./, "the same name is not a rename");
+  assert.equal(await run("browser_account_update", { name: "Alice" }), "Nothing changed for 'Alice' on example.com — pass newName, note or pin.");
+
+  // Notes that look like a password, or are too long, are refused and nothing is stored.
+  for (const bad of ["my password is hunter2", "Password: hunter2", "пароль qwerty", "pass: hunter2", "PASS:hunter2"]) {
+    await assert.rejects(run("browser_account_update", { name: "Alice", note: bad }), /^Error: The note looks like it holds a password — notes are for who the persona is and 2FA hints, never a password/, bad);
+  }
+  assert.equal(entry().accounts.Alice.note, "x");
+  await assert.rejects(run("browser_account_update", { name: "Alice", note: "n".repeat(301) }), /^Error: note is at most 300 characters \(got 301\)/);
+  assert.equal(A.cleanNote("n".repeat(300)).length, 300);
+  assert.equal(A.cleanNote("  passes 2FA  via SMS  "), "passes 2FA via SMS", "'pass' without a colon and a token is a word");
+  assert.equal(A.cleanNote(null), "");
+  assert.equal(A.NOTE_MAX, 300);
+  // Unknown names and sites, like the other tools.
+  await assert.rejects(run("browser_account_update", { name: "zed", note: "x" }), /^Error: No account named 'zed' for example\.com\. Saved accounts: Alice, Bob Work\.$/);
+  await assert.rejects(run("browser_account_update", { name: "Alice", site: "nothing.test", note: "x" }), /No accounts saved for nothing\.test\./);
+  await assert.rejects(run("browser_account_update", { note: "x" }), /name is required/);
+
+  // The 👥 tab shows the pin and the note, pinned first.
+  const dom = fakeDom();
+  const ctx = fakeCtx(dom, { url: tabs[5].url });
+  const content = new dom.Node("div");
+  await X.tabs.find((t) => t.id === "accounts").render(content, ctx);
+  assert.deepEqual(dom.byClass(content, "cmd-name").map(dom.textOf), ["Save this sign-in as…", "Alice 📌", "Bob Work  · current"]);
+  assert.ok(dom.byClass(content, "cmd-desc").map(dom.textOf).includes("x"), "the note is its own line");
+  assert.doesNotMatch(dom.textOf(content), /token|s3cr3t/);
+});
+
+test("accounts: accountHealth grades fresh, expiring, expired, session-only and empty accounts from the saved cookies' expiry", () => {
+  const { A } = setup();
+  const now = Date.UTC(2026, 0, 15, 12), sec = now / 1000, day = 86400;
+  const c = (exp) => (exp === undefined ? { name: "s" } : { name: "p", expirationDate: exp });
+  const h = (cookies, saved = 1) => plain(A.accountHealth({ saved, cookies }, now));
+  assert.deepEqual(h([c(sec + 30 * day), c()]), { count: 2, sessionOnly: 1, persistent: 1, expired: 0, expiringSoon: 0, earliest: now + 30 * day * 1000, daysLeft: 30, saved: 1, ok: true, verdict: "fresh" });
+  assert.equal(h([c(sec + 3 * day), c(sec + 30 * day)]).verdict, "expires in 3 days");
+  assert.deepEqual([h([c(sec + 3 * day), c(sec + 30 * day)]).expiringSoon, h([c(sec + 3 * day), c(sec + 30 * day)]).daysLeft, h([c(sec + 3 * day)]).ok], [1, 3, false]);
+  assert.equal(h([c(sec + 7 * day)]).verdict, "expires in 7 days", "within the 7-day window");
+  assert.equal(h([c(sec + 7 * day + 1)]).verdict, "fresh", "just outside it");
+  assert.equal(h([c(sec + 3600)]).verdict, "expires in 1 day", "less than a day left still reads as a day");
+  const ex = h([c(sec - 1), c(sec - 100 * day), c(sec + 30 * day)]);
+  assert.deepEqual([ex.verdict, ex.expired, ex.persistent, ex.daysLeft, ex.ok], ["expired (2 cookies past their date)", 2, 3, 30, false]);
+  assert.equal(h([c(sec - 1)]).verdict, "expired (1 cookie past its date)");
+  assert.equal(h([c(sec - 1), c(sec + 2 * day)]).verdict, "expired (1 cookie past its date)", "expired outranks expiring");
+  assert.deepEqual(h([c(), c()]), { count: 2, sessionOnly: 2, persistent: 0, expired: 0, expiringSoon: 0, earliest: null, daysLeft: null, saved: 1, ok: false, verdict: "session-only cookies: valid only until the browser closes" });
+  assert.equal(h([]).verdict, "empty: no cookies saved");
+  assert.equal(plain(A.accountHealth(undefined, now)).verdict, "empty: no cookies saved");
+  assert.equal(h([{ name: "x", expirationDate: "soon" }]).verdict, "session-only cookies: valid only until the browser closes", "an unusable expiry counts as none");
+  assert.equal(A.EXPIRY_SOON, 7);
+});
+
+test("accounts: browser_account_health reports every account with its expiry, age, current marker and verdict", async () => {
+  const { A, run, local } = setup();
+  assert.equal(await run("browser_account_health", {}), "No accounts saved yet. Sign in to a site and use browser_account_save to keep that sign-in under a name.");
+  const now = Date.now(), sec = Math.floor(now / 1000), day = 86400;
+  const p = (exp, v) => ({ name: "p" + exp, value: v || "s3cr3t", domain: ".example.com", hostOnly: false, path: "/", secure: true, httpOnly: true, sameSite: "unspecified", expirationDate: exp });
+  const s = { name: "session", value: "tok3n", domain: "www.app.example.com", hostOnly: true, path: "/", secure: true, httpOnly: false, sameSite: "lax" };
+  local[A.KEY] = {
+    "example.com": { current: "alice", accounts: {
+      alice: { name: "alice", saved: now - 2 * 3600000, count: 2, httpOnly: 1, url: "https://www.app.example.com/", cookies: [p(sec + 30 * day), s] },
+      bob: { name: "bob", saved: now - 10 * day * 1000, count: 1, httpOnly: 1, url: "", cookies: [p(sec + 2 * day)] },
+      carol: { name: "carol", saved: now - 40 * day * 1000, count: 2, httpOnly: 2, url: "", pinned: true, cookies: [p(sec - day), p(sec - 10)] },
+    } },
+    "zeta.test": { current: null, accounts: { z: { name: "z", saved: now - 60000, count: 1, httpOnly: 0, url: "https://zeta.test/", cookies: [{ ...s, domain: "zeta.test" }] } } },
+  };
+  const out = await run("browser_account_health", {});
+  const date = (exp) => new Date(exp * 1000).toISOString().slice(0, 10);
+  assert.equal(out, [
+    "Account health (4 accounts on 2 sites): 3 accounts need attention.",
+    "example.com — current: alice",
+    "    carol 📌  |  2 cookies  |  2 expired  |  saved 40d ago  |  ⚠ expired (2 cookies past their date)",
+    "  * alice  |  2 cookies (1 session-only)  |  earliest expiry in 30 days (" + date(sec + 30 * day) + ")  |  saved 2h ago  |  ✓ fresh",
+    "    bob  |  1 cookie  |  earliest expiry in 2 days (" + date(sec + 2 * day) + ")  |  saved 10d ago  |  ⚠ expires in 2 days",
+    "zeta.test — no current account",
+    "    z  |  1 cookie (1 session-only)  |  no expiry dates  |  saved 1m ago  |  ⚠ session-only cookies: valid only until the browser closes",
+    "Re-save an expired or expiring account after signing in again (browser_account_save replaces it); a session-only account lasts only as long as the browser session it was saved from. Cookie values are never shown.",
+  ].join("\n"));
+  noSecrets(out);
+  assert.doesNotMatch(out, /tok3n/);
+  const one = await run("browser_account_health", { site: "https://zeta.test/x" });
+  assert.match(one, /^Account health \(1 account on 1 site\): 1 account needs attention\.\nzeta\.test — no current account\n/);
+  local[A.KEY]["zeta.test"].accounts.z.cookies = [p(sec + 100 * day)];
+  assert.equal(await run("browser_account_health", { site: "zeta.test" }), "Account health (1 account on 1 site): all fresh.\nzeta.test — no current account\n    z  |  1 cookie  |  earliest expiry in 100 days (" + date(sec + 100 * day) + ")  |  saved 1m ago  |  ✓ fresh\nCookie values are never shown.");
+  assert.equal(await run("browser_account_health", { site: "nothing.test" }), "No accounts saved for nothing.test. Sign in there and use browser_account_save.");
+  await assert.rejects(run("browser_account_health", { site: "about:blank" }), /site must be a host or URL/);
+  // Mixed persistent cookies with one expired: the expired count and the next expiry both show.
+  local[A.KEY]["example.com"].accounts.carol.cookies.push(p(sec + 5 * day));
+  assert.match(await run("browser_account_health", { site: "example.com" }), /^    carol 📌  \|  3 cookies  \|  2 expired, next expiry in 5 days  \|  saved 40d ago  \|  ⚠ expired \(2 cookies past their date\)$/m);
+});
+
+test("accounts: browser_account_launch saves the live session, switches like switch and opens the account's page in a new tab, a new window or this tab", async () => {
+  const { A, run, jar, local, log, tabs, T } = setup();
+  await assert.rejects(run("browser_account_launch", { name: "alice" }), /^Error: site is required — the host or URL of the site to open as 'alice', e\.g\. example\.com\.$/);
+  await assert.rejects(run("browser_account_launch", { site: "example.com" }), /name is required/);
+  await assert.rejects(run("browser_account_launch", { site: "example.com", name: "alice" }), /^Error: No accounts saved for example\.com\. Sign in and save one with browser_account_save first\.$/);
+  signedInAs(jar, "alice");
+  await run("browser_account_save", { name: "alice" });
+  signedInAs(jar, "bob");
+  await run("browser_account_save", { name: "bob" });
+  await assert.rejects(run("browser_account_launch", { site: "example.com", name: "carol" }), /^Error: No account named 'carol' for example\.com\. Saved accounts: alice, bob\.$/);
+  await assert.rejects(run("browser_account_launch", { site: "example.com", name: "alice", where: "popup" }), /^Error: where must be 'current', 'tab' or 'window', got 'popup'\.$/);
+  assert.deepEqual([log.created, log.windows, T.switched], [[], [], []], "a refused launch opens nothing");
+  signedInAs(jar, "bob-refreshed"); // the session moved on since bob was saved
+
+  // Default: a new tab in the tab's window, active; the agent works there; tab 5 (on the site) reloaded by the switch.
+  let out = await run("browser_account_launch", { site: "example.com", name: "alice" });
+  assert.equal(out, [
+    "Launched example.com as 'alice' in a new tab (tab 77): (untitled) — https://www.app.example.com/account. Working there from now on.",
+    "Saved the live session into 'bob' first: 2 cookies (1 httpOnly).",
+    "Switched example.com to account 'alice': cleared 2 cookie(s), restored 2 of 2.",
+    "'alice' is now the current account on example.com.",
+  ].join("\n"));
+  noSecrets(out);
+  assert.deepEqual(log.created, [{ url: "https://www.app.example.com/account", windowId: 1, active: true }]);
+  assert.deepEqual([T.current, T.switched], [77, [77]], "the agent now works in the new tab");
+  assert.deepEqual([tabs[77].active, tabs[5].active], [true, false]);
+  assert.deepEqual(log.reloads, [5]);
+  assert.equal(jar.find((c) => c.name === "sid").value, "s3cr3t-alice");
+  assert.equal(local[A.KEY]["example.com"].accounts.bob.cookies.find((c) => c.name === "sid").value, "s3cr3t-bob-refreshed", "the live session went into bob before the switch");
+  assert.equal(local[A.KEY]["example.com"].current, "alice");
+
+  // A new window shares the tab's cookie store (not private here); the switch runs in the tab the agent was on.
+  T.current = 5;
+  out = await run("browser_account_launch", { site: "https://app.example.com/", name: "bob", where: "window" });
+  assert.match(out, /^Launched example\.com as 'bob' in a new window \(tab 78, window 3\): \(untitled\) — https:\/\/www\.app\.example\.com\/account\. Working there from now on\.\nSaved the live session into 'alice' first: 2 cookies \(1 httpOnly\)\.\nSwitched example\.com to account 'bob': cleared 2 cookie\(s\), restored 2 of 2\.\n'bob' is now the current account on example\.com\.$/);
+  assert.deepEqual(log.windows, [{ url: "https://www.app.example.com/account", focused: true, incognito: false }]);
+  assert.deepEqual([T.current, tabs[78].windowId, tabs[78].incognito], [78, 3, undefined]);
+  assert.equal(jar.find((c) => c.name === "sid").value, "s3cr3t-bob-refreshed");
+  assert.deepEqual(log.reloads, [5, 5]);
+
+  // The current tab: navigated, not reloaded.
+  T.current = 5;
+  out = await run("browser_account_launch", { site: "example.com", name: "alice", where: "current" });
+  assert.match(out, /^Launched example\.com as 'alice' in this tab \(tab 5\): Account — https:\/\/www\.app\.example\.com\/account\. Working there from now on\.\n/);
+  assert.deepEqual(log.updates, [{ id: 5, url: "https://www.app.example.com/account", active: true }]);
+  assert.deepEqual(log.reloads, [5, 5], "no reload of a tab that is navigated anyway");
+  assert.deepEqual([T.current, T.switched], [5, [77, 78, 5]]);
+
+  // No saved page URL → the site's root; nothing current on that site → the live session is not saved; a tab elsewhere is not reloaded.
+  local[A.KEY]["zeta.test"] = { current: null, accounts: { z: { name: "z", saved: 1, count: 1, httpOnly: 0, url: "", cookies: [{ name: "k", value: "v", domain: "zeta.test", hostOnly: true, path: "/", secure: true, httpOnly: false, sameSite: "lax" }] } } };
+  out = await run("browser_account_launch", { site: "zeta.test", name: "z" });
+  assert.equal(out, [
+    "Launched zeta.test as 'z' in a new tab (tab 79): (untitled) — https://zeta.test/. Working there from now on.",
+    "No account was current on zeta.test, so the live session was not saved; it is replaced.",
+    "Switched zeta.test to account 'z': cleared 0 cookie(s), restored 1 of 1.",
+    "'z' is now the current account on zeta.test.",
+  ].join("\n"));
+  assert.deepEqual(log.reloads, [5, 5]);
+  assert.equal(jar.find((c) => c.name === "k").value, "v");
+
+  // A private tab opens a private window, so the restored cookies (in its store) are there too.
+  T.current = 9;
+  signedInAs(jar, "alice", "1");
+  await run("browser_account_save", { name: "alice" });
+  out = await run("browser_account_launch", { site: "example.com", name: "alice", where: "window" });
+  assert.match(out, /^Launched example\.com as 'alice' in a new window \(tab 80, window 4\): \(untitled\) — https:\/\/example\.com\/\. /, "the page URL the private tab saved alice from");
+  assert.deepEqual(log.windows.at(-1), { url: "https://example.com/", focused: true, incognito: true });
+  assert.equal(tabs[80].incognito, true);
+  assert.ok(log.sets.slice(-2).every((d) => d.storeId === "1"), "restored into the private store");
+  // A window the panel cannot open: the background's reply, else a clear error.
+  const f2 = setup();
+  signedInAs(f2.jar, "alice");
+  await f2.run("browser_account_save", { name: "alice" });
+  delete f2.chrome.windows;
+  f2.chrome.runtime.sendMessage = async (msg) => ({ ok: true, win: { id: 9, tabs: [] }, msg });
+  f2.tabs[81] = { id: 81, windowId: 9, url: "https://www.app.example.com/account", title: "Via background" };
+  assert.match(await f2.run("browser_account_launch", { site: "example.com", name: "alice", where: "window" }), /^Launched example\.com as 'alice' in a new window \(tab 81, window 9\): Via background — /);
+  f2.chrome.runtime.sendMessage = async () => ({ ok: false });
+  await assert.rejects(f2.run("browser_account_launch", { site: "example.com", name: "alice", where: "window" }), /^Error: Couldn't open a new window — try where: 'tab'\.$/);
+});
+
+test("accounts: browser_account_clear signs the site out in the live browser and leaves the saved accounts alone (unless keep is false)", async () => {
+  const { A, run, jar, local, log, tabs, T } = setup();
+  jar.push({ name: "other", value: "keep", domain: "other.test", hostOnly: true, path: "/", secure: false, httpOnly: false, sameSite: "lax", storeId: "0" });
+  signedInAs(jar, "alice");
+  await run("browser_account_save", { name: "alice" });
+  let out = await run("browser_account_clear", {});
+  assert.equal(out, [
+    "Signed out of example.com: removed 2 cookies (host and parent domain) from this tab's cookie store.",
+    "Reloaded the tab: Account — https://www.app.example.com/account",
+    "The 1 saved account for example.com remains (alice); 'alice' is no longer marked current — browser_account_switch signs back in with one.",
+  ].join("\n"));
+  noSecrets(out);
+  assert.deepEqual(jar.map((c) => c.name), ["other"], "the site's cookies are gone, another site's stay");
+  assert.deepEqual(log.reloads, [5]);
+  assert.equal(local[A.KEY]["example.com"].current, null);
+  assert.equal(local[A.KEY]["example.com"].accounts.alice.cookies.find((c) => c.name === "sid").value, "s3cr3t-alice", "the saved account is untouched");
+  assert.match(await run("browser_account_list", {}), /^example\.com — no current account/m);
+  // Already signed out: nothing removed, no reload.
+  assert.equal(await run("browser_account_clear", {}), "No cookies for example.com in this tab — it was already signed out.\nThe 1 saved account for example.com remains (alice); none is current — browser_account_switch signs back in with one.");
+  assert.deepEqual(log.reloads, [5]);
+  // …and the saved account signs back in.
+  assert.match(await run("browser_account_switch", { name: "alice" }), /^Switched example\.com to account 'alice': cleared 0 cookie\(s\), restored 2 of 2\./);
+  assert.equal(jar.find((c) => c.name === "sid").value, "s3cr3t-alice");
+  // keep: false forgets the saved accounts too.
+  signedInAs(jar, "bob");
+  await run("browser_account_save", { name: "bob" });
+  out = await run("browser_account_clear", { keep: false });
+  assert.equal(out, "Signed out of example.com: removed 2 cookies (host and parent domain) from this tab's cookie store.\nReloaded the tab: Account — https://www.app.example.com/account\nForgot the 2 saved accounts for example.com too (alice, bob), as keep was false.");
+  assert.deepEqual(local[A.KEY], {});
+  // No saved accounts: said so. A tab elsewhere with an explicit site: the cookies go, the tab is not reloaded.
+  signedInAs(jar, "carol");
+  assert.equal(await run("browser_account_clear", {}), "Signed out of example.com: removed 2 cookies (host and parent domain) from this tab's cookie store.\nReloaded the tab: Account — https://www.app.example.com/account\nNo accounts are saved for example.com.");
+  signedInAs(jar, "dave");
+  tabs[5].url = "https://other.test/page";
+  log.reloads.length = 0;
+  assert.equal(await run("browser_account_clear", { site: "https://app.example.com/x" }), "Signed out of example.com: removed 2 cookies (host and parent domain) from this tab's cookie store.\nThe current tab is on other.test, not example.com — it was not reloaded.\nNo accounts are saved for example.com.");
+  assert.deepEqual(log.reloads, []);
+  assert.equal(jar.find((c) => c.name === "other").value, "keep");
+  await assert.rejects(run("browser_account_clear", { site: "about:blank" }), /site must be a host or URL/);
+  tabs[5].url = "chrome://extensions";
+  await assert.rejects(run("browser_account_clear", {}), /The current tab is not a website/);
+  // A private tab clears its own store only.
+  signedInAs(jar, "eve", "0");
+  signedInAs(jar, "fay", "1");
+  T.current = 9;
+  log.removes.length = 0;
+  assert.match(await run("browser_account_clear", {}), /^Signed out of example\.com: removed 2 cookies/);
+  assert.ok(log.removes.length === 2 && log.removes.every((d) => d.storeId === "1"));
+  assert.equal(site(jar, "0").find((c) => c.name === "sid").value, "s3cr3t-eve", "the regular session is untouched");
+  assert.deepEqual(site(jar, "1"), []);
+});
+
 test("accounts: tools and quick commands are registered under their names and group", () => {
   const { T, X } = setup();
-  assert.deepEqual(Object.keys(T.registered).sort(), ["browser_account_delete", "browser_account_export", "browser_account_import", "browser_account_list", "browser_account_next", "browser_account_save", "browser_account_switch"]);
+  assert.deepEqual(Object.keys(T.registered).sort(), ["browser_account_clear", "browser_account_delete", "browser_account_export", "browser_account_health", "browser_account_import", "browser_account_launch", "browser_account_list", "browser_account_next", "browser_account_save", "browser_account_switch", "browser_account_update"]);
   const mine = X.commands.filter((c) => c.group === "Accounts");
-  assert.deepEqual(mine.map((c) => [c.name, !!c.partial]), [["Save this sign-in as an account", true], ["Switch account on this site", true], ["Which account am I using here?", false], ["Next account on this site", false], ["Export my accounts", false]]);
+  assert.deepEqual(mine.map((c) => [c.name, !!c.partial]), [["Save this sign-in as an account", true], ["Switch account on this site", true], ["Which account am I using here?", false], ["Next account on this site", false], ["Export my accounts", false], ["Open this site as an account…", true], ["Account health check", false], ["Sign out of this site", false]]);
   for (const c of mine) assert.ok(c.icon && c.prompt.length > 20, c.name);
   assert.match(mine[3].prompt, /browser_account_next/);
   assert.match(mine[4].prompt, /browser_account_export[\s\S]*session cookies/);
+  assert.match(mine[5].prompt, /browser_account_launch[\s\S]*named: $/);
+  assert.match(mine[6].prompt, /browser_account_health[\s\S]*expired/);
+  assert.match(mine[7].prompt, /browser_account_clear[\s\S]*keeping my saved accounts/);
 });

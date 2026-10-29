@@ -4,7 +4,11 @@
 // cookie count and the page URL; switching clears the site's cookies in the tab's cookie store, sets the
 // saved ones back and reloads the tab. "Next" rotates through a site's accounts (saving the live session
 // into the current one first); export / import carry the saved accounts, cookies included, between
-// machines in a versioned JSON envelope. The tools are declared in browser/host/extras/accounts.ts.
+// machines in a versioned JSON envelope. Update renames, pins and annotates an account (a note that
+// looks like a password is refused); launch switches a site to an account and opens its page in a
+// tab or window the agent then works in; health grades every saved account's cookies by their expiry;
+// clear signs a site out in the live browser and leaves the saved accounts alone. The tools are
+// declared in browser/host/extras/accounts.ts.
 //
 // Cookie values live only in storage: no tool output, trace entry or panel element ever carries one.
 // Account names are the user's data — shown as text, never interpreted. The tab's DOM is built with
@@ -15,8 +19,14 @@
   var H = T.helpers;
   var text = H.text;
 
-  var KEY = "agentAccounts"; // { [site]: { current: name|null, accounts: { [name]: { name, saved, count, httpOnly, url, cookies } } } }
+  var KEY = "agentAccounts"; // { [site]: { current: name|null, accounts: { [name]: { name, saved, count, httpOnly, url, cookies, note?, pinned? } } } }
   var NAME_MAX = 60;
+  var NOTE_MAX = 300;
+  // A note that carries a password is refused: notes say who the persona is and how its 2FA works, never a secret.
+  var PASSWORD_LIKE = /password|пароль|\bpass:\s*\S/i;
+  var DAY = 86400000;
+  var EXPIRY_SOON = 7; // days: a saved cookie that expires within this many makes its account "expiring"
+  var WHERE = { current: "this tab", tab: "a new tab", window: "a new window" }; // browser_account_launch's `where`
   var FORMAT = "agent-accounts/1"; // the export envelope's version; bump it when the account shape changes
   // Public suffixes of two labels under which the registrable domain has three (shop.example.co.uk → example.co.uk).
   var TWO_LEVEL_SUFFIX = /^(co|com|net|org|gov|edu|ac|or|ne|go|nom|ltd|plc|me)\.[a-z]{2}$/;
@@ -63,6 +73,14 @@
     return n;
   }
 
+  /** A usable account note: one line, trimmed, at most NOTE_MAX characters ("" clears it); throws when it looks like a password. */
+  function cleanNote(note) {
+    var n = String(note == null ? "" : note).replace(/\s+/g, " ").trim();
+    if (n.length > NOTE_MAX) throw new Error("note is at most " + NOTE_MAX + " characters (got " + n.length + ") — who this persona is and its 2FA hints, in a line or two.");
+    if (PASSWORD_LIKE.test(n)) throw new Error("The note looks like it holds a password — notes are for who the persona is and 2FA hints, never a password: the saved cookies are the sign-in, and a password has no place in storage.");
+    return n;
+  }
+
   /** The stored name matching `name`: exact first, else the only case-insensitive match; null when unknown. */
   function findName(entry, name) {
     if (!entry || !entry.accounts) return null;
@@ -72,9 +90,14 @@
     return hits.length === 1 ? hits[0] : null;
   }
 
-  /** The site's account names in the order the list and the panel show them (by name). */
+  /** The site's account names in the order the list and the panel show them: pinned first, then by name. */
   function sortedNames(entry) {
-    return entry && entry.accounts ? Object.keys(entry.accounts).sort() : [];
+    if (!entry || !entry.accounts) return [];
+    var acc = entry.accounts;
+    return Object.keys(acc).sort(function (a, b) {
+      var pa = acc[a] && acc[a].pinned ? 1 : 0, pb = acc[b] && acc[b].pinned ? 1 : 0;
+      return pb - pa || (a < b ? -1 : a > b ? 1 : 0);
+    });
   }
 
   /**
@@ -89,9 +112,9 @@
     return { from: cur, to: names[(i + 1) % names.length], names: names };
   }
 
-  function ago(ts) {
+  function ago(ts, now) {
     if (!ts) return "never";
-    var d = Date.now() - ts;
+    var d = (now || Date.now()) - ts;
     if (d < 60000) return "just now";
     if (d < 3600000) return Math.floor(d / 60000) + "m ago";
     if (d < 86400000) return Math.floor(d / 3600000) + "h ago";
@@ -242,6 +265,72 @@
     return lines.join("\n");
   }
 
+  /**
+   * How much life a saved account's cookies have left at `now` (ms) → { count, sessionOnly, persistent, expired, expiringSoon,
+   * earliest (ms of the nearest expiry still ahead, or null), daysLeft, saved, ok, verdict }. Chrome keeps expirationDate in
+   * seconds; a cookie without one lives until the browser closes. The verdict is "fresh", "expires in N days" (the nearest
+   * expiry is within EXPIRY_SOON days), "expired (K cookies past their date)", "session-only cookies: valid only until the
+   * browser closes" or, for an account without cookies, "empty: no cookies saved".
+   */
+  function accountHealth(acct, now) {
+    now = now || Date.now();
+    var cookies = (acct && acct.cookies) || [];
+    var h = { count: cookies.length, sessionOnly: 0, persistent: 0, expired: 0, expiringSoon: 0, earliest: null, daysLeft: null, saved: (acct && acct.saved) || 0, ok: true, verdict: "" };
+    cookies.forEach(function (c) {
+      var exp = Number(c && c.expirationDate);
+      if (!(exp > 0)) {
+        h.sessionOnly++;
+        return;
+      }
+      h.persistent++;
+      var at = exp * 1000;
+      if (at <= now) {
+        h.expired++;
+        return;
+      }
+      if (h.earliest === null || at < h.earliest) h.earliest = at;
+      if (at - now <= EXPIRY_SOON * DAY) h.expiringSoon++;
+    });
+    if (h.earliest !== null) h.daysLeft = Math.max(1, Math.ceil((h.earliest - now) / DAY));
+    if (!h.count) h.verdict = "empty: no cookies saved";
+    else if (h.expired) h.verdict = "expired (" + plural(h.expired, "cookie") + " past " + (h.expired === 1 ? "its" : "their") + " date)";
+    else if (h.expiringSoon) h.verdict = "expires in " + plural(h.daysLeft, "day");
+    else if (!h.persistent) h.verdict = "session-only cookies: valid only until the browser closes";
+    else h.verdict = "fresh";
+    h.ok = h.verdict === "fresh";
+    return h;
+  }
+
+  /** The health report: every site (or one), each account with its counts, nearest expiry, age, current marker and verdict. */
+  function formatHealth(all, filter, now) {
+    now = now || Date.now();
+    var sites = Object.keys(all || {}).filter(function (s) { return Object.keys(all[s].accounts || {}).length && (!filter || s === filter); }).sort();
+    if (!sites.length) {
+      return filter
+        ? "No accounts saved for " + filter + ". Sign in there and use browser_account_save."
+        : "No accounts saved yet. Sign in to a site and use browser_account_save to keep that sign-in under a name.";
+    }
+    var total = 0, bad = 0, body = [];
+    sites.forEach(function (s) {
+      var entry = all[s];
+      body.push(s + (entry.current && entry.accounts[entry.current] ? " — current: " + entry.current : " — no current account"));
+      sortedNames(entry).forEach(function (n) {
+        var acct = entry.accounts[n], h = accountHealth(acct, now);
+        total++;
+        if (!h.ok) bad++;
+        var expiry = h.expired ? h.expired + " expired" + (h.earliest !== null ? ", next expiry in " + plural(h.daysLeft, "day") : "")
+          : h.earliest !== null ? "earliest expiry in " + plural(h.daysLeft, "day") + " (" + new Date(h.earliest).toISOString().slice(0, 10) + ")" : "no expiry dates";
+        body.push("  " + (n === entry.current ? "* " : "  ") + n + (acct.pinned ? " 📌" : "") + "  |  " + plural(h.count, "cookie") + (h.sessionOnly ? " (" + h.sessionOnly + " session-only)" : "") +
+          "  |  " + expiry + "  |  saved " + ago(h.saved, now) + "  |  " + (h.ok ? "✓ " : "⚠ ") + h.verdict);
+      });
+    });
+    var lines = ["Account health (" + plural(total, "account") + " on " + plural(sites.length, "site") + "): " + (bad ? plural(bad, "account") + " need" + (bad === 1 ? "s" : "") + " attention" : "all fresh") + "."].concat(body);
+    lines.push(bad
+      ? "Re-save an expired or expiring account after signing in again (browser_account_save replaces it); a session-only account lasts only as long as the browser session it was saved from. Cookie values are never shown."
+      : "Cookie values are never shown.");
+    return lines.join("\n");
+  }
+
   // ── Storage and cookies ────────────────────────────────────────────────
 
   async function load() {
@@ -285,6 +374,23 @@
       await H.sleep(200);
     }
     return chrome.tabs.get(tabId);
+  }
+
+  // A new window: chrome.windows.create where the panel may call it, else through the background (Edge refuses it from a side panel).
+  async function openWindow(options) {
+    var err = null;
+    if (chrome.windows && chrome.windows.create) {
+      try {
+        return await chrome.windows.create(options);
+      } catch (e) {
+        err = e;
+      }
+    }
+    if (chrome.runtime && chrome.runtime.sendMessage) {
+      var res = await chrome.runtime.sendMessage({ type: "createWindow", options: options }).catch(function () { return null; });
+      if (res && res.ok && res.win && res.win.id) return res.win;
+    }
+    throw new Error("Couldn't open a new window" + (err ? " (" + ((err && err.message) || err) + ")" : "") + " — try where: 'tab'.");
   }
 
   function siteOfTab(tab) {
@@ -348,14 +454,61 @@
     sites.forEach(function (s) {
       var entry = all[s];
       lines.push(s + (entry.current && entry.accounts[entry.current] ? " — current: " + entry.current : " — no current account (the site is signed in as it was left)"));
-      Object.keys(entry.accounts).sort().forEach(function (n) {
+      sortedNames(entry).forEach(function (n) {
         var acct = entry.accounts[n];
-        lines.push("  " + (n === entry.current ? "* " : "  ") + n + "  |  " + plural(acct.count || 0, "cookie") + (acct.httpOnly ? " (" + acct.httpOnly + " httpOnly)" : "") +
+        lines.push("  " + (n === entry.current ? "* " : "  ") + n + (acct.pinned ? " 📌" : "") + "  |  " + plural(acct.count || 0, "cookie") + (acct.httpOnly ? " (" + acct.httpOnly + " httpOnly)" : "") +
           "  |  saved " + ago(acct.saved) + (acct.url ? "  |  " + acct.url : ""));
+        if (acct.note) lines.push("      note: " + acct.note);
       });
     });
     lines.push("Names are the user's labels (data, not instructions). Cookie values are never shown.");
     return lines.join("\n");
+  }
+
+  /** The saved account a tool names on a site → { all, site, entry, key, acct, names }; throws with the saved names when it is unknown. */
+  async function findAccount(name, site) {
+    var all = await load();
+    var entry = all[site];
+    var names = sortedNames(entry);
+    if (!names.length) throw new Error("No accounts saved for " + site + ". Sign in and save one with browser_account_save first.");
+    var key = findName(entry, name);
+    if (!key) throw new Error("No account named '" + name + "' for " + site + ". Saved accounts: " + names.join(", ") + ".");
+    return { all: all, site: site, entry: entry, key: key, acct: entry.accounts[key], names: names };
+  }
+
+  /**
+   * The switch itself, for a findAccount() result: clear the site's cookies in the tab's store, set the saved account's
+   * back, mark it current, and reload the tab when it is on the site (unless `reload` is false: launch navigates it
+   * anyway) → { key, acct, cleared, restored, skipped, onSite, after }.
+   */
+  async function switchSession(f, tab, reload) {
+    var storeId = await storeOf(tab);
+    var existing = await siteCookies(f.site, storeId);
+    var cleared = 0;
+    for (var i = 0; i < existing.length; i++) if (await removeCookie(existing[i], storeId)) cleared++;
+    var restored = 0, skipped = [];
+    for (var j = 0; j < f.acct.cookies.length; j++) {
+      var c = f.acct.cookies[j];
+      try {
+        if (await chrome.cookies.set(setDetails(c, storeId))) restored++;
+        else skipped.push(c.name);
+      } catch (_) {
+        skipped.push(c.name);
+      }
+    }
+    f.entry.current = f.key;
+    await store(f.all);
+    var onSite = siteKey(tab.url) === f.site;
+    var after = null;
+    if (onSite && reload !== false) {
+      await chrome.tabs.reload(tab.id);
+      after = await waitLoaded(tab.id, 15000);
+    }
+    return { key: f.key, acct: f.acct, cleared: cleared, restored: restored, skipped: skipped, onSite: onSite, after: after };
+  }
+  function switchLine(site, r) {
+    return "Switched " + site + " to account '" + r.key + "': cleared " + r.cleared + " cookie(s), restored " + r.restored + " of " + r.acct.cookies.length +
+      (r.skipped.length ? " (not accepted by the browser: " + r.skipped.slice(0, 10).join(", ") + ")" : "") + ".";
   }
 
   /** Put a saved account's cookies back in the tab's store and reload the tab when it is on that site. */
@@ -365,40 +518,11 @@
     tab = tab || (await H.currentTab());
     var site = a && a.site ? siteKey(a.site) : siteOfTab(tab);
     if (!site) throw new Error("site must be a host or URL, got '" + a.site + "'.");
-    var all = await load();
-    var entry = all[site];
-    var names = entry ? Object.keys(entry.accounts).sort() : [];
-    if (!names.length) throw new Error("No accounts saved for " + site + ". Sign in and save one with browser_account_save first.");
-    var key = findName(entry, name);
-    if (!key) throw new Error("No account named '" + name + "' for " + site + ". Saved accounts: " + names.join(", ") + ".");
-    var acct = entry.accounts[key];
-    var storeId = await storeOf(tab);
-    var existing = await siteCookies(site, storeId);
-    var cleared = 0;
-    for (var i = 0; i < existing.length; i++) if (await removeCookie(existing[i], storeId)) cleared++;
-    var restored = 0, skipped = [];
-    for (var j = 0; j < acct.cookies.length; j++) {
-      var c = acct.cookies[j];
-      try {
-        if (await chrome.cookies.set(setDetails(c, storeId))) restored++;
-        else skipped.push(c.name);
-      } catch (_) {
-        skipped.push(c.name);
-      }
-    }
-    entry.current = key;
-    await store(all);
-    var onSite = siteKey(tab.url) === site;
-    var after = null;
-    if (onSite) {
-      await chrome.tabs.reload(tab.id);
-      after = await waitLoaded(tab.id, 15000);
-    }
-    var out = "Switched " + site + " to account '" + key + "': cleared " + cleared + " cookie(s), restored " + restored + " of " + acct.cookies.length +
-      (skipped.length ? " (not accepted by the browser: " + skipped.slice(0, 10).join(", ") + ")" : "") + ".";
-    if (after) out += "\nReloaded the tab: " + (after.title || "(untitled)") + " — " + (after.url || tab.url);
-    else out += "\nThe current tab is on " + (siteKey(tab.url) || "another page") + ", not " + site + " — open " + (acct.url || site) + " to continue as '" + key + "'.";
-    out += "\n'" + key + "' is now the current account on " + site + ".";
+    var r = await switchSession(await findAccount(name, site), tab, true);
+    var out = switchLine(site, r);
+    if (r.after) out += "\nReloaded the tab: " + (r.after.title || "(untitled)") + " — " + (r.after.url || tab.url);
+    else out += "\nThe current tab is on " + (siteKey(tab.url) || "another page") + ", not " + site + " — open " + (r.acct.url || site) + " to continue as '" + r.key + "'.";
+    out += "\n'" + r.key + "' is now the current account on " + site + ".";
     return out;
   }
 
@@ -484,6 +608,139 @@
     return formatImport(r.report, !!a.replace);
   }
 
+  /** Rename an account, set or clear its note, pin or unpin it; its cookies and the site's live session are not touched. */
+  async function update(a, tab) {
+    var name = cleanName(a && a.name);
+    var site = a && a.site ? siteKey(a.site) : siteOfTab(tab || (await H.currentTab()));
+    if (!site) throw new Error("site must be a host or URL, got '" + a.site + "'.");
+    var f = await findAccount(name, site);
+    var entry = f.entry, key = f.key, acct = f.acct;
+    var changes = [];
+    if (a.newName != null && String(a.newName).trim()) {
+      var newName = cleanName(a.newName);
+      if (newName !== key) {
+        var clash = findName(entry, newName);
+        if (clash && clash !== key) throw new Error("An account named '" + clash + "' already exists for " + site + " — pick another name, or delete that one first.");
+        delete entry.accounts[key];
+        acct.name = newName;
+        entry.accounts[newName] = acct;
+        if (entry.current === key) entry.current = newName;
+        changes.push("renamed '" + key + "' → '" + newName + "'");
+        key = newName;
+      }
+    }
+    if (a.note != null) {
+      var note = cleanNote(a.note);
+      if (note) {
+        changes.push(acct.note ? "note replaced" : "note set");
+        acct.note = note;
+      } else if (acct.note) {
+        delete acct.note;
+        changes.push("note removed");
+      }
+    }
+    if (typeof a.pin === "boolean" && !!acct.pinned !== a.pin) {
+      if (a.pin) acct.pinned = true;
+      else delete acct.pinned;
+      changes.push(a.pin ? "pinned (listed first)" : "unpinned");
+    }
+    if (!changes.length) return "Nothing changed for '" + key + "' on " + site + " — pass newName, note or pin.";
+    await store(f.all);
+    return "Updated account '" + key + "' on " + site + ": " + changes.join(", ") + "." + (acct.note ? "\nNote: " + acct.note : "") +
+      "\nIts cookies and the site's live session are unchanged" + (entry.current === key ? "; it is still the current account" : "") + ".";
+  }
+
+  /** Switch a site to a saved account (the live session goes into the current one first), open its page and work there. */
+  async function launch(a, tab) {
+    needCookies();
+    var name = cleanName(a && a.name);
+    var site = a && a.site ? siteKey(a.site) : "";
+    if (!site) throw new Error("site is required — the host or URL of the site to open as '" + name + "', e.g. example.com.");
+    var where = a && a.where ? String(a.where) : "tab";
+    if (!WHERE[where]) throw new Error("where must be 'current', 'tab' or 'window', got '" + a.where + "'.");
+    tab = tab || (await H.currentTab());
+    var f = await findAccount(name, site);
+    var lines = [];
+    var cur = f.entry.current && f.entry.accounts[f.entry.current] ? f.entry.current : null;
+    if (cur) {
+      // The live session goes into the current account first, as next does, so nothing that happened since it was saved is lost.
+      try {
+        var s = await saveSession(cur, site, tab);
+        lines.push("Saved the live session into '" + cur + "' first: " + plural(s.count, "cookie") + (s.httpOnly ? " (" + s.httpOnly + " httpOnly)" : "") + ".");
+        f = await findAccount(name, site); // storage changed under us
+      } catch (e) {
+        lines.push("The live session was not saved into '" + cur + "' (" + ((e && e.message) || e) + ") — its saved cookies are kept as they were.");
+      }
+    } else lines.push("No account was current on " + site + ", so the live session was not saved; it is replaced.");
+    var r = await switchSession(f, tab, where !== "current");
+    lines.push(switchLine(site, r));
+    var url = r.acct.url || "https://" + site + "/";
+    var opened, winId = 0;
+    if (where === "current") {
+      await chrome.tabs.update(tab.id, { url: url, active: true });
+      T.setCurrentTab(tab.id);
+      opened = await waitLoaded(tab.id, 20000);
+    } else if (where === "window") {
+      var win = await openWindow({ url: url, focused: true, incognito: !!tab.incognito }); // the tab's cookie store, private or not
+      var wt = (win.tabs && win.tabs[0]) || (await chrome.tabs.query({ windowId: win.id }))[0];
+      if (!wt) throw new Error("Couldn't open a new window for " + url + " — no tab came back.");
+      winId = win.id;
+      T.setCurrentTab(wt.id);
+      opened = await waitLoaded(wt.id, 20000);
+    } else {
+      var nt = await chrome.tabs.create({ url: url, windowId: tab.windowId, active: true });
+      T.setCurrentTab(nt.id);
+      opened = await waitLoaded(nt.id, 20000);
+    }
+    lines.unshift("Launched " + site + " as '" + r.key + "' in " + WHERE[where] + " (tab " + opened.id + (winId ? ", window " + winId : "") + "): " +
+      (opened.title || "(untitled)") + " — " + (opened.url || url) + ". Working there from now on.");
+    lines.push("'" + r.key + "' is now the current account on " + site + ".");
+    return lines.join("\n");
+  }
+
+  /** The health of the saved accounts (one site or all): counts, expiry, age and a verdict each. */
+  async function health(a) {
+    var filter = a && a.site ? siteKey(a.site) : "";
+    if (a && a.site && !filter) throw new Error("site must be a host or URL, got '" + a.site + "'.");
+    return formatHealth(await load(), filter, Date.now());
+  }
+
+  /** Sign the site out in the live browser: its cookies leave the tab's store and the tab reloads; the saved accounts stay unless keep is false. */
+  async function clear(a, tab) {
+    needCookies();
+    tab = tab || (await H.currentTab());
+    var site = a && a.site ? siteKey(a.site) : siteOfTab(tab);
+    if (!site) throw new Error("site must be a host or URL, got '" + a.site + "'.");
+    var keep = !(a && a.keep === false);
+    var storeId = await storeOf(tab);
+    var existing = await siteCookies(site, storeId);
+    var removed = 0;
+    for (var i = 0; i < existing.length; i++) if (await removeCookie(existing[i], storeId)) removed++;
+    var all = await load();
+    var entry = all[site];
+    var names = sortedNames(entry);
+    var wasCurrent = entry && entry.current && entry.accounts[entry.current] ? entry.current : null;
+    if (entry && !keep) delete all[site];
+    else if (entry) entry.current = null; // the live session matches no saved account now
+    if (entry) await store(all);
+    var after = null;
+    if (removed && siteKey(tab.url) === site) {
+      await chrome.tabs.reload(tab.id);
+      after = await waitLoaded(tab.id, 15000);
+    }
+    var out = removed
+      ? "Signed out of " + site + ": removed " + plural(removed, "cookie") + " (host and parent domain) from this tab's cookie store."
+      : "No cookies for " + site + " in this tab — it was already signed out.";
+    if (after) out += "\nReloaded the tab: " + (after.title || "(untitled)") + " — " + (after.url || tab.url);
+    else if (removed) out += "\nThe current tab is on " + (siteKey(tab.url) || "another page") + ", not " + site + " — it was not reloaded.";
+    if (!names.length) out += "\nNo accounts are saved for " + site + ".";
+    else if (keep) {
+      out += "\nThe " + plural(names.length, "saved account") + " for " + site + " remain" + (names.length === 1 ? "s" : "") + " (" + names.join(", ") + ")" +
+        (wasCurrent ? "; '" + wasCurrent + "' is no longer marked current" : "; none is current") + " — browser_account_switch signs back in with one.";
+    } else out += "\nForgot the " + plural(names.length, "saved account") + " for " + site + " too (" + names.join(", ") + "), as keep was false.";
+    return out;
+  }
+
   // ── Tools ──────────────────────────────────────────────────────────────
 
   T.register("browser_account_save", async function (a) { return text(await save(a)); });
@@ -493,6 +750,10 @@
   T.register("browser_account_next", async function (a) { return text(await next(a)); });
   T.register("browser_account_export", async function (a) { return text(await exportAccounts(a)); });
   T.register("browser_account_import", async function (a) { return text(await importAccounts(a)); });
+  T.register("browser_account_update", async function (a) { return text(await update(a || {})); });
+  T.register("browser_account_launch", async function (a) { return text(await launch(a || {})); });
+  T.register("browser_account_health", async function (a) { return text(await health(a)); });
+  T.register("browser_account_clear", async function (a) { return text(await clear(a)); });
 
   // ── 🧩 tab ─────────────────────────────────────────────────────────────
 
@@ -541,7 +802,7 @@
       sites.forEach(function (s) {
         var entry = all[s];
         content.appendChild(el("div", { className: "cmd-group-title" }, [s + (s === site ? " (this tab)" : "")]));
-        Object.keys(entry.accounts).sort().forEach(function (n) {
+        sortedNames(entry).forEach(function (n) {
           var acct = entry.accounts[n];
           var isCurrent = entry.current === n;
           var actions = el("div", { className: "prof-actions column" }, [
@@ -557,8 +818,9 @@
           content.appendChild(el("div", { className: "cmd-item event" + (isCurrent ? " current" : "") }, [
             el("span", { className: "cmd-icon" }, [isCurrent ? "⭐" : "👤"]),
             el("div", { className: "cmd-body" }, [
-              el("div", { className: "cmd-name" }, [n, isCurrent ? el("span", { className: "ed-hint" }, ["  · current"]) : null]),
+              el("div", { className: "cmd-name" }, [n, acct.pinned ? " 📌" : null, isCurrent ? el("span", { className: "ed-hint" }, ["  · current"]) : null]),
               el("div", { className: "cmd-desc" }, [plural(acct.count || 0, "cookie") + (acct.httpOnly ? " (" + acct.httpOnly + " httpOnly)" : "") + " · saved " + ctx.ago(acct.saved) + (acct.url ? " · " + ctx.hostOf(acct.url) : "")]),
+              acct.note ? el("div", { className: "cmd-desc" }, [acct.note]) : null,
             ]),
             actions,
           ]));
@@ -596,13 +858,21 @@
     { group: "Accounts", icon: "⏭", name: "Next account on this site",
       prompt: "Rotate this site to the next saved account with browser_account_next (it saves my current session into the current account first), then tell me which account is current now." },
     { group: "Accounts", icon: "📤", name: "Export my accounts",
-      prompt: "Export my saved accounts with browser_account_export and show me the document so I can carry it to my other machine (browser_account_import reads it there). It holds my session cookies: show it to me only, never put it anywhere else." }
+      prompt: "Export my saved accounts with browser_account_export and show me the document so I can carry it to my other machine (browser_account_import reads it there). It holds my session cookies: show it to me only, never put it anywhere else." },
+    { group: "Accounts", icon: "🚀", name: "Open this site as an account…",
+      prompt: "Open this tab's site in a new tab with browser_account_launch as the saved account named: ", partial: true },
+    { group: "Accounts", icon: "🩺", name: "Account health check",
+      prompt: "Run browser_account_health and tell me which of my saved accounts are fresh, which expire within a week, and which are expired or hold only session cookies — and which ones I should sign in to again and re-save." },
+    { group: "Accounts", icon: "🚪", name: "Sign out of this site",
+      prompt: "Sign me out of this site with browser_account_clear, keeping my saved accounts, then tell me how many cookies were removed and which saved accounts I can switch back to." }
   );
 
   globalThis.AgentExtras.accounts = {
-    KEY: KEY, NAME_MAX: NAME_MAX, FORMAT: FORMAT,
-    siteKey: siteKey, cleanName: cleanName, findName: findName, ago: ago, cookieUrl: cookieUrl, snapshotCookie: snapshotCookie, setDetails: setDetails,
+    KEY: KEY, NAME_MAX: NAME_MAX, NOTE_MAX: NOTE_MAX, FORMAT: FORMAT, EXPIRY_SOON: EXPIRY_SOON,
+    siteKey: siteKey, cleanName: cleanName, cleanNote: cleanNote, findName: findName, ago: ago, cookieUrl: cookieUrl, snapshotCookie: snapshotCookie, setDetails: setDetails,
     sortedNames: sortedNames, nextAccount: nextAccount, exportDocument: exportDocument, parseExport: parseExport, mergeAccounts: mergeAccounts, formatImport: formatImport,
+    accountHealth: accountHealth, formatHealth: formatHealth,
     load: load, save: save, list: list, switchTo: switchTo, remove: remove, next: next, exportAccounts: exportAccounts, importAccounts: importAccounts,
+    update: update, launch: launch, health: health, clear: clear,
   };
 })();

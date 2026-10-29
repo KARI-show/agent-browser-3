@@ -1,7 +1,7 @@
 // Fakes for unit-testing an extra's runtime module (browser/extras/<id>.js) in node: a chrome.* stand-in
-// (storage local/session, a cookie jar with Chrome's domain matching and per-tab cookie stores, tabs,
-// scripting, proxy settings), a stand-in for the AgentBrowserTools registry and a tiny DOM for the
-// 🧩 tab's render(). Shared by tests/accounts.test.mjs and tests/audit.test.mjs.
+// (storage local/session, a cookie jar with Chrome's domain matching and per-tab cookie stores, tabs and
+// windows, scripting, proxy settings), a stand-in for the AgentBrowserTools registry and a tiny DOM for
+// the 🧩 tab's render(). Shared by tests/accounts.test.mjs and tests/audit.test.mjs.
 import vm from "node:vm";
 
 const plain = (x) => JSON.parse(JSON.stringify(x));
@@ -10,13 +10,24 @@ const bare = (domain) => String(domain || "").replace(/^\./, "");
 
 /**
  * chrome.* with just what the extras touch. `tabs` is { id: { id, windowId, url, title, active?, incognito? } };
- * incognito tabs live in cookie store "1", the rest in "0". The jar is a plain array the test can seed.
+ * incognito tabs live in cookie store "1", the rest in "0". The jar is a plain array the test can seed. Tabs
+ * and windows that tabs.create / windows.create open join `tabs` (ids from 77, windows from 3) so tabs.get
+ * finds them; an active new tab deactivates the others of its window.
  */
 export function fakeChrome({ tabs = {} } = {}) {
   const local = {};
   const session = {};
   const jar = []; // { name, value, domain, hostOnly, path, secure, httpOnly, sameSite, expirationDate?, storeId }
-  const log = { reloads: [], created: [], sets: [], removes: [], scripts: [] };
+  const log = { reloads: [], created: [], updates: [], windows: [], sets: [], removes: [], scripts: [] };
+  let nextTabId = 77, nextWindowId = 3;
+  const activate = (t) => { for (const x of Object.values(tabs)) if (x.windowId === t.windowId) x.active = x.id === t.id; };
+  const openTab = (o, windowId, incognito) => {
+    const t = { id: nextTabId++, windowId, url: o.url || "about:blank", title: "", active: !!o.active };
+    if (incognito) t.incognito = true;
+    tabs[t.id] = t;
+    if (t.active) activate(t);
+    return t;
+  };
   const listeners = [];
   const area = (data) => ({
     async get(keys) {
@@ -76,10 +87,25 @@ export function fakeChrome({ tabs = {} } = {}) {
         return { status: "complete", ...plain(tabs[id]) };
       },
       async query(q = {}) {
-        return Object.values(tabs).filter((t) => (q.active === undefined || !!t.active === q.active)).map((t) => ({ status: "complete", ...plain(t) }));
+        return Object.values(tabs).filter((t) => (q.active === undefined || !!t.active === q.active) && (q.windowId === undefined || t.windowId === q.windowId)).map((t) => ({ status: "complete", ...plain(t) }));
       },
       async reload(id) { log.reloads.push(id); },
-      async create(o) { log.created.push(plain(o)); return { id: 77, ...o }; },
+      async create(o) { log.created.push(plain(o)); return plain(openTab(o, o.windowId || 1)); },
+      async update(id, props = {}) {
+        log.updates.push({ id, ...plain(props) });
+        if (!tabs[id]) throw new Error("No tab with id: " + id);
+        if (props.url !== undefined) tabs[id].url = props.url;
+        if (props.active) activate(tabs[id]);
+        return { status: "complete", ...plain(tabs[id]) };
+      },
+    },
+    windows: {
+      async create(o = {}) {
+        log.windows.push(plain(o));
+        const win = { id: nextWindowId++, incognito: !!o.incognito };
+        const t = openTab({ url: o.url, active: true }, win.id, win.incognito);
+        return { ...win, tabs: [plain(t)] };
+      },
     },
     scripting: {
       result: null, // what an injected function returns (a value, or a function of the call's options)
@@ -104,6 +130,7 @@ export function fakeChrome({ tabs = {} } = {}) {
 export function fakeTools(chrome, currentId) {
   const t = {
     current: currentId,
+    switched: [], // every setCurrentTab(tabId) call, in order
     device: null, // what deviceOf(tabId) answers (a device config, or null)
     registered: {},
     register(name, fn) {
@@ -120,6 +147,7 @@ export function fakeTools(chrome, currentId) {
       ownPage: () => false,
     },
     deviceOf: () => t.device,
+    setCurrentTab: (tabId) => { t.current = tabId; t.switched.push(tabId); },
     /** Call a registered tool and join its text parts (what the model would read). */
     run: async (name, args) => (await t.registered[name](args || {})).filter((p) => p.type === "text").map((p) => p.text).join("\n"),
   };

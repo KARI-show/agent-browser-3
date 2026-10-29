@@ -83,7 +83,7 @@ test("browser tool names and read-only set", () => {
   // …and asks the user even in Agent mode, like running page scripts and reading API bodies. The accounts
   // extra's save/switch/next copy and replace a site's session cookies and export/import move them, so
   // they are gated the same way.
-  assert.deepEqual([...ALWAYS_ASK_TOOLS].sort(), ["browser_account_export", "browser_account_import", "browser_account_next", "browser_account_save", "browser_account_switch", "browser_cookies_export", "browser_cookies_get", "browser_cookies_import", "browser_network_capture", "browser_run_js"]);
+  assert.deepEqual([...ALWAYS_ASK_TOOLS].sort(), ["browser_account_clear", "browser_account_export", "browser_account_import", "browser_account_launch", "browser_account_next", "browser_account_save", "browser_account_switch", "browser_cookies_export", "browser_cookies_get", "browser_cookies_import", "browser_network_capture", "browser_run_js"]);
   for (const t of ALWAYS_ASK_TOOLS) assert.ok(!READ_ONLY_TOOLS.has(t), `${t} can't be both read-only and always-ask`);
 });
 

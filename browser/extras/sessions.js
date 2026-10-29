@@ -1,9 +1,10 @@
 // Extra feature "sessions" (side panel): tab sessions — the tabs of a window saved under a name,
-// added to later and opened again, into a new window or the current one — and a tidy-up that closes
-// the window's duplicate tabs or every tab of one site. Built into extras.js only for brands
-// that switch the feature on. The tools are declared in browser/host/extras/sessions.ts; this file
-// registers them, the 🗂 tab of the 🧩 panel and the "Tabs" quick commands through the registry
-// browserTools.js provides.
+// added to later, renamed, exported as JSON or Markdown, imported from such a document or a list of
+// links, and opened again, into a new window or the current one — and a tidy-up that closes the
+// window's duplicate tabs or every tab of one site. Built into extras.js only for brands that switch
+// the feature on. The tools are declared in browser/host/extras/sessions.ts; this file registers
+// them, the 🗂 tab of the 🧩 panel and the "Tabs" quick commands through the registry browserTools.js
+// provides.
 //
 // Storage: chrome.storage.local[KEY] = [session, …] newest first, at most MAX sessions. A session is
 // { id, name, t, tabs: [{ url, title, pinned, active }] }. Names and titles came from the user and
@@ -139,6 +140,107 @@
       lines.push("    " + titles.join("; ") + (s.tabs.length > 3 ? "; … +" + (s.tabs.length - 3) + " more" : ""));
     });
     return lines.join("\n");
+  }
+
+  // ── Export, import, rename ─────────────────────────────────────────────
+
+  var FORMAT = "agent-sessions/1"; // the JSON envelope's version tag
+  var LINK_RE = /\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/; // a Markdown link: [title](url)
+  var URL_RE = /https?:\/\/[^\s<>"'\]]+/; // a bare address in a line
+  var HEADING_RE = /^\s*#{1,6}\s+(.*?)\s*#*\s*$/;
+
+  function isoDate(ts) { return new Date(ts).toISOString().slice(0, 10); }
+  function mdLinkText(s) { return String(s || "").replace(/[\[\]\\]/g, "\\$&"); }
+  // Characters that would end or break a Markdown link target (encodeURIComponent leaves parentheses alone).
+  function mdUrl(u) { return String(u || "").replace(/[ ()<>]/g, function (ch) { return "%" + ch.charCodeAt(0).toString(16).toUpperCase(); }); }
+  function cleanTab(t) { return { url: t.url, title: String(t.title || ""), pinned: !!t.pinned, active: !!t.active }; }
+
+  /** The sessions as a versioned JSON document: { format, exported, sessions: [{ id, name, saved, tabs }] }. */
+  function exportJson(list, now) {
+    return JSON.stringify({
+      format: FORMAT,
+      exported: new Date(now || Date.now()).toISOString(),
+      sessions: (list || []).map(function (s) { return { id: s.id, name: s.name, saved: new Date(s.t).toISOString(), tabs: (s.tabs || []).map(cleanTab) }; }),
+    }, null, 2);
+  }
+  /** The sessions as Markdown: a heading per session, a "- [title](url)" line per tab, pinned ones marked 📌 and the active one "(active)" — what parseSessionImport reads back. */
+  function exportMarkdown(list, now) {
+    list = list || [];
+    var out = ["# Tab sessions (" + list.length + ") — exported " + isoDate(now || Date.now()), ""];
+    list.forEach(function (s) {
+      out.push("## " + s.name, "", tabsWord(s.tabs.length) + " · saved " + isoDate(s.t), "");
+      s.tabs.forEach(function (t) { out.push("- " + (t.pinned ? "📌 " : "") + "[" + mdLinkText(t.title || hostOf(t.url)) + "](" + mdUrl(t.url) + ")" + (t.active ? " (active)" : "")); });
+      out.push("");
+    });
+    return out.join("\n");
+  }
+  /**
+   * Sessions read from `text`: the JSON envelope of exportJson, or a list of links — "- [title](url)"
+   * lines, bare addresses one per line, "## Heading" lines naming the sessions; without headings the
+   * links form one session called `name`. → [{ name, tabs }] with the tabs filtered as a save filters
+   * them (web addresses only, repeats folded); a session may come back with no tabs. Throws on text
+   * that is neither, on JSON that is not the envelope, and on a nameless session.
+   */
+  function parseSessionImport(text, name) {
+    var src = String(text == null ? "" : text).trim();
+    if (!src) throw new Error("text is required: the JSON from browser_session_export, or a list of links.");
+    name = String(name || "").trim();
+    var found;
+    if (/^[\[{]/.test(src)) {
+      var doc;
+      try { doc = JSON.parse(src); } catch (e) { throw new Error("The text looks like JSON but does not parse (" + String((e && e.message) || e) + ")."); }
+      if (!doc || typeof doc !== "object" || !Array.isArray(doc.sessions) || !/^agent-sessions\/\d+$/.test(String(doc.format || ""))) {
+        throw new Error("Not a sessions export: expected { \"format\": \"" + FORMAT + "\", \"sessions\": [...] } as browser_session_export writes it.");
+      }
+      found = doc.sessions.map(function (s, i) {
+        if (!s || typeof s !== "object" || Array.isArray(s)) throw new Error("sessions[" + i + "] is not a session object.");
+        return { name: String(s.name == null ? "" : s.name), tabs: Array.isArray(s.tabs) ? s.tabs : [], fromJson: true };
+      });
+    } else {
+      found = [];
+      var cur = null;
+      src.split(/\r?\n/).forEach(function (line) {
+        var h = HEADING_RE.exec(line);
+        if (h) {
+          if (cur && cur.tabs.length) found.push(cur);
+          cur = { name: h[1].trim(), tabs: [] };
+          return;
+        }
+        var m = LINK_RE.exec(line);
+        var url = m ? m[2] : (URL_RE.exec(line) || [])[0];
+        if (!url) return;
+        var rest = line.replace(m ? m[0] : url, " ");
+        if (!cur) cur = { name: name, tabs: [] };
+        cur.tabs.push({ url: url, title: m ? m[1].replace(/\\([\[\]\\])/g, "$1").trim() : "", pinned: /📌|\bpinned\b/i.test(rest), active: /\(active\)/i.test(rest) });
+      });
+      if (cur && cur.tabs.length) found.push(cur);
+      if (!found.length) throw new Error("No links in the text — give the JSON from browser_session_export, or links one per line ('- [title](url)' or plain addresses).");
+    }
+    return found.map(function (s, i) {
+      var sname = String(s.name || "").trim().replace(/\s+/g, " ").slice(0, MAX_NAME) || name.slice(0, MAX_NAME);
+      if (!sname) throw new Error(s.fromJson ? "Session " + (i + 1) + " of the export has no name." : "name is required for a list of links (the JSON export carries its own names).");
+      var seen = {};
+      var web = s.tabs.map(function (t) { return t && typeof t === "object" ? t : { url: t }; }).filter(function (t) { return /^https?:\/\//i.test(String(t.url || "")); }).map(function (t) { return Object.assign({}, t, { url: String(t.url) }); });
+      var tabs = restorableTabs(web, "").filter(function (t) { if (seen[t.url]) return false; seen[t.url] = true; return true; });
+      var activeSeen = false;
+      tabs.forEach(function (t) { if (t.active) { if (activeSeen) t.active = false; activeSeen = true; } });
+      return { name: sname, tabs: tabs };
+    });
+  }
+  /**
+   * The list with the session `sel` (id or name) renamed to `newName`, in place; another session's name
+   * is refused (its own, in another case, is fine). → { list, session, old, changed }
+   */
+  function renameSession(list, sel, newName) {
+    list = list || [];
+    var s = findSession(list, sel);
+    var name = String(newName == null ? "" : newName).trim().replace(/\s+/g, " ").slice(0, MAX_NAME);
+    if (!name) throw new Error("newName is required.");
+    var clash = findByName(list, name);
+    if (clash && clash.id !== s.id) throw new Error("A session named '" + clash.name + "' exists already (id " + clash.id + ") — pick another name, or delete it first.");
+    if (name === s.name) return { list: list, session: s, old: s.name, changed: false };
+    var renamed = Object.assign({}, s, { name: name });
+    return { list: list.map(function (x) { return x.id === s.id ? renamed : x; }), session: renamed, old: s.name, changed: true };
   }
 
   // ── Storage ────────────────────────────────────────────────────────────
@@ -277,6 +379,57 @@
     return text("Closed " + tabsWord(going.length) + " (" + what + "):\n" + lines.join("\n") + "\n" + tabsWord(left) + " remain in the window.");
   });
 
+  AgentBrowserTools.register("browser_session_export", async function (a) {
+    a = a || {};
+    var format = a.format === "markdown" ? "markdown" : "json";
+    var all = await load();
+    var list = a.id || a.name ? [findSession(all, a)] : all;
+    if (!list.length) return text("No sessions saved yet — nothing to export. browser_session_save keeps this window's tabs under a name.");
+    return text(format === "markdown" ? exportMarkdown(list, Date.now()) : exportJson(list, Date.now()));
+  });
+
+  AgentBrowserTools.register("browser_session_import", async function (a) {
+    a = a || {};
+    var parsed = parseSessionImport(a.text, a.name);
+    var list = await load();
+    var before = list.length;
+    var added = [];
+    var replaced = [];
+    var skipped = [];
+    var now = Date.now();
+    // Last to first, so the document's first session ends up at the top of the list (newest first).
+    parsed.slice().reverse().forEach(function (p) {
+      if (!p.tabs.length) { skipped.push("'" + p.name + "' (no web addresses)"); return; }
+      var existing = findByName(list, p.name);
+      if (existing && a.replace !== true) { skipped.push("'" + existing.name + "' (exists — pass replace to overwrite it)"); return; }
+      var s = makeSession(p.name, p.tabs, now++, existing ? existing.id : newId(list));
+      list = upsertSession(list, s);
+      (existing ? replaced : added).push(s);
+    });
+    if (added.length || replaced.length) await save(list);
+    // The report in the document's order, not the loop's.
+    added.reverse(); replaced.reverse(); skipped.reverse();
+    var dropped = before + added.length - list.length;
+    var parts = [];
+    if (added.length) parts.push("added " + added.map(function (s) { return "'" + s.name + "' (" + tabsWord(s.tabs.length) + ")"; }).join(", "));
+    if (replaced.length) parts.push("replaced " + replaced.map(function (s) { return "'" + s.name + "' (" + tabsWord(s.tabs.length) + ")"; }).join(", "));
+    if (skipped.length) parts.push("skipped " + skipped.join(", "));
+    var n = added.length + replaced.length;
+    return text(
+      "Imported " + n + " session" + (n === 1 ? "" : "s") + " of " + parsed.length + ": " + parts.join("; ") + "." +
+      (dropped > 0 ? " The list keeps " + MAX + " sessions, so the " + (dropped === 1 ? "oldest one was" : dropped + " oldest were") + " dropped." : "") +
+      (n ? "\n" + formatList(list.filter(function (s) { return added.indexOf(s) !== -1 || replaced.indexOf(s) !== -1; })) : "")
+    );
+  });
+
+  AgentBrowserTools.register("browser_session_rename", async function (a) {
+    a = a || {};
+    var r = renameSession(await load(), a, a.newName);
+    if (!r.changed) return text("Session '" + r.session.name + "' (id " + r.session.id + ") has that name already — nothing changed.");
+    await save(r.list);
+    return text("Renamed session '" + r.old + "' → '" + r.session.name + "' (id " + r.session.id + ", " + tabsWord(r.session.tabs.length) + ").");
+  });
+
   // ── 🗂 tab of the 🧩 panel ─────────────────────────────────────────────
 
   var expanded = {}; // session id → the tab list is open
@@ -352,13 +505,16 @@
     { group: "Tabs", icon: "🧹", name: "Close the duplicates in this window",
       prompt: "Close the duplicate tabs in this window with browser_session_tidy (it keeps one of each address and never closes the tab I'm in, pinned tabs or the panel). Tell me what you closed." },
     { group: "Tabs", icon: "➕", name: "Add this tab to a session",
-      prompt: "Add this tab to my saved session (browser_session_add) named: ", partial: true }
+      prompt: "Add this tab to my saved session (browser_session_add) named: ", partial: true },
+    { group: "Tabs", icon: "📤", name: "Export my sessions",
+      prompt: "Export all my saved tab sessions with browser_session_export as Markdown and show me the document so I can paste it; tell me that the JSON format is the one to import again." }
   );
 
   X.sessions = {
-    KEY: KEY, MAX: MAX, INTERNAL: INTERNAL,
+    KEY: KEY, MAX: MAX, INTERNAL: INTERNAL, FORMAT: FORMAT,
     restorableTabs: restorableTabs, makeSession: makeSession, upsertSession: upsertSession, findSession: findSession, findByName: findByName,
     addToSession: addToSession, duplicateTabs: duplicateTabs, pageKey: pageKey,
+    exportJson: exportJson, exportMarkdown: exportMarkdown, parseSessionImport: parseSessionImport, renameSession: renameSession,
     formatList: formatList, formatTabs: formatTabs, tabsWord: tabsWord,
     load: load, save: save, saveWindow: saveWindow, openSession: openSession, render: renderSessions,
   };

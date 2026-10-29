@@ -223,12 +223,14 @@ test("sessions: the 🗂 tab and the Tabs quick commands", async () => {
     ["Tabs", "Restore a session", true],
     ["Tabs", "Close the duplicates in this window", false],
     ["Tabs", "Add this tab to a session", true],
+    ["Tabs", "Export my sessions", false],
   ]);
   assert.match(X.commands[0].prompt, /browser_session_save.*named: $/);
   assert.match(X.commands[1].prompt, /browser_session_restore.*named: $/);
   assert.match(X.commands[2].prompt, /browser_session_tidy/);
   assert.doesNotMatch(X.commands[2].prompt, /browser_close_tab/, "closing duplicates is one tool call now");
   assert.match(X.commands[3].prompt, /browser_session_add.*named: $/);
+  assert.match(X.commands[4].prompt, /browser_session_export/);
 
   const dom = fakeDom();
   const render = () => X.tabs[0].render(dom.content, dom.ctx);
@@ -392,4 +394,119 @@ test("sessions: browser_session_tidy closes the duplicates (dry run first) or a 
   T.noTab = true;
   await chrome.tabs.create({ windowId: 1, url: "https://a.example/one", title: "One again", active: false });
   assert.match(outText(await tools.browser_session_tidy({})), /^Closed 1 tab \(duplicate tabs\):\n  • One again — https:\/\/a\.example\/one\n6 tabs remain/);
+});
+
+test("sessions: export as JSON or Markdown, import it back (merge by name, replace, link lists, the cap), rename", async () => {
+  const { tools, data, S, chrome } = load();
+  assert.equal(outText(await tools.browser_session_export({})), "No sessions saved yet — nothing to export. browser_session_save keeps this window's tabs under a name.");
+  await tools.browser_session_save({ name: "Research" });
+  await chrome.tabs.create({ windowId: 1, url: "https://c.example/three (draft)", title: "Three [x]", active: false });
+  await tools.browser_session_save({ name: "Other" });
+  const [other, research] = sessions(data);
+
+  // JSON: a versioned envelope with everything a restore needs; one session by id or name, or all.
+  const json = outText(await tools.browser_session_export({}));
+  const doc = JSON.parse(json);
+  assert.equal(doc.format, "agent-sessions/1");
+  assert.equal(S.FORMAT, "agent-sessions/1");
+  assert.match(doc.exported, /^\d{4}-\d{2}-\d{2}T/);
+  assert.deepEqual(doc.sessions.map((s) => [s.id, s.name, s.tabs.length]), [[other.id, "Other", 3], [research.id, "Research", 2]]);
+  assert.deepEqual(doc.sessions[1].tabs, [ONE, TWO]);
+  assert.equal(new Date(doc.sessions[1].saved).getTime(), research.t);
+  assert.deepEqual(JSON.parse(outText(await tools.browser_session_export({ name: "research" }))).sessions.map((s) => s.name), ["Research"]);
+  assert.deepEqual(JSON.parse(outText(await tools.browser_session_export({ id: other.id, format: "json" }))).sessions.map((s) => s.name), ["Other"]);
+  await assert.rejects(tools.browser_session_export({ name: "zzz" }), /No session named 'zzz'/);
+  // Markdown: a heading per session, a link per tab, pinned and active marked, link text and addresses escaped.
+  const md = outText(await tools.browser_session_export({ id: other.id, format: "markdown" }));
+  assert.equal(md.replace(/\d{4}-\d{2}-\d{2}/g, "DATE"), [
+    "# Tab sessions (1) — exported DATE", "",
+    "## Other", "", "3 tabs · saved DATE", "",
+    "- 📌 [One](https://a.example/one)",
+    "- [Two](https://b.example/two?x=1) (active)",
+    "- [Three \\[x\\]](https://c.example/three%20%28draft%29)",
+    "",
+  ].join("\n"));
+  assert.match(outText(await tools.browser_session_export({ format: "markdown" })), /^# Tab sessions \(2\) — exported \d{4}-\d{2}-\d{2}\n\n## Other\n[\s\S]*\n## Research\n/);
+
+  // Import: what the text must look like.
+  await assert.rejects(tools.browser_session_import({}), /text is required/);
+  await assert.rejects(tools.browser_session_import({ text: "{not json" }), /looks like JSON but does not parse/);
+  await assert.rejects(tools.browser_session_import({ text: '{"sessions": []}' }), /Not a sessions export: expected \{ "format": "agent-sessions\/1", "sessions": \[\.\.\.\] \}/);
+  await assert.rejects(tools.browser_session_import({ text: "[1, 2]" }), /Not a sessions export/);
+  await assert.rejects(tools.browser_session_import({ text: "Just prose, no links.\nchrome://settings/" }), /No links in the text/);
+  await assert.rejects(tools.browser_session_import({ text: "https://x.example/a" }), /name is required for a list of links/);
+  assert.equal(sessions(data).length, 2, "a refused import changes nothing");
+  // The JSON round trip, merged by name: what exists is skipped unless replace is set, then replaced in place.
+  assert.equal(outText(await tools.browser_session_import({ text: json })), "Imported 0 sessions of 2: skipped 'Other' (exists — pass replace to overwrite it), 'Research' (exists — pass replace to overwrite it).");
+  await chrome.tabs.create({ windowId: 1, url: "https://d.example/four", title: "Four", active: false });
+  await tools.browser_session_save({ name: "Other" });
+  assert.equal(sessions(data)[0].tabs.length, 4);
+  assert.match(outText(await tools.browser_session_import({ text: json, replace: true })), /^Imported 2 sessions of 2: replaced 'Other' \(3 tabs\), 'Research' \(2 tabs\)\.\nSessions \(2\):\n/);
+  assert.deepEqual(sessions(data).map((s) => [s.id, s.name, s.tabs.length]), [[other.id, "Other", 3], [research.id, "Research", 2]], "same ids, the export's order");
+  await tools.browser_session_delete({ name: "Other" });
+  await tools.browser_session_delete({ name: "Research" });
+  assert.match(outText(await tools.browser_session_import({ text: json })), /^Imported 2 sessions of 2: added 'Other' \(3 tabs\), 'Research' \(2 tabs\)\.\nSessions \(2\):\n  ses_[a-z0-9]{6}  Other  \|  3 tabs  \|  saved just now\n    One; Two; Three \[x\]\n  ses_[a-z0-9]{6}  Research  \|  2 tabs/);
+  assert.deepEqual(sessions(data).map((s) => s.name), ["Other", "Research"]);
+  assert.ok(sessions(data).every((s) => s.id !== other.id && s.id !== research.id), "new sessions get new ids");
+  assert.deepEqual(plain(sessions(data)[1].tabs), [ONE, TWO]);
+  assert.match(outText(await tools.browser_session_restore({ name: "Other" })), /^Restored session 'Other': 3 tabs in new window/);
+
+  // A Markdown list: headings name the sessions, 📌 marks a pinned tab, browser pages, repeats and link-less headings are left out.
+  const mdIn = "# My links\n\n## Reading\n- [Doc](https://d.example/doc)\n- 📌 https://e.example/pin\n- [Doc again](https://d.example/doc)\nchrome://settings/\n\n## Empty\n\nno links here\n";
+  assert.deepEqual(plain(S.parseSessionImport(mdIn)), [{ name: "Reading", tabs: [
+    { url: "https://d.example/doc", title: "Doc", pinned: false, active: false },
+    { url: "https://e.example/pin", title: "", pinned: true, active: false },
+  ] }]);
+  assert.match(outText(await tools.browser_session_import({ text: mdIn })), /^Imported 1 session of 1: added 'Reading' \(2 tabs\)\.\nSessions \(1\):\n  ses_[a-z0-9]{6}  Reading  \|  2 tabs  \|  saved just now\n    Doc; e\.example$/);
+  // A plain list of addresses needs a name; "(active)" marks the active tab, once.
+  assert.deepEqual(plain(S.parseSessionImport("https://f.example/1\n  https://f.example/1\nhttps://g.example/2 (active)\nhttps://h.example/3 (active)", " Plain  list ")), [{ name: "Plain list", tabs: [
+    { url: "https://f.example/1", title: "", pinned: false, active: false },
+    { url: "https://g.example/2", title: "", pinned: false, active: true },
+    { url: "https://h.example/3", title: "", pinned: false, active: false },
+  ] }]);
+  // The JSON envelope, checked field by field: non-web and repeated addresses go, a nameless session takes the given name, bad shapes are refused.
+  const env = (list) => JSON.stringify({ format: "agent-sessions/1", sessions: list });
+  assert.deepEqual(plain(S.parseSessionImport(env([
+    { name: "  J  ", tabs: [{ url: "https://j.example/a", title: "A", pinned: 1, active: true }, { url: "chrome://x" }, { url: 5 }, "https://j.example/b", { url: "https://j.example/a" }, { url: "https://j.example/c", active: true }] },
+    { name: "", tabs: [{ url: "https://k.example/" }] },
+    { name: "None", tabs: "nope" },
+  ]), "Fallback")), [
+    { name: "J", tabs: [{ url: "https://j.example/a", title: "A", pinned: true, active: true }, { url: "https://j.example/b", title: "", pinned: false, active: false }, { url: "https://j.example/c", title: "", pinned: false, active: false }] },
+    { name: "Fallback", tabs: [{ url: "https://k.example/", title: "", pinned: false, active: false }] },
+    { name: "None", tabs: [] },
+  ]);
+  await assert.rejects(tools.browser_session_import({ text: env([{ name: "", tabs: [] }]) }), /Session 1 of the export has no name\./);
+  await assert.rejects(tools.browser_session_import({ text: env([5]) }), /sessions\[0\] is not a session object\./);
+  assert.equal(outText(await tools.browser_session_import({ text: env([{ name: "None", tabs: [{ url: "about:blank" }] }]) })), "Imported 0 sessions of 1: skipped 'None' (no web addresses).");
+  // The cap: the oldest sessions make room, and the report says so.
+  let many = [];
+  for (let i = 0; i < 48; i++) many = S.upsertSession(many, S.makeSession("s" + i, [ONE], 1000 + i));
+  await S.save(many);
+  assert.match(
+    outText(await tools.browser_session_import({ text: env([1, 2, 3, 4].map((i) => ({ name: "n" + i, tabs: ["https://n.example/" + i] }))) })),
+    /^Imported 4 sessions of 4: added 'n1' \(1 tab\), 'n2' \(1 tab\), 'n3' \(1 tab\), 'n4' \(1 tab\)\. The list keeps 50 sessions, so the 2 oldest were dropped\.\nSessions \(4\):\n/
+  );
+  assert.equal(sessions(data).length, 50);
+  assert.deepEqual(sessions(data).slice(0, 4).map((s) => s.name), ["n1", "n2", "n3", "n4"]);
+  assert.equal(sessions(data).at(-1).name, "s2");
+
+  // Rename: by id or name; another session's name is refused, its own in another case is fine; in place.
+  await S.save([]);
+  await tools.browser_session_save({ name: "Research" });
+  await tools.browser_session_save({ name: "Other" });
+  const [o2, r2] = sessions(data);
+  await assert.rejects(tools.browser_session_rename({ newName: "x" }), /Give id or name \(see browser_session_list\)\./);
+  await assert.rejects(tools.browser_session_rename({ name: "Other", newName: "  " }), /newName is required\./);
+  await assert.rejects(tools.browser_session_rename({ name: "nope", newName: "x" }), /No session named 'nope'/);
+  await assert.rejects(tools.browser_session_rename({ name: "Other", newName: "research" }), new RegExp(`^Error: A session named 'Research' exists already \\(id ${r2.id}\\) — pick another name, or delete it first\\.$`));
+  assert.equal(outText(await tools.browser_session_rename({ name: "other", newName: "OTHER" })), `Renamed session 'Other' → 'OTHER' (id ${o2.id}, 4 tabs).`);
+  assert.equal(outText(await tools.browser_session_rename({ id: o2.id, newName: "OTHER" })), `Session 'OTHER' (id ${o2.id}) has that name already — nothing changed.`);
+  assert.equal(outText(await tools.browser_session_rename({ id: o2.id, newName: "  Work   stuff " })), `Renamed session 'OTHER' → 'Work stuff' (id ${o2.id}, 4 tabs).`);
+  assert.deepEqual(sessions(data).map((s) => [s.id, s.name, s.t]), [[o2.id, "Work stuff", o2.t], [r2.id, "Research", r2.t]], "renamed in place: id, position and time kept");
+  assert.match(outText(await tools.browser_session_restore({ name: "work stuff" })), /^Restored session 'Work stuff': 4 tabs/);
+  // The pure helper leaves the store alone.
+  const r = S.renameSession(sessions(data), { name: "research" }, "R2");
+  assert.deepEqual([r.old, r.session.name, r.changed, r.list[1].name, sessions(data)[1].name], ["Research", "R2", true, "R2", "Research"]);
+  assert.equal(S.renameSession(sessions(data), { id: r2.id }, "Research").changed, false);
+  assert.throws(() => S.renameSession(sessions(data), { id: r2.id }, "work STUFF"), /exists already/);
 });

@@ -1,8 +1,9 @@
 // The "uptime" extra: the status mode of the watchers (browser/extension/automation.js, run in the
 // service worker with a fake fetch — baseline, flips, the history ring) and the tools, formatting and
 // ⏱ tab of browser/extras/uptime.js, against fakes of chrome.storage / alarms / tabs / notifications
-// and of the tool runtime; the pause/resume tool and the history report (summarizeHistory on fixed
-// histories). Same harness shape as tests/automation.test.mjs.
+// and of the tool runtime; the pause/resume tool, the history report (summarizeHistory on fixed
+// histories) and the export (historyToCsv, the CSV/JSON text, the file in Downloads through a fake
+// chrome.downloads). Same harness shape as tests/automation.test.mjs.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -20,6 +21,7 @@ function fakeChrome() {
   const notifications = [];
   const tabs = { created: [], removed: [] };
   const listeners = [];
+  const downloads = { calls: [], fail: "" };
   const chrome = {
     storage: {
       local: {
@@ -53,8 +55,9 @@ function fakeChrome() {
     },
     scripting: { pageText: "page", async executeScript() { return [{ result: chrome.scripting.pageText }]; } },
     notifications: { async create(id, o) { notifications.push({ id, ...o }); } },
+    downloads: { async download(o) { downloads.calls.push(plain(o)); if (downloads.fail) throw new Error(downloads.fail); return 40 + downloads.calls.length; } },
   };
-  return { chrome, data, alarms, notifications, tabs };
+  return { chrome, data, alarms, notifications, tabs, downloads };
 }
 
 /** A fetch for the status endpoint(s): state.code, state.fail, state.headStatus, state.hang; every call recorded. */
@@ -295,12 +298,12 @@ test("a brand without the feature gets nothing", () => {
   assert.equal(X.uptime, undefined);
 });
 
-test("registration: the five tools, the ⏱ tab on the watchers key, the Monitoring quick commands", () => {
+test("registration: the six tools, the ⏱ tab on the watchers key, the Monitoring quick commands", () => {
   const { T, X } = load();
-  assert.deepEqual(Object.keys(T.tools).sort(), ["browser_uptime_add", "browser_uptime_delete", "browser_uptime_list", "browser_uptime_report", "browser_uptime_toggle"]);
+  assert.deepEqual(Object.keys(T.tools).sort(), ["browser_uptime_add", "browser_uptime_delete", "browser_uptime_export", "browser_uptime_list", "browser_uptime_report", "browser_uptime_toggle"]);
   assert.deepEqual(plain(X.tabs.map((t) => [t.id, t.label, t.storageKeys])), [["uptime", "⏱ Uptime", ["agentWatchers"]]]);
-  assert.deepEqual(plain(X.commands.map((c) => [c.group, c.name, !!c.partial])), [["Monitoring", "Monitor this site's uptime", false], ["Monitoring", "Show my uptime monitors", false], ["Monitoring", "Uptime report", false]]);
-  for (const c of X.commands) assert.match(c.prompt, /browser_uptime_(add|list|report)/);
+  assert.deepEqual(plain(X.commands.map((c) => [c.group, c.name, !!c.partial])), [["Monitoring", "Monitor this site's uptime", false], ["Monitoring", "Show my uptime monitors", false], ["Monitoring", "Uptime report", false], ["Monitoring", "Export uptime history", false]]);
+  for (const c of X.commands) assert.match(c.prompt, /browser_uptime_(add|list|report|export)/);
 });
 
 test("browser_uptime_add: a status watcher every 5 min expecting 200, the id in the answer; the current tab as the default URL; clamps", async () => {
@@ -631,4 +634,147 @@ test("browser_uptime_report: a compact table per monitor over the window, one mo
   await assert.rejects(run("browser_uptime_report", { id: "wch_nope" }), /No uptime monitor with id wch_nope/);
   const empty = load();
   assert.equal(await empty.run("browser_uptime_report", {}), "No uptime monitors. browser_uptime_add checks a site's HTTP status on a schedule and reports when it goes down or comes back.");
+});
+
+// ── historyToCsv / browser_uptime_export ───────────────────────────────────
+
+test("historyToCsv, csvField, exportRows, exportFilename: the header, ISO times, quoting of commas and quotes, the window and order, the file name", () => {
+  const { U } = load();
+  const rows = [
+    { monitor: "A", url: "https://a.example/", at: Date.UTC(2026, 9, 25, 14, 5, 0), code: 200, ok: true, ms: 120 },
+    { monitor: 'B, "beta"', url: "https://b.example/?x=1,2", at: Date.UTC(2026, 9, 25, 14, 10, 30), code: 0, ok: false, ms: 0 },
+  ];
+  assert.equal(U.historyToCsv(rows), 'monitor,url,time,status,ok,ms\nA,https://a.example/,2026-10-25T14:05:00.000Z,200,true,120\n"B, ""beta""","https://b.example/?x=1,2",2026-10-25T14:10:30.000Z,0,false,0\n');
+  assert.equal(U.historyToCsv([]), "monitor,url,time,status,ok,ms\n");
+  assert.equal(U.historyToCsv(undefined), "monitor,url,time,status,ok,ms\n");
+  assert.deepEqual(["plain", "a,b", 'say "hi"', "line\nbreak", null, 12].map(U.csvField), ["plain", '"a,b"', '"say ""hi"""', '"line\nbreak"', "", "12"]);
+  // exportRows: inside the window only, each monitor's checks oldest first, monitor after monitor.
+  const now = 1700000000000;
+  const ws = [
+    { id: "wch_1", name: "A", url: "https://a.example/", history: [entry(now, 5, true, 115), entry(now, 50, false, 30, 503), entry(now, 200, true, 90)] },
+    { id: "wch_2", name: "B", url: "https://b.example/", history: [entry(now, 1, true, 70)] },
+  ];
+  assert.deepEqual(plain(U.exportRows(ws, now - 60 * MIN, now)), [
+    { id: "wch_1", monitor: "A", url: "https://a.example/", at: now - 50 * MIN, code: 503, ok: false, ms: 30 },
+    { id: "wch_1", monitor: "A", url: "https://a.example/", at: now - 5 * MIN, code: 200, ok: true, ms: 115 },
+    { id: "wch_2", monitor: "B", url: "https://b.example/", at: now - MIN, code: 200, ok: true, ms: 70 },
+  ]);
+  assert.deepEqual(plain(U.exportRows([{ id: "x", name: "X", url: "u" }], 0, now)), []);
+  assert.match(U.exportFilename("My Site (prod)", "csv", now), /^uptime-my-site-prod-\d{8}\.csv$/);
+  assert.match(U.exportFilename("", "json", now), /^uptime-all-\d{8}\.json$/);
+  assert.match(U.exportFilename("日本", "csv", now), /^uptime-all-\d{8}\.csv$/, "a name without ascii letters falls back to all");
+  assert.equal(U.DEFAULT_EXPORT_HOURS, 168);
+  assert.equal(U.EXPORT_CAP, 200 * 1024);
+});
+
+test("browser_uptime_export: the CSV of every monitor over 7 days, one monitor by id, hours clamped, JSON, nothing in the window, no monitors, bad ids", async () => {
+  const { run, A, U } = load();
+  await A.watchCreate({ url: "https://a.example/", mode: "status", name: "A", every: 5 }, null);
+  await A.watchCreate({ url: "https://b.example/", mode: "status", name: "B", every: 1 }, null);
+  await A.watchCreate({ url: "https://page.example/", selector: ".p", name: "Page" }, null);
+  const all = await A.loadWatchers();
+  const byName = (n) => Object.values(all).find((w) => w.name === n);
+  const now = Date.now();
+  byName("A").history = sampleHistory(now);
+  byName("B").history = [entry(now, 10 * 24 * 60, true, 50)]; // 10 days ago: outside the default window
+  await A.saveWatchers(all);
+  const idA = byName("A").id, idB = byName("B").id;
+  let lines = (await run("browser_uptime_export", {})).split("\n");
+  assert.match(lines[0], /^12 checks of 2 monitors over the last 168 h \(\d{4}-\d{2}-\d{2} \d{2}:\d{2} → \d{4}-\d{2}-\d{2} \d{2}:\d{2}\), CSV:$/);
+  assert.equal(lines[1], "monitor,url,time,status,ok,ms");
+  assert.equal(lines.length, 15, "12 rows and the trailing newline; the page watcher is not exported");
+  assert.match(lines[2], /^A,https:\/\/a\.example\/,\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z,200,true,100$/);
+  assert.equal(new Date(lines[2].split(",")[2]).getTime(), now - 60 * MIN, "oldest first, ISO time");
+  assert.match(lines[4], /,503,false,30$/);
+  assert.match(lines[5], /,0,false,0$/, "a timeout is status 0");
+  assert.match(lines[13], /,200,true,115$/);
+  // One monitor, a wide window.
+  lines = (await run("browser_uptime_export", { id: idB, hours: 720 })).split("\n");
+  assert.match(lines[0], new RegExp("^1 check of monitor 'B' \\(" + idB + "\\) over the last 720 h \\("));
+  assert.match(lines[2], /^B,https:\/\/b\.example\/,.*,200,true,50$/);
+  assert.equal(lines.length, 4);
+  assert.match(await run("browser_uptime_export", { id: idA, hours: 10000 }), /over the last 720 h/, "hours is capped at 720");
+  assert.match(await run("browser_uptime_export", { id: idA, hours: 0 }), /over the last 168 h/, "a value below 1 means the default");
+  // JSON: the window, then one object per monitor with its checks.
+  const out = await run("browser_uptime_export", { id: idA, format: "json" });
+  assert.match(out.split("\n")[0], /^12 checks of monitor 'A' \(wch_\w+\) over the last 168 h \(.*\), JSON:$/);
+  const j = JSON.parse(out.slice(out.indexOf("\n") + 1));
+  assert.deepEqual(Object.keys(j), ["exported", "hours", "since", "monitors"]);
+  assert.equal(j.hours, 168);
+  assert.equal(new Date(j.exported).getTime() - new Date(j.since).getTime(), 168 * 3600000);
+  assert.equal(j.monitors.length, 1);
+  assert.deepEqual(Object.keys(j.monitors[0]), ["id", "name", "url", "every", "expect", "enabled", "checks"]);
+  assert.deepEqual([j.monitors[0].id, j.monitors[0].name, j.monitors[0].url, j.monitors[0].every, j.monitors[0].expect, j.monitors[0].enabled, j.monitors[0].checks.length], [idA, "A", "https://a.example/", 5, 200, true, 12]);
+  assert.deepEqual(j.monitors[0].checks[2], { time: new Date(now - 50 * MIN).toISOString(), status: 503, ok: false, ms: 30 });
+  // Nothing inside the window, with older checks; nothing at all.
+  assert.equal(await run("browser_uptime_export", { id: idB }), `No checks in the last 168 h for monitor 'B' (${idB}) — nothing to export. 1 older check is in the history: raise hours (up to 720).`);
+  const again = await A.loadWatchers();
+  again[idA].history = [];
+  again[idB].history = [];
+  await A.saveWatchers(again);
+  assert.equal(await run("browser_uptime_export", {}), "No checks in the last 168 h for 2 monitors — nothing to export.");
+  const pageId = Object.keys(again).find((k) => k !== idA && k !== idB);
+  await assert.rejects(run("browser_uptime_export", { id: pageId }), /is a page watcher, not an uptime monitor/);
+  await assert.rejects(run("browser_uptime_export", { id: "wch_nope" }), /No uptime monitor with id wch_nope/);
+  const empty = load();
+  assert.equal(await empty.run("browser_uptime_export", {}), "No uptime monitors. browser_uptime_add checks a site's HTTP status on a schedule and reports when it goes down or comes back.");
+});
+
+test("browser_uptime_export: save=true writes a data: URL to Downloads (csv or json) and reports the id; a failed download; a build without the permission", async () => {
+  const { run, A, U, downloads, chrome } = load();
+  await A.watchCreate({ url: "https://a.example/", mode: "status", name: "My Site" }, null);
+  const all = await A.loadWatchers();
+  const id = Object.keys(all)[0];
+  const now = Date.now();
+  all[id].history = sampleHistory(now);
+  await A.saveWatchers(all);
+  const saved = await run("browser_uptime_export", { save: true });
+  assert.match(saved, /^Saved uptime-all-\d{8}\.csv to Downloads \(download id 41, \d+(\.\d)? kB\): 12 checks of 1 monitor over the last 168 h \(.*\)\.$/);
+  assert.equal(downloads.calls.length, 1);
+  assert.match(downloads.calls[0].filename, /^uptime-all-\d{8}\.csv$/);
+  assert.equal(downloads.calls[0].conflictAction, "uniquify");
+  assert.match(downloads.calls[0].url, /^data:text\/csv;charset=utf-8,/);
+  const csv = decodeURIComponent(downloads.calls[0].url.replace(/^data:text\/csv;charset=utf-8,/, ""));
+  assert.equal(csv.split("\n").length, 14, "the header, 12 rows, the trailing newline");
+  assert.match(csv, /^monitor,url,time,status,ok,ms\nMy Site,https:\/\/a\.example\/,/);
+  assert.equal(csv, U.historyToCsv(U.exportRows([all[id]], now - 168 * 3600000, now)));
+  const json = await run("browser_uptime_export", { id, format: "json", save: true });
+  assert.match(json, /^Saved uptime-my-site-\d{8}\.json to Downloads \(download id 42, \d+(\.\d)? kB\): 12 checks of monitor 'My Site' \(wch_\w+\) over the last 168 h/);
+  assert.match(downloads.calls[1].url, /^data:application\/json;charset=utf-8,/);
+  assert.equal(JSON.parse(decodeURIComponent(downloads.calls[1].url.replace(/^data:application\/json;charset=utf-8,/, ""))).monitors[0].checks.length, 12);
+  downloads.fail = "Invalid filename";
+  await assert.rejects(run("browser_uptime_export", { save: true }), /Invalid filename/);
+  downloads.fail = "";
+  // Nothing to save when the window is empty — no download.
+  const older = await A.loadWatchers();
+  older[id].history = [entry(now, 30 * 60, true, 50)]; // 30 h ago
+  await A.saveWatchers(older);
+  assert.equal(await run("browser_uptime_export", { save: true, hours: 24 }), "No checks in the last 24 h for 1 monitor — nothing to export. 1 older check is in the history: raise hours (up to 720).");
+  assert.equal(downloads.calls.length, 3, "the two saves and the refused one — nothing new");
+  // A build without the downloads permission says so and keeps the text route.
+  delete chrome.downloads;
+  await assert.rejects(run("browser_uptime_export", { save: true }), /cannot save files \(no downloads permission\) — call again without save/);
+  assert.match(await run("browser_uptime_export", {}), /^1 check of 1 monitor over the last 168 h \(.*\), CSV:\nmonitor,url,time,status,ok,ms\nMy Site,https:\/\/a\.example\/,.*,200,true,50\n$/);
+});
+
+test("browser_uptime_export: the text is capped at 200 kB — CSV is cut at a row boundary with a note, JSON is refused with advice; save writes it whole", async () => {
+  const { run, A, downloads } = load();
+  await A.watchCreate({ url: "https://big.example/", mode: "status", name: "Big" }, null);
+  const all = await A.loadWatchers();
+  const id = Object.keys(all)[0];
+  const now = Date.now();
+  all[id].history = Array.from({ length: 4000 }, (_, i) => entry(now, 4000 - i, i % 7 !== 0, 100 + (i % 50))); // one a minute for 66 h
+  await A.saveWatchers(all);
+  const out = await run("browser_uptime_export", {});
+  const first = out.slice(0, out.indexOf("\n")), body = out.slice(out.indexOf("\n") + 1);
+  const m = /^4000 checks of 1 monitor over the last 168 h \(.*\) — CSV cut to the first (\d+) rows \(200 kB cap; save=true writes the full file\):$/.exec(first);
+  assert.ok(m, first);
+  const shown = Number(m[1]);
+  assert.ok(shown > 1000 && shown < 4000, "some rows were cut: " + shown);
+  assert.ok(body.length <= 200 * 1024, "within the cap");
+  assert.ok(body.endsWith("\n"), "cut at a row boundary");
+  assert.equal(body.split("\n").length, shown + 2, "the header, the rows, the trailing newline");
+  await assert.rejects(run("browser_uptime_export", { format: "json" }), /^Error: The JSON export is \d+ kB, over the 200 kB limit — narrow hours, pick one monitor with id, or pass save=true to write the file\.$/);
+  assert.match(await run("browser_uptime_export", { save: true }), /^Saved uptime-all-\d{8}\.csv to Downloads \(download id 41, \d+ kB\): 4000 checks/);
+  assert.equal(decodeURIComponent(downloads.calls[0].url.split(",").slice(1).join(",")).split("\n").length, 4002, "the file holds every row");
 });

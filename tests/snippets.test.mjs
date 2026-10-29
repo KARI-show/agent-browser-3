@@ -9,13 +9,13 @@ import { fakeCtx, fakeDom, loadExtra, runTool } from "./mocks/extras-quill.mjs";
 const load = (opts) => loadExtra("snippets", opts);
 const plain = (x) => JSON.parse(JSON.stringify(x)); // values made inside the vm have another realm's prototypes
 
-test("loads only for a brand with the feature; registers five tools, the tab (re-rendered on its storage key) and two partial commands", () => {
+test("loads only for a brand with the feature; registers seven tools, the tab (re-rendered on its storage key) and two partial commands", () => {
   const off = load({ features: { snippets: false, rewrite: true } });
   assert.deepEqual(off.T.names, []);
   assert.equal(off.X, undefined);
 
   const { T, tab, commands, X } = load();
-  assert.deepEqual(T.names, ["browser_snippet_save", "browser_snippet_list", "browser_snippet_insert", "browser_snippet_update", "browser_snippet_delete"]);
+  assert.deepEqual(T.names, ["browser_snippet_save", "browser_snippet_list", "browser_snippet_insert", "browser_snippet_update", "browser_snippet_delete", "browser_snippet_export", "browser_snippet_import"]);
   assert.equal(tab.label, "✂️ Snippets");
   assert.deepEqual(plain(tab.storageKeys), [X.KEY]);
   assert.deepEqual(commands.map((c) => [c.group, c.name, c.partial]), [["Writing", "Save the selection as a snippet", true], ["Writing", "Insert a snippet", true]]);
@@ -248,4 +248,125 @@ test("update: edits text, name and tags in place keeping id, created and uses; s
   await assert.rejects(T.run("browser_snippet_update", { id, text: "y".repeat(X.MAX_TEXT + 1) }), /too long/);
   assert.equal(data[X.KEY][0].text, "Dear {{name}}, thanks for {{what}}.");
   assert.match(await runTool(T, "browser_snippet_list", {}), /- THANKS  \(id snp_\w{6}; placeholders: name, what\)/);
+});
+
+test("export: the agent-snippets/1 envelope of all snippets (sorted by name) or of one tag; nothing to export says so", async () => {
+  const { T, data, X } = load();
+  assert.equal(await runTool(T, "browser_snippet_export", {}), "No snippets saved yet — nothing to export.");
+  await runTool(T, "browser_snippet_save", { name: "Greeting", text: "Dear {{name}},", tags: ["mail"] });
+  await runTool(T, "browser_snippet_save", { name: "Address", text: "12 Quill Lane" });
+  const env = X.exportSnippets(data[X.KEY], "", 1700000000000);
+  assert.deepEqual(plain(env), { format: "agent-snippets/1", exported: "2023-11-14T22:13:20.000Z", snippets: [
+    { name: "Address", text: "12 Quill Lane", tags: [], created: data[X.KEY][1].created, updated: data[X.KEY][1].updated },
+    { name: "Greeting", text: "Dear {{name}},", tags: ["mail"], created: data[X.KEY][0].created, updated: data[X.KEY][0].updated },
+  ] });
+  assert.deepEqual(plain(X.exportSnippets(data[X.KEY], "#Mail").snippets.map((s) => s.name)), ["Greeting"]);
+  assert.equal(X.FORMAT, "agent-snippets/1");
+
+  let out = await runTool(T, "browser_snippet_export", {});
+  const [head, ...rest] = out.split("\n");
+  assert.equal(head, "Exported 2 snippets as agent-snippets/1 JSON — keep it as a file; browser_snippet_import brings it back:");
+  const parsed = JSON.parse(rest.join("\n"));
+  assert.equal(parsed.format, "agent-snippets/1");
+  assert.match(parsed.exported, /^\d{4}-\d{2}-\d{2}T/);
+  assert.deepEqual(parsed.snippets.map((s) => s.name), ["Address", "Greeting"]);
+  out = await runTool(T, "browser_snippet_export", { tag: "mail" });
+  assert.match(out, /^Exported 1 snippet tagged 'mail' as agent-snippets\/1 JSON/);
+  assert.deepEqual(JSON.parse(out.split("\n").slice(1).join("\n")).snippets.map((s) => s.name), ["Greeting"]);
+  assert.equal(await runTool(T, "browser_snippet_export", { tag: "nope" }), "No snippets tagged 'nope' — nothing to export.");
+});
+
+test("parseImport: the envelope or a bare array, each entry validated (name, text, length, tags normalised); bad JSON, a foreign format and nothing valid throw", () => {
+  const { X } = load();
+  const p = X.parseImport(JSON.stringify({ format: "agent-snippets/1", exported: "x", snippets: [
+    { name: "  Greeting ", text: "Hi {{name}}", tags: ["Mail", "#mail", "support"], created: 1700000000000 },
+    { name: "", text: "no name" },
+    { name: "Empty", text: "  " },
+    { name: "Long", text: "y".repeat(X.MAX_TEXT + 1) },
+    "not an object",
+    { name: "Tagless", text: "ok", created: "yesterday" },
+  ] }));
+  assert.deepEqual(plain(p), { snippets: [
+    { name: "Greeting", text: "Hi {{name}}", tags: ["mail", "support"], created: 1700000000000 },
+    { name: "Tagless", text: "ok", tags: [] },
+  ], invalid: ["#2: no name", "#3 ('Empty'): no text", "#4 ('Long'): text too long (20001 chars; the limit is 20000)", "#5: not an object"] });
+  assert.deepEqual(plain(X.parseImport('[{"name":"A","text":"a"}]').snippets.map((s) => s.name)), ["A"], "a bare array works too");
+  assert.throws(() => X.parseImport(""), /json is required/);
+  assert.throws(() => X.parseImport("{nope"), /^Error: The JSON could not be parsed: /);
+  assert.throws(() => X.parseImport('{"format":"agent-recipes/1","snippets":[]}'), /Unknown format 'agent-recipes\/1' — not a snippets export\./);
+  assert.throws(() => X.parseImport('{"things":[]}'), /Expected an agent-snippets\/1 envelope/);
+  assert.throws(() => X.parseImport("[]"), /Nothing to import: the list is empty\./);
+  assert.throws(() => X.parseImport('[{"name":"x"}]'), /Nothing to import: none of the 1 entries is valid \(#1 \('x'\): no text\)\./);
+});
+
+test("mergeSnippets: new names are added with fresh ids, saved names are skipped or (replace) overwritten keeping id, created and uses; the cap; nothing is mutated", () => {
+  const { X } = load();
+  const existing = [
+    { id: "snp_000001", name: "Greeting", text: "old", tags: ["mail"], created: 1, updated: 1, uses: 4 },
+    { id: "snp_000002", name: "Address", text: "12 Quill Lane", tags: [], created: 2, updated: 2, uses: 0 },
+  ];
+  const imported = [
+    { name: "greeting", text: "new", tags: ["support"], created: 1700000000000 },
+    { name: "Sig", text: "— Ann", tags: [] },
+    { name: "sig", text: "— Ann again", tags: [] },
+  ];
+  let m = X.mergeSnippets(existing, imported, { now: 5000 });
+  assert.deepEqual(plain([m.added, m.replaced, m.skipped, m.overLimit]), [["Sig"], [], ["Greeting", "Sig"], []], "the second 'sig' meets the one just added");
+  assert.equal(m.list.length, 3);
+  assert.deepEqual(plain(m.list[0]), existing[0], "skipped: untouched");
+  assert.match(m.list[2].id, /^snp_\w{6}$/);
+  assert.deepEqual(plain(m.list[2]), { id: m.list[2].id, name: "Sig", text: "— Ann", tags: [], created: 5000, updated: 5000, uses: 0 });
+  assert.equal(existing.length, 2, "the input list is not mutated");
+  assert.equal(existing[0].text, "old");
+
+  m = X.mergeSnippets(existing, imported, { replace: true, now: 5000 });
+  assert.deepEqual(plain([m.added, m.replaced, m.skipped]), [["Sig"], ["greeting", "sig"], []]);
+  assert.deepEqual(plain(m.list[0]), { id: "snp_000001", name: "greeting", text: "new", tags: ["support"], created: 1, updated: 5000, uses: 4 }, "id, created and uses stay; the name takes the import's spelling");
+  assert.equal(m.list[2].text, "— Ann again");
+  assert.equal(m.list[2].created, 5000, "an import without a creation date gets now");
+
+  const full = Array.from({ length: X.MAX }, (_, i) => ({ id: "snp_" + String(i).padStart(6, "0"), name: "S" + i, text: "t", tags: [], created: 1, updated: 1, uses: 0 }));
+  m = X.mergeSnippets(full, [{ name: "S3", text: "x", tags: [] }, { name: "New", text: "x", tags: [] }], { replace: true, now: 9 });
+  assert.deepEqual(plain([m.added, m.replaced, m.overLimit]), [[], ["S3"], ["New"]]);
+  assert.equal(m.list.length, X.MAX);
+});
+
+test("browser_snippet_import: validates, merges (skip or replace), stores only when something changed, and reports; export → import round-trips", async () => {
+  const { T, data, X } = load();
+  await runTool(T, "browser_snippet_save", { name: "Greeting", text: "Dear {{name}},", tags: ["mail"] });
+  const id = data[X.KEY][0].id;
+  data[X.KEY][0].uses = 2;
+  const json = JSON.stringify({ format: "agent-snippets/1", snippets: [
+    { name: "greeting", text: "Hi {{name}}", tags: ["support"] },
+    { name: "Address", text: "12 Quill Lane", tags: ["post"] },
+    { name: "", text: "x" },
+  ] });
+  let out = await runTool(T, "browser_snippet_import", { json });
+  assert.equal(out, "Imported 1 of 2 snippets: added 1 ('Address'); skipped 1 already saved ('Greeting' — pass replace=true to overwrite them).\nLeft out as invalid: #3: no name.\n2 snippets saved now.");
+  assert.deepEqual(data[X.KEY].map((s) => s.name), ["Greeting", "Address"]);
+  assert.equal(data[X.KEY][0].text, "Dear {{name}},");
+  assert.deepEqual(data[X.KEY][1].tags, ["post"]);
+
+  out = await runTool(T, "browser_snippet_import", { json, replace: true });
+  assert.equal(out, "Imported 2 of 2 snippets: replaced 2 ('greeting', 'Address').\nLeft out as invalid: #3: no name.\n2 snippets saved now.");
+  assert.equal(data[X.KEY][0].id, id);
+  assert.equal(data[X.KEY][0].uses, 2);
+  assert.equal(data[X.KEY][0].text, "Hi {{name}}");
+  assert.deepEqual(data[X.KEY][0].tags, ["support"]);
+
+  // Nothing new: storage is left alone.
+  const before = JSON.stringify(data[X.KEY]);
+  out = await runTool(T, "browser_snippet_import", { json: '[{"name":"address","text":"other"}]' });
+  assert.equal(out, "Imported 0 of 1 snippet: skipped 1 already saved ('Address' — pass replace=true to overwrite them).\n2 snippets saved now.");
+  assert.equal(JSON.stringify(data[X.KEY]), before);
+  await assert.rejects(T.run("browser_snippet_import", {}), /json is required/);
+  await assert.rejects(T.run("browser_snippet_import", { json: "[1]" }), /none of the 1 entries is valid/);
+
+  // Round trip: the export of this list imports into an empty store as the same snippets.
+  const exported = (await runTool(T, "browser_snippet_export", {})).split("\n").slice(1).join("\n");
+  const fresh = load();
+  out = await runTool(fresh.T, "browser_snippet_import", { json: exported });
+  assert.equal(out, "Imported 2 of 2 snippets: added 2 ('Address', 'greeting').\n2 snippets saved now.");
+  assert.deepEqual(fresh.data[X.KEY].map((s) => [s.name, s.text, s.tags]), [["Address", "12 Quill Lane", ["post"]], ["greeting", "Hi {{name}}", ["support"]]]);
+  assert.equal(fresh.data[X.KEY][1].created, data[X.KEY][0].created, "the creation date travels");
 });

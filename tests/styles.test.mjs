@@ -13,19 +13,20 @@ import { fakeCtx, fakeDom, loadContentScript, loadExtras, plain, runTool, settle
 const load = (opts) => loadExtras({ ids: ["styles"], features: { styles: true }, ...(opts || {}) });
 const stored = (data) => data.agentSiteStyles || {};
 
-test("loads only for a brand with the feature; registers eight tools, the 🎨 tab, seven Design commands and the content script once", async () => {
+test("loads only for a brand with the feature; registers ten tools, the 🎨 tab, nine Design commands and the content script once", async () => {
   const off = load({ features: { styles: false, palette: true } });
   assert.deepEqual(off.T.names, []);
   assert.deepEqual(off.tabs, []);
   assert.equal(off.S, undefined);
 
   const { T, tabs, commands, S, scripting } = load();
-  assert.deepEqual(T.names, ["browser_style_inspect", "browser_style_apply", "browser_style_list", "browser_style_remove", "browser_style_preset", "browser_style_font", "browser_style_export", "browser_style_import"]);
+  assert.deepEqual(T.names, ["browser_style_inspect", "browser_style_apply", "browser_style_list", "browser_style_remove", "browser_style_preset", "browser_style_font", "browser_style_export", "browser_style_import", "browser_style_toggle", "browser_style_tokens"]);
   assert.equal(tabs[0].label, "🎨 Styles");
   assert.deepEqual(plain(tabs[0].storageKeys), ["agentSiteStyles"]);
   assert.deepEqual(commands.map((c) => [c.group, c.name, !!c.partial]), [
     ["Design", "Make this page easier to read", false], ["Design", "Hide the distractions on this page", false], ["Design", "Show this site's style overrides", false],
     ["Design", "Reading mode for this site", false], ["Design", "Dyslexia-friendly text", false], ["Design", "Change the site's fonts", true], ["Design", "Export my styles for Stylus", false],
+    ["Design", "Pause this site's styles", false], ["Design", "Change a design token…", true],
   ]);
   for (const c of commands.slice(0, 2)) { assert.match(c.prompt, /browser_style_inspect/); assert.match(c.prompt, /browser_style_apply/); assert.match(c.prompt, /consent/i); }
   assert.match(commands[2].prompt, /browser_style_list/);
@@ -33,6 +34,8 @@ test("loads only for a brand with the feature; registers eight tools, the 🎨 t
   assert.match(commands[4].prompt, /browser_style_preset preset=dyslexia/);
   assert.match(commands[5].prompt, /browser_style_font.*to: $/);
   assert.match(commands[6].prompt, /browser_style_export with save=true/);
+  assert.match(commands[7].prompt, /browser_style_toggle name="\*" enabled=false/);
+  assert.match(commands[8].prompt, /browser_style_tokens set=.*: $/);
   assert.equal(await S.ready, true);
   assert.deepEqual(scripting.registered, [{ id: "extras-styles", js: ["extras-styles.cs.js"], matches: ["http://*/*", "https://*/*"], runAt: "document_start", persistAcrossSessions: true }]);
   // A second panel load finds it registered and does not register twice.
@@ -581,6 +584,128 @@ test("parseUserCss / browser_style_import: a two-domain document goes to its sit
   // Everything broken (a block that never closes): an error with the reasons, nothing saved.
   await assert.rejects(T.run("browser_style_import", { css: '@-moz-document domain("c.com") {\n  h1 { color: red' }), /Nothing was imported:\n  c\.com: refused the block for domain\("c\.com"\) — Missing '\}' — 1 block is not closed$/);
   assert.equal(stored(data)["c.com"], undefined);
+});
+
+test("toggleOverrides / browser_style_toggle: pauses and resumes one override or every override of the site (flipping without enabled), reports the new state, updates the tab; the content script leaves a paused override out on a load", async () => {
+  const { T, S, data, scripting } = load();
+  await assert.rejects(T.run("browser_style_toggle", {}), /name is required — the override to pause or resume, or '\*'/);
+  await assert.rejects(T.run("browser_style_toggle", { name: "*" }), /No overrides saved for example\.com — nothing to pause or resume/);
+  await runTool(T, "browser_style_apply", { name: "A", css: "h1 { color: red }" });
+  await runTool(T, "browser_style_apply", { name: "B", css: "h2 { color: blue }" });
+  await runTool(T, "browser_style_apply", { name: "G", css: "body { margin: 0 }", site: "*" });
+  await assert.rejects(T.run("browser_style_toggle", { name: "nope" }), /No override named 'nope' on example\.com\. Its overrides: A, B\./);
+  scripting.calls.length = 0;
+  // Without enabled the state flips (the name in any case).
+  assert.equal(await runTool(T, "browser_style_toggle", { name: "a" }), "Paused override 'A' on example.com — it stays saved; browser_style_toggle name=\"A\" enabled=true resumes it. The current tab is updated; the site leaves it out on every visit until resumed.");
+  assert.equal(stored(data)["example.com"].A.enabled, false);
+  assert.deepEqual(scripting.calls.map((c) => c.func), ["pageApplyStyles"]);
+  assert.equal(scripting.calls[0].args[0], "/* every site · G */\nbody { margin: 0 }\n\n/* example.com · B */\nh2 { color: blue }", "the paused override is left out of the tab at once");
+  assert.equal(await runTool(T, "browser_style_toggle", { name: "A" }), "Resumed override 'A' on example.com. The current tab is updated; the site applies it again on every visit.");
+  assert.equal(stored(data)["example.com"].A.enabled, true);
+  // With enabled the state is set; the same state again changes nothing (and does not touch the tab).
+  assert.match(await runTool(T, "browser_style_toggle", { name: "A", enabled: false }), /^Paused override 'A'/);
+  scripting.calls.length = 0;
+  assert.equal(await runTool(T, "browser_style_toggle", { name: "A", enabled: false }), "Override 'A' on example.com is already paused — nothing changed.");
+  assert.deepEqual(scripting.calls, []);
+  // '*': every override of the site together — paused when any is on, resumed when all are paused.
+  assert.equal(await runTool(T, "browser_style_toggle", { name: "*" }), "Paused every override of example.com (1: B; already paused: A) — they stay saved; browser_style_toggle name=\"*\" enabled=true resumes them. The current tab is updated; the site leaves them out on every visit until resumed.");
+  assert.deepEqual([stored(data)["example.com"].A.enabled, stored(data)["example.com"].B.enabled], [false, false]);
+  assert.deepEqual(scripting.calls.at(-1).args, ["/* every site · G */\nbody { margin: 0 }", "data-agent-styles"]);
+  assert.equal(await runTool(T, "browser_style_toggle", { name: "*", enabled: false }), "Every override of example.com is already paused (A, B) — nothing changed.");
+  assert.equal(await runTool(T, "browser_style_toggle", { name: "*" }), "Resumed every override of example.com (2: A, B). The current tab is updated; the site applies them again on every visit.");
+  assert.ok(stored(data)["example.com"].A.enabled && stored(data)["example.com"].B.enabled);
+  assert.equal(stored(data)["*"].G.enabled, true, "another site's overrides are untouched");
+  // The helper's result; a site by name.
+  assert.deepEqual(plain(await S.toggleOverrides({ site: "*", name: "g", enabled: false })), { site: "*", enabled: false, all: false, changed: ["G"], unchanged: [] });
+  assert.equal(stored(data)["*"].G.enabled, false);
+  assert.match(await runTool(T, "browser_style_toggle", { name: "G", site: "*", enabled: true }), /^Resumed override 'G' on every site\. The current tab is updated/);
+  // Paused → the content script leaves it out on a load, and puts it back once resumed.
+  await runTool(T, "browser_style_toggle", { name: "B", enabled: false });
+  const cs = loadContentScript({ hostname: "www.example.com", data: { agentSiteStyles: plain(stored(data)) } });
+  await settle();
+  assert.equal(styleEl(cs.doc).textContent, "/* every site · G */\nbody { margin: 0 }\n\n/* example.com · A */\nh1 { color: red }");
+  await runTool(T, "browser_style_toggle", { name: "B", enabled: true });
+  await cs.change(plain(stored(data)));
+  await settle();
+  assert.match(styleEl(cs.doc).textContent, /\n\n\/\* example\.com · B \*\/\nh2 \{ color: blue \}$/);
+  // No website tab and no site: the usual error.
+  T.noTab = true;
+  await assert.rejects(T.run("browser_style_toggle", { name: "A" }), /No active tab/);
+});
+
+test("parseTokens / checkToken / tokensCss: one :root rule with every token !important, merged over an earlier Tokens override (known names keep their place, new ones are appended, an empty value drops one); names and values are checked", () => {
+  const { S } = load();
+  assert.deepEqual(plain(S.parseTokens("")), []);
+  const css = S.tokensCss({ "--brand-color": "#0a7", "--radius": " 4px ", "--font-body": '"Inter", sans-serif' }, "");
+  assert.equal(css, [
+    "/* Tokens: the site's design tokens, changed everywhere they are used (browser_style_tokens) */",
+    ":root {",
+    "  --brand-color: #0a7 !important;",
+    "  --radius: 4px !important;",
+    '  --font-body: "Inter", sans-serif !important;',
+    "}",
+  ].join("\n"));
+  assert.deepEqual(plain(S.validateCss(css)), { ok: true, rules: 1 });
+  assert.equal(load({ globals: { CSSStyleSheet: LenientSheet } }).S.validateCss(css).ok, true, "with a parser too (custom properties take anything)");
+  assert.deepEqual(plain(S.parseTokens(css)), [{ name: "--brand-color", value: "#0a7" }, { name: "--radius", value: "4px" }, { name: "--font-body", value: '"Inter", sans-serif' }]);
+  const merged = S.tokensCss({ "--radius": "8px", "--gap": "1rem", "--brand-color": "" }, css);
+  assert.deepEqual(plain(S.parseTokens(merged)), [{ name: "--radius", value: "8px" }, { name: "--font-body", value: '"Inter", sans-serif' }, { name: "--gap", value: "1rem" }]);
+  assert.equal(S.tokensCss({ "--radius": "", "--font-body": "", "--gap": "" }, merged), "", "nothing left");
+  assert.deepEqual(plain(S.parseTokens("h1 { --x: 1 } :root { color: red; --a: 1px; --a: 2px !important } html { --b: url(x) }")), [{ name: "--a", value: "2px" }, { name: "--b", value: "url(x)" }], "only :root / html tokens; the last declaration wins");
+  // Names and values.
+  assert.deepEqual(plain(S.checkToken(" --a ", " #fff  !important ")), { name: "--a", value: "#fff" });
+  assert.deepEqual(plain(S.checkToken("--a", 4)), { name: "--a", value: "4" });
+  assert.deepEqual(plain(S.checkToken("--a", null)), { name: "--a", value: "" });
+  assert.deepEqual(plain(S.checkToken("--a", "var(--b, #fff)")), { name: "--a", value: "var(--b, #fff)" });
+  assert.throws(() => S.checkToken("brand", "#fff"), /'brand' is not a custom property name — names start with --/);
+  assert.throws(() => S.checkToken("--a b", "#fff"), /is not a custom property name/);
+  assert.throws(() => S.checkToken("--" + "a".repeat(79), "#fff"), /is not a custom property name/);
+  assert.throws(() => S.checkToken("--a", "x".repeat(201)), /--a: the value is too long \(201 characters; at most 200\)/);
+  assert.throws(() => S.checkToken("--a", "red; } body { display: none"), /--a: the value may not contain ; \{ \} or comment markers/);
+  assert.throws(() => S.checkToken("--a", "x /* y */"), /comment markers/);
+  assert.throws(() => S.checkToken("--a", "url(https://evil.example/x.png)"), /--a: url\(\), expression\(\) and javascript: are not allowed/);
+  assert.throws(() => S.checkToken("--a", "expression(alert(1))"), /not allowed/);
+  assert.throws(() => S.checkToken("--a", "javascript:alert(1)"), /not allowed/);
+  assert.throws(() => S.checkToken("--a", "calc(1px + 2px"), /--a: the parentheses in the value are not balanced/);
+  assert.throws(() => S.checkToken("--a", "'Inter"), /--a: a quote in the value is not closed/);
+  assert.throws(() => S.tokensCss({}, ""), /set is required/);
+  assert.throws(() => S.tokensCss(["--a"], ""), /set is required/);
+  assert.throws(() => S.tokensCss({ "--a": "url(x)" }, ""), /not allowed/);
+});
+
+test("browser_style_tokens: saves the 'Tokens' override (merged on later calls), applies it, reports what was set, kept and dropped; a bad entry saves nothing; dropping every token removes the override", async () => {
+  const { T, data, scripting } = load();
+  await assert.rejects(T.run("browser_style_tokens", {}), /set is required/);
+  await assert.rejects(T.run("browser_style_tokens", { set: {} }), /set is required/);
+  await assert.rejects(T.run("browser_style_tokens", { set: { "--a": "url(x)" } }), /--a: url\(\)/);
+  await assert.rejects(T.run("browser_style_tokens", { set: { "--a": "" } }), /Nothing to set — every value in set is empty and example\.com has no 'Tokens' override/);
+  assert.deepEqual(stored(data), {});
+  assert.equal(scripting.calls.length, 0);
+  const out = await runTool(T, "browser_style_tokens", { set: { "--brand-color": "#0a7", "--radius": "4px" } });
+  assert.match(out, /^Set 2 tokens on example\.com \(override 'Tokens', \d+ B\): --brand-color: #0a7; --radius: 4px\. Applied in the current tab; the site keeps it until browser_style_remove name=Tokens\. Every rule that uses var\(--name\) follows; a token the site redeclares on a component \(\.card \{ --name: … \}\) keeps its own value there/);
+  const head = "/* Tokens: the site's design tokens, changed everywhere they are used (browser_style_tokens) */";
+  assert.equal(stored(data)["example.com"].Tokens.css, head + "\n:root {\n  --brand-color: #0a7 !important;\n  --radius: 4px !important;\n}");
+  assert.equal(stored(data)["example.com"].Tokens.enabled, true);
+  assert.equal(scripting.calls.at(-1).func, "pageApplyStyles");
+  assert.match(scripting.calls.at(-1).args[0], /^\/\* example\.com · Tokens \*\/\n\/\* Tokens:[^\n]*\*\/\n:root \{\n  --brand-color: #0a7 !important;/);
+  // A later call merges: a known name takes the new value, new names are added, an empty value drops one.
+  assert.match(await runTool(T, "browser_style_tokens", { set: { "--radius": "8px", "--gap": "1rem", "--brand-color": "" } }), /^Set 2 tokens on example\.com \(override 'Tokens', \d+ B\): --radius: 8px; --gap: 1rem\. Dropped --brand-color\. Applied in the current tab/);
+  assert.equal(stored(data)["example.com"].Tokens.css, head + "\n:root {\n  --radius: 8px !important;\n  --gap: 1rem !important;\n}");
+  assert.match(await runTool(T, "browser_style_tokens", { set: { "--ink": "#222" } }), /^Set 1 token on example\.com \(override 'Tokens', \d+ B\): --ink: #222\. 2 tokens from before kept\. Applied/);
+  // A bad entry in a merge saves nothing.
+  await assert.rejects(T.run("browser_style_tokens", { set: { "--ok": "1px", "--bad": "a; b" } }), /--bad: the value may not contain/);
+  assert.doesNotMatch(stored(data)["example.com"].Tokens.css, /--ok/);
+  // A paused Tokens override stays paused (as with browser_style_apply); another name, another site.
+  stored(data)["example.com"].Tokens.enabled = false;
+  await runTool(T, "browser_style_tokens", { set: { "--ink": "#333" } });
+  assert.equal(stored(data)["example.com"].Tokens.enabled, false);
+  assert.match(stored(data)["example.com"].Tokens.css, /--ink: #333 !important;/);
+  assert.match(await runTool(T, "browser_style_tokens", { set: { "--brand": "#fff" }, name: "Tokens: dark", site: "www.Other.com" }), /^Set 1 token on other\.com \(override 'Tokens: dark', \d+ B\): --brand: #fff\. Saved; it applies on other\.com \(the current tab is example\.com\)/);
+  assert.deepEqual(Object.keys(stored(data)["other.com"]), ["Tokens: dark"]);
+  // Dropping every token removes the override.
+  assert.equal(await runTool(T, "browser_style_tokens", { set: { "--radius": "", "--gap": "", "--ink": "" } }), "Dropped --radius, --gap, --ink — every token of the 'Tokens' override of example.com is gone, so the override was removed. The current tab is updated.");
+  assert.equal(stored(data)["example.com"], undefined);
+  assert.ok(stored(data)["other.com"]["Tokens: dark"]);
 });
 
 // ── The content script ───────────────────────────────────────────────────────

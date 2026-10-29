@@ -11,6 +11,15 @@
 //                        robots, viewport, lang, h1, images, links, social cards, ld+json, word count.
 //   browser_check_speed  the tab's Performance API: TTFB, DOM/load events, paints, LCP, resources by type.
 //   browser_check_sitemap robots.txt and the sitemap(s) of a site (index files followed), the first URLs checked.
+//   browser_check_accessibility  a11y audit of the tab (one injected read): alt, labels, icon-only buttons and
+//                        links, generic link texts, heading skips, landmarks, lang, tabindex, duplicate ids,
+//                        iframe titles, target=_blank, aria-hidden with focusable content, autoplay. No contrast.
+//   browser_check_mobile mobile readiness of the tab (one injected read): viewport meta, tap targets, small
+//                        text, wide elements, overlays, overflow, declared widths over 375 px, legacy plugins.
+//   browser_check_redirects  the redirect chain of an address hop by hop (manual redirects; the hops Chrome
+//                        hides are observed with webRequest, or collapsed into one hidden hop).
+//   browser_check_headers  the response headers of an address that matter: server, type, compression, caching,
+//                        the security headers ("security headers n/7"), cookie flags without values, HTTP version.
 //   🔗 Checks tab        "Check the links on this page" with a live list, the last result, "Check a URL…".
 //
 // Storage (chrome.storage.local): agentLinkCheck — the last link-check result, shown by the tab.
@@ -648,6 +657,571 @@
     return lines.join("\n");
   }
 
+  // ── accessibility ───────────────────────────────────────────────────────
+
+  var A11Y_SAMPLES = 5, A11Y_SCAN = 3000;
+  var GENERIC_LINK_TEXTS = ["click here", "read more", "here", "link", "more"];
+
+  /**
+   * Page side (injected into the top frame, self-contained): everything the accessibility audit looks at,
+   * as counts with up to `samples` selectors each. `generic` is the list of generic link texts. Colour
+   * contrast is not read here. Nothing is changed on the page.
+   */
+  function readA11y(samples, maxScan, generic) {
+    function clean(s) { return String(s == null ? "" : s).replace(/\s+/g, " ").trim(); }
+    function all(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)).slice(0, maxScan); }
+    function sel(el, depth) {
+      var tag = el.tagName.toLowerCase();
+      if (el.id) return tag + "#" + el.id;
+      var cls = clean(typeof el.className === "string" ? el.className : "").split(" ").filter(Boolean)[0];
+      if (cls) return tag + "." + cls;
+      var name = el.getAttribute("name");
+      if (name) return tag + '[name="' + name + '"]';
+      var p = el.parentElement;
+      if (!p || p === document.body || p === document.documentElement || (depth || 0) >= 2) return tag;
+      var sibs = Array.prototype.filter.call(p.children, function (c) { return c.tagName === el.tagName; });
+      return sel(p, (depth || 0) + 1) + " > " + tag + (sibs.length > 1 ? ":nth-of-type(" + (sibs.indexOf(el) + 1) + ")" : "");
+    }
+    function bucket() { return { count: 0, samples: [] }; }
+    function note(b, el, extra) { b.count++; if (b.samples.length < samples) b.samples.push(sel(el).slice(0, 80) + (extra ? " " + extra : "")); }
+    function labelled(el) { return !!(clean(el.getAttribute("aria-label")) || clean(el.getAttribute("aria-labelledby")) || clean(el.getAttribute("title"))); }
+    /** The accessible name of a link or button, roughly: its own attributes, its text, or an image/svg/aria-labelled child. */
+    function nameOf(el) {
+      if (labelled(el)) return "(named)";
+      var t = clean(el.innerText != null ? el.innerText : el.textContent);
+      if (t) return t;
+      var inner = all('img[alt], [aria-label], svg title, input[type="image"][alt]', el);
+      for (var i = 0; i < inner.length; i++) {
+        var v = clean(inner[i].getAttribute("alt") || inner[i].getAttribute("aria-label") || inner[i].textContent);
+        if (v) return v;
+      }
+      return "";
+    }
+    var imgs = all("img"), noAlt = bucket();
+    imgs.forEach(function (img) { if (!img.hasAttribute("alt")) note(noAlt, img, "(" + String(img.currentSrc || img.getAttribute("src") || "no src").slice(-60) + ")"); });
+    var controls = bucket(), controlsTotal = 0;
+    all("input, select, textarea").forEach(function (c) {
+      var type = (c.getAttribute("type") || "text").toLowerCase();
+      if (c.tagName === "INPUT" && /^(hidden|submit|reset|button|image)$/.test(type)) return; // buttons, below
+      controlsTotal++;
+      if (labelled(c) || clean(c.getAttribute("placeholder"))) return;
+      if (c.labels && c.labels.length) return; // <label for> or a wrapping <label>
+      if (c.closest("label")) return;
+      note(controls, c, "(" + (c.tagName === "INPUT" ? type : c.tagName.toLowerCase()) + ")");
+    });
+    var links = { total: 0, empty: bucket(), generic: bucket() };
+    all("a[href]").forEach(function (a) {
+      links.total++;
+      var n = nameOf(a), href = clean(a.getAttribute("href")).slice(0, 60);
+      if (!n) { note(links.empty, a, "→ " + href); return; }
+      var key = n.toLowerCase().replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, "");
+      if ((generic || []).indexOf(key) >= 0) note(links.generic, a, '"' + n + '" → ' + href);
+    });
+    var buttons = { total: 0, empty: bucket() };
+    all('button, [role="button"], input[type="button"], input[type="image"]').forEach(function (b) {
+      buttons.total++;
+      var n = b.tagName === "INPUT" ? (labelled(b) ? "(named)" : clean(b.value) || clean(b.getAttribute("alt"))) : nameOf(b);
+      if (!n) note(buttons.empty, b);
+    });
+    var levels = [], skips = bucket();
+    all("h1, h2, h3, h4, h5, h6").forEach(function (h) {
+      var lv = Number(h.tagName.charAt(1)), prev = levels.length ? levels[levels.length - 1] : 0;
+      if (prev && lv > prev + 1) note(skips, h, "(h" + prev + " → h" + lv + ' "' + clean(h.textContent).slice(0, 40) + '")');
+      levels.push(lv);
+    });
+    var sectioning = "article, aside, main, nav, section";
+    function topLevel(tag) { return all(tag).some(function (e) { return !e.parentElement || !e.parentElement.closest(sectioning); }); }
+    var landmarks = {
+      main: !!document.querySelector('main, [role="main"]'),
+      nav: !!document.querySelector('nav, [role="navigation"]'),
+      banner: !!document.querySelector('[role="banner"]') || topLevel("header"),
+      contentinfo: !!document.querySelector('[role="contentinfo"]') || topLevel("footer"),
+    };
+    var tabindex = bucket();
+    all("[tabindex]").forEach(function (e) { var v = parseInt(e.getAttribute("tabindex"), 10); if (v > 0) note(tabindex, e, "(tabindex=" + v + ")"); });
+    var ids = {}, dup = bucket();
+    all("[id]").forEach(function (e) { if (e.id) ids[e.id] = (ids[e.id] || 0) + 1; });
+    Object.keys(ids).forEach(function (id) { if (ids[id] > 1) { dup.count++; if (dup.samples.length < samples) dup.samples.push("#" + id + " ×" + ids[id]); } });
+    var iframes = { total: 0, untitled: bucket() };
+    all("iframe").forEach(function (f) {
+      iframes.total++;
+      if (clean(f.getAttribute("title")) || clean(f.getAttribute("aria-label"))) return;
+      var host = ""; try { host = new URL(f.getAttribute("src") || "", location.href).host; } catch (e) {}
+      note(iframes.untitled, f, host ? "(" + host + ")" : "");
+    });
+    var blank = { total: 0, noRel: bucket() };
+    all('a[target="_blank"]').forEach(function (a) { blank.total++; if (!/\b(noopener|noreferrer)\b/i.test(a.getAttribute("rel") || "")) note(blank.noRel, a); });
+    var hidden = bucket();
+    var focusable = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    all('[aria-hidden="true"]').forEach(function (e) { var n = e.querySelectorAll(focusable).length; if (n) note(hidden, e, "(" + n + " focusable inside)"); });
+    var autoplay = bucket();
+    all("video, audio").forEach(function (m) { if (m.hasAttribute("autoplay") || (!m.paused && !m.ended)) note(autoplay, m, m.muted ? "(muted)" : "(with sound)"); });
+    return {
+      url: location.href,
+      lang: clean(document.documentElement.getAttribute("lang")),
+      images: { total: imgs.length, noAlt: noAlt },
+      controls: { total: controlsTotal, unnamed: controls },
+      links: links,
+      buttons: buttons,
+      headings: { count: levels.length, skips: skips },
+      landmarks: landmarks,
+      tabindex: tabindex,
+      duplicateIds: dup,
+      iframes: iframes,
+      blank: blank,
+      hiddenFocusable: hidden,
+      autoplay: autoplay,
+    };
+  }
+
+  /** "a, b, …" over a { count, samples } bucket. */
+  function sampleList(b) { b = b || {}; var s = b.samples || []; return s.join(", ") + ((Number(b.count) || 0) > s.length ? ", …" : ""); }
+  function countOf(b) { return (b && Number(b.count)) || 0; }
+
+  /** The audit over what readA11y returned: [{ ok, name, detail }], one entry per check, in a fixed order. */
+  function a11yFindings(d) {
+    d = d || {};
+    var out = [];
+    function add(ok, name, detail) { out.push({ ok: !!ok, name: name, detail: detail }); }
+    add(!!d.lang, "html lang", d.lang ? "lang=" + d.lang : "missing — screen readers can't pick the language");
+    var im = d.images || {}, noAlt = countOf(im.noAlt);
+    add(!noAlt, "images", plural(im.total || 0, "image") + (noAlt ? ", " + noAlt + " without alt: " + sampleList(im.noAlt) : im.total ? ", all with alt" : ""));
+    var c = d.controls || {}, unnamed = countOf(c.unnamed);
+    add(!unnamed, "form controls", !c.total ? "none" : plural(c.total, "control") + (unnamed ? ", " + unnamed + " without an accessible name (no label, aria-label, title or placeholder): " + sampleList(c.unnamed) : ", all named"));
+    var ln = d.links || {}, bt = d.buttons || {}, emptyL = countOf(ln.empty), emptyB = countOf(bt.empty);
+    add(!emptyL && !emptyB, "buttons and links without text", (emptyL || emptyB) ?
+      (emptyL ? emptyL + " of " + plural(ln.total || 0, "link") : "") + (emptyL && emptyB ? " and " : "") + (emptyB ? emptyB + " of " + plural(bt.total || 0, "button") : "") + " icon-only without aria-label: " + [sampleList(ln.empty), sampleList(bt.empty)].filter(Boolean).join(", ") :
+      plural(ln.total || 0, "link") + " and " + plural(bt.total || 0, "button") + ", all with a text or an aria-label");
+    var generic = countOf(ln.generic);
+    add(!generic, "link text", generic ? generic + " generic link text" + (generic === 1 ? "" : "s") + " (say where they lead): " + sampleList(ln.generic) : "no generic link texts (" + GENERIC_LINK_TEXTS.slice(0, 3).join(", ") + ", …)");
+    var hd = d.headings || {}, skips = countOf(hd.skips);
+    add(!skips, "heading order", !hd.count ? "no headings" : plural(hd.count, "heading") + (skips ? ", " + plural(skips, "level skip") + ": " + sampleList(hd.skips) : ", levels in order"));
+    var lm = d.landmarks || {};
+    var missing = ["main", "nav", "banner", "contentinfo"].filter(function (k) { return !lm[k]; });
+    add(!missing.length, "landmarks", missing.length ? "missing " + missing.join(", ") + (missing.length === 4 ? " — add <main>, <nav>, <header> and <footer>" : "") : "main, nav, banner and contentinfo present");
+    var ti = countOf(d.tabindex);
+    add(!ti, "tabindex", ti ? plural(ti, "element") + " with a positive tabindex (it breaks the natural tab order): " + sampleList(d.tabindex) : "no positive tabindex");
+    var dup = countOf(d.duplicateIds);
+    add(!dup, "duplicate ids", dup ? plural(dup, "id") + " used more than once: " + sampleList(d.duplicateIds) : "all ids unique");
+    var fr = d.iframes || {}, untitled = countOf(fr.untitled);
+    add(!untitled, "iframes", !fr.total ? "none" : plural(fr.total, "iframe") + (untitled ? ", " + untitled + " without title: " + sampleList(fr.untitled) : ", all titled"));
+    var bl = d.blank || {}, noRel = countOf(bl.noRel);
+    add(!noRel, "target=_blank", noRel ? "advice — " + noRel + " of " + plural(bl.total || 0, "link") + " opening a new tab without rel=noopener: " + sampleList(bl.noRel) : bl.total ? "all " + plural(bl.total, "link") + " opening a new tab carry rel=noopener" : "no links open a new tab");
+    var hf = countOf(d.hiddenFocusable);
+    add(!hf, "aria-hidden", hf ? plural(hf, "aria-hidden element") + " with focusable content (keyboard users reach what screen readers can't): " + sampleList(d.hiddenFocusable) : "no aria-hidden element hides focusable content");
+    var ap = countOf(d.autoplay);
+    add(!ap, "autoplay", ap ? plural(ap, "autoplaying media element") + ": " + sampleList(d.autoplay) : "no autoplaying media");
+    return out;
+  }
+
+  /** The report of an accessibility audit: the page, the verdict, one ✓/⚠ line per check, what is not covered. */
+  function formatA11yReport(d) {
+    var f = a11yFindings(d);
+    var lines = ["Accessibility audit of " + d.url + " — " + verdictOf(f)];
+    f.forEach(function (x) { lines.push((x.ok ? "✓ " : "⚠ ") + x.name + ": " + x.detail); });
+    lines.push("Not checked here: text contrast (the palette tool reads the colours).");
+    return lines.join("\n");
+  }
+
+  // ── mobile readiness ────────────────────────────────────────────────────
+
+  var MOBILE = { tap: 44, minFont: 12, phoneWidth: 375, overlayPct: 25, samples: 5, scan: 3000, rules: 5000 };
+
+  /**
+   * Page side (injected into the top frame, self-contained): what the mobile audit looks at, at the tab's
+   * current width. The tab is not resized: for a phone, the elements with a declared width or min-width
+   * in px over `phoneWidth` are collected instead (inline styles, width attributes, same-origin stylesheets
+   * outside min-width media queries). `limits` = { tap, minFont, phoneWidth, overlayPct, samples, scan, rules }.
+   */
+  function readMobile(limits) {
+    var samples = limits.samples, maxScan = limits.scan;
+    function clean(s) { return String(s == null ? "" : s).replace(/\s+/g, " ").trim(); }
+    function all(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)).slice(0, maxScan); }
+    function sel(el, depth) {
+      var tag = el.tagName.toLowerCase();
+      if (el.id) return tag + "#" + el.id;
+      var cls = clean(typeof el.className === "string" ? el.className : "").split(" ").filter(Boolean)[0];
+      if (cls) return tag + "." + cls;
+      var name = el.getAttribute("name");
+      if (name) return tag + '[name="' + name + '"]';
+      var p = el.parentElement;
+      if (!p || p === document.body || p === document.documentElement || (depth || 0) >= 2) return tag;
+      var sibs = Array.prototype.filter.call(p.children, function (c) { return c.tagName === el.tagName; });
+      return sel(p, (depth || 0) + 1) + " > " + tag + (sibs.length > 1 ? ":nth-of-type(" + (sibs.indexOf(el) + 1) + ")" : "");
+    }
+    function bucket() { return { count: 0, samples: [] }; }
+    function note(b, label) { b.count++; if (b.samples.length < samples) b.samples.push(label); }
+    var skip = /^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|HEAD|META|LINK|TITLE)$/;
+    var vw = window.innerWidth, vh = window.innerHeight;
+    var meta = document.querySelector('meta[name="viewport"]');
+    var tap = { total: 0, small: bucket() };
+    all('a[href], button, input:not([type="hidden"]), select, textarea, [role="button"]').forEach(function (el) {
+      var r = el.getBoundingClientRect();
+      if (!r.width || !r.height) return; // not rendered
+      tap.total++;
+      if (r.width < limits.tap || r.height < limits.tap) note(tap.small, sel(el).slice(0, 80) + " " + Math.round(r.width) + "×" + Math.round(r.height));
+    });
+    var small = bucket(), scanned = 0;
+    if (document.body && document.createTreeWalker) {
+      var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT), seen = [];
+      while (walker.nextNode() && scanned < maxScan) {
+        var node = walker.currentNode, el = node.parentElement;
+        if (!el || !clean(node.nodeValue) || skip.test(el.tagName) || seen.indexOf(el) >= 0) continue;
+        seen.push(el);
+        scanned++;
+        var cs = getComputedStyle(el);
+        if (cs.display === "none" || cs.visibility === "hidden") continue;
+        var r2 = el.getBoundingClientRect();
+        if (!r2.width || !r2.height) continue;
+        var px = parseFloat(cs.fontSize);
+        if (px && px < limits.minFont) note(small, sel(el).slice(0, 80) + " " + Math.round(px * 10) / 10 + "px");
+      }
+    }
+    var wide = [], overlays = bucket(), fixedWidth = bucket();
+    function px(v) { return /^\d+(\.\d+)?px$/.test(v || "") ? parseFloat(v) : NaN; }
+    all("body *").forEach(function (el) {
+      if (skip.test(el.tagName)) return;
+      var r = el.getBoundingClientRect();
+      if (!r.width || !r.height) return;
+      if (r.width > vw + 1 || r.right > vw + 1) wide.push({ sel: sel(el).slice(0, 80), width: Math.round(r.width), right: Math.round(r.right) });
+      var cs = getComputedStyle(el);
+      if (cs.position === "fixed" || cs.position === "sticky") {
+        var w = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0)), h = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
+        var pct = vw && vh ? Math.round((w * h * 100) / (vw * vh)) : 0;
+        if (pct > limits.overlayPct) note(overlays, sel(el).slice(0, 80) + " " + pct + "% (" + cs.position + ")");
+      }
+      var decl = "";
+      if (px(cs.minWidth) > limits.phoneWidth) decl = "min-width " + cs.minWidth;
+      else if (px(el.style && el.style.width) > limits.phoneWidth) decl = "width " + el.style.width + " (inline)";
+      else if (/^(IMG|IFRAME|TABLE|VIDEO|CANVAS|EMBED|OBJECT|SVG)$/.test(el.tagName) && Number(el.getAttribute("width")) > limits.phoneWidth) decl = "width=" + el.getAttribute("width");
+      if (decl) note(fixedWidth, sel(el).slice(0, 80) + " " + decl);
+    });
+    wide.sort(function (a, b) { return b.width - a.width; });
+    // Same-origin stylesheets: a px width / min-width over the phone width that matches something on the page.
+    var rulesScanned = 0;
+    function scanRules(rules) {
+      for (var i = 0; i < rules.length && rulesScanned < limits.rules; i++) {
+        var r = rules[i];
+        rulesScanned++;
+        if (r.cssRules && r.cssRules.length) {
+          if (r.media && /min-width/i.test(r.conditionText || r.media.mediaText || "")) continue; // a desktop-only rule
+          scanRules(r.cssRules);
+          continue;
+        }
+        if (!r.style || !r.selectorText) continue;
+        var mw = r.style.getPropertyValue("min-width"), w = r.style.getPropertyValue("width");
+        var v = px(mw) > limits.phoneWidth ? "min-width " + mw : px(w) > limits.phoneWidth ? "width " + w : "";
+        if (!v) continue;
+        var el;
+        try { el = document.querySelector(r.selectorText); } catch (e) { el = null; }
+        if (!el || !el.getBoundingClientRect().width) continue; // matches nothing rendered on this page
+        note(fixedWidth, r.selectorText.slice(0, 60) + " { " + v + " }");
+      }
+    }
+    Array.prototype.forEach.call(document.styleSheets, function (ss) { var rules = null; try { rules = ss.cssRules; } catch (e) {} if (rules) scanRules(rules); });
+    var plugins = bucket();
+    all("object, embed, applet").forEach(function (p) { note(plugins, p.tagName.toLowerCase() + " (" + (p.getAttribute("type") || String(p.getAttribute("src") || p.getAttribute("data") || "").slice(-40) || "no type") + ")"); });
+    return {
+      url: location.href,
+      innerWidth: vw,
+      innerHeight: vh,
+      scrollWidth: Math.max(document.documentElement.scrollWidth || 0, document.body ? document.body.scrollWidth || 0 : 0),
+      viewport: meta ? clean(meta.getAttribute("content")) : null,
+      tapTargets: tap,
+      smallText: { count: small.count, samples: small.samples, scanned: scanned },
+      wide: { count: wide.length, samples: wide.slice(0, samples).map(function (x) { return x.sel + " " + x.width + " px wide" + (x.right > x.width ? ", right edge at " + x.right : ""); }) },
+      overlays: overlays,
+      fixedWidth: fixedWidth,
+      plugins: plugins,
+    };
+  }
+
+  /** A viewport meta content ("width=device-width, initial-scale=1") → { width, initialScale, maximumScale, userScalable }; null for none. */
+  function parseViewport(content) {
+    if (content == null) return null;
+    var out = { width: "", initialScale: NaN, maximumScale: NaN, userScalable: "" };
+    String(content).split(/[,;]/).forEach(function (part) {
+      var kv = part.split("="), k = String(kv[0] || "").trim().toLowerCase(), v = String(kv[1] || "").trim().toLowerCase();
+      if (k === "width") out.width = v;
+      else if (k === "initial-scale") out.initialScale = parseFloat(v);
+      else if (k === "maximum-scale") out.maximumScale = parseFloat(v);
+      else if (k === "user-scalable") out.userScalable = v;
+    });
+    return out;
+  }
+
+  /** The audit over what readMobile returned: [{ ok, name, detail }], one entry per check, in a fixed order. */
+  function mobileFindings(d) {
+    d = d || {};
+    var out = [];
+    function add(ok, name, detail) { out.push({ ok: !!ok, name: name, detail: detail }); }
+    var vp = parseViewport(d.viewport);
+    if (!vp) add(false, "viewport", "no meta viewport — phones render the page at desktop width and shrink it");
+    else {
+      var problems = [];
+      if (vp.width !== "device-width") problems.push(vp.width ? "width=" + vp.width + " instead of device-width" : "no width=device-width");
+      if (/^(no|0)$/.test(vp.userScalable)) problems.push("user-scalable=" + vp.userScalable + " blocks pinch zoom");
+      if (vp.maximumScale <= 1) problems.push("maximum-scale=" + vp.maximumScale + " blocks pinch zoom");
+      add(!problems.length, "viewport", quote(d.viewport) + (problems.length ? " — " + problems.join("; ") : ""));
+    }
+    var tap = d.tapTargets || {}, smallTap = countOf(tap.small);
+    add(!smallTap, "tap targets", !tap.total ? "none found" : smallTap ? smallTap + " of " + tap.total + " under " + MOBILE.tap + "×" + MOBILE.tap + " px: " + sampleList(tap.small) : "all " + tap.total + " at least " + MOBILE.tap + "×" + MOBILE.tap + " px");
+    var st = d.smallText || {}, smallText = countOf(st);
+    add(!smallText, "text size", smallText ? plural(smallText, "element") + " with text under " + MOBILE.minFont + " px: " + sampleList(st) : "no visible text under " + MOBILE.minFont + " px" + (st.scanned ? " (" + st.scanned + " text elements checked)" : ""));
+    var vw = Number(d.innerWidth) || 0, sw = Number(d.scrollWidth) || 0;
+    add(!(sw > vw + 1), "horizontal overflow", sw > vw + 1 ? "the page scrolls sideways at " + vw + " px (content " + sw + " px wide)" : "none at " + vw + " px");
+    var wide = countOf(d.wide);
+    add(!wide, "wide elements", wide ? plural(wide, "element") + " wider than the viewport (" + vw + " px), widest: " + sampleList(d.wide) : "none wider than the viewport (" + vw + " px)");
+    var ov = countOf(d.overlays);
+    add(!ov, "overlays", ov ? plural(ov, "fixed/sticky element") + " covering over " + MOBILE.overlayPct + "% of the viewport: " + sampleList(d.overlays) : "no fixed/sticky element covers over " + MOBILE.overlayPct + "% of the viewport");
+    var fw = countOf(d.fixedWidth);
+    add(!fw, "phone width", fw ? plural(fw, "element") + " with a fixed width or min-width over " + MOBILE.phoneWidth + " px (would overflow a phone unless a media query changes them): " + sampleList(d.fixedWidth) : "no fixed width or min-width over " + MOBILE.phoneWidth + " px (inline styles, width attributes and same-origin stylesheets checked)");
+    var pl = countOf(d.plugins);
+    add(!pl, "plugins", pl ? plural(pl, "legacy plugin") + " (object/embed/applet) — phones don't run them: " + sampleList(d.plugins) : "no legacy plugins");
+    return out;
+  }
+
+  /** The report of a mobile audit: the page and its size, the verdict, one ✓/⚠ line per check, the caveat. */
+  function formatMobileReport(d) {
+    var f = mobileFindings(d);
+    var lines = ["Mobile readiness of " + d.url + " at " + d.innerWidth + "×" + d.innerHeight + " px — " + verdictOf(f)];
+    f.forEach(function (x) { lines.push((x.ok ? "✓ " : "⚠ ") + x.name + ": " + x.detail); });
+    lines.push("The tab was not resized: the phone-width check comes from declared widths, the others from the current size.");
+    return lines.join("\n");
+  }
+
+  // ── redirect chain ──────────────────────────────────────────────────────
+
+  var DEFAULT_HOPS = 10, MAX_HOPS = 20;
+
+  /** One GET with the redirect not followed. → { url, status, location?, ms, type, opaque? } or { url, error, ms }. */
+  async function hop(url) {
+    var ctrl = typeof AbortController === "function" ? new AbortController() : null;
+    var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, CFG.urlTimeout) : null;
+    var t0 = Date.now();
+    try {
+      var res = await globalThis.fetch(url, { method: "GET", redirect: "manual", cache: "no-store", credentials: "include", signal: ctrl ? ctrl.signal : undefined });
+      if (res.body && res.body.cancel) res.body.cancel().catch(function () {});
+      var loc = (res.headers && res.headers.get("location")) || "";
+      var out = { url: url, status: res.status, ms: Date.now() - t0, type: String((res.headers && res.headers.get("content-type")) || "").split(";")[0].trim() };
+      // A browser hands a manual-mode redirect out as an opaque response: status 0, no headers.
+      if (res.type === "opaqueredirect" || (res.status === 0 && !loc)) out.opaque = true;
+      if (loc) { try { out.location = new URL(loc, url).href; } catch (_) { out.location = loc; } }
+      return out;
+    } catch (e) {
+      return { url: url, error: ctrl && ctrl.signal.aborted ? "timeout after " + CFG.urlTimeout / 1000 + " s" : String((e && e.message) || e), ms: Date.now() - t0 };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * The hops the browser hides: one followed GET, observed with chrome.webRequest.onBeforeRedirect (status,
+   * target and timing of every hop) when the API is there; without it, one hidden hop to the final address.
+   */
+  async function observedChain(url) {
+    var wr = typeof chrome !== "undefined" && chrome.webRequest && chrome.webRequest.onBeforeRedirect;
+    var hops = [], reqId = null, last = Date.now();
+    function onRedirect(d) {
+      if (reqId ? d.requestId !== reqId : d.url !== url) return;
+      reqId = d.requestId;
+      var now = d.timeStamp || Date.now();
+      hops.push({ url: d.url, status: d.statusCode, location: d.redirectUrl, ms: Math.max(0, Math.round(now - last)) });
+      last = now;
+    }
+    if (wr) wr.addListener(onRedirect, { urls: ["<all_urls>"] });
+    var r;
+    try { r = await attempt(url, "GET"); } finally { if (wr) wr.removeListener(onRedirect); }
+    var from = hops.length ? hops[hops.length - 1].location : url;
+    if (r.error) { hops.push({ url: from, error: r.error, ms: r.ms }); return hops; }
+    var spent = hops.reduce(function (s, h) { return s + h.ms; }, 0);
+    if (!hops.length) hops.push({ url: url, status: 0, location: r.url, hidden: true, ms: 0 });
+    hops.push({ url: r.url, status: r.status, ms: Math.max(0, r.ms - spent), type: r.type || "" });
+    return hops;
+  }
+
+  /** The chain behind the tool, at most `max` redirects followed. → { start, hops: [{ url, status, location?, ms, type?, error?, hidden? }], stopped: "" | "loop" | "max" } */
+  async function followChain(start, max) {
+    var hops = [], seen = {}, cur = start, redirects = 0;
+    seen[cur] = true;
+    while (true) {
+      var h = await hop(cur);
+      if (h.error) { hops.push(h); return { start: start, hops: hops, stopped: "" }; }
+      if (h.opaque) return { start: start, hops: hops.concat(await observedChain(cur)), stopped: "" };
+      hops.push(h);
+      if (!(h.status >= 300 && h.status < 400 && h.location)) return { start: start, hops: hops, stopped: "" };
+      redirects++;
+      if (seen[h.location]) return { start: start, hops: hops, stopped: "loop" };
+      if (redirects >= max) return { start: start, hops: hops, stopped: "max" };
+      seen[h.location] = true;
+      cur = h.location;
+    }
+  }
+
+  function schemeOf(u) { var m = /^(https?):/i.exec(String(u || "")); return m ? m[1].toLowerCase() : ""; }
+
+  /**
+   * The lines of a redirect chain: one per hop (status, from → to, latency, http→https notes), then the
+   * summary and the warnings (loop, downgrade to http, hidden hops, the hop limit). `stopped` is "loop" or
+   * "max" when the chain was cut; a loop is also recognised from the addresses themselves.
+   */
+  function describeChain(hops, stopped) {
+    hops = hops || [];
+    var lines = [], warnings = [], total = 0, redirects = 0, visited = {}, hidden = false;
+    hops.forEach(function (h, i) {
+      var n = i + 1 + ". ";
+      total += Number(h.ms) || 0;
+      if (h.error) { lines.push(n + "✗ down: " + h.error + "  " + h.url + "  (" + (h.ms || 0) + " ms)"); return; }
+      var isRedirect = !!h.location && (h.hidden || (h.status >= 300 && h.status < 400));
+      if (!isRedirect) { lines.push(n + (h.status >= 200 && h.status < 400 ? "✓ " : "✗ ") + h.status + "  " + h.url + "  (" + (h.ms || 0) + " ms" + (h.type ? ", " + h.type : "") + ")"); return; }
+      redirects++;
+      visited[h.url] = true;
+      var notes = [];
+      var from = schemeOf(h.url), to = schemeOf(h.location);
+      if (from === "http" && to === "https") notes.push("http → https");
+      if (from === "https" && to === "http") { notes.push("⚠ https → http"); warnings.push("Hop " + (i + 1) + " sends the visitor from https back to http (insecure, mixed content for anything embedding it)."); }
+      if (h.hidden) { hidden = true; notes.push("hidden"); }
+      if (visited[h.location]) { warnings.push("Loop: " + h.location + " was already visited — the chain never ends."); }
+      lines.push(n + "↪ " + (h.hidden ? "redirect" : h.status) + "  " + h.url + "  →  " + h.location + "  (" + (h.ms || 0) + " ms" + (notes.length ? ", " + notes.join(", ") : "") + ")");
+    });
+    var last = hops[hops.length - 1];
+    var final = !last ? "no response" : last.error ? "down: " + last.error : last.location && (last.hidden || (last.status >= 300 && last.status < 400)) ? "still redirecting to " + last.location : last.url + " (" + last.status + ")";
+    if (stopped === "max" && !warnings.some(function (w) { return /^Loop/.test(w); })) warnings.push("Stopped after " + redirects + " redirects (the limit) — " + final + ".");
+    if (stopped === "loop" && !warnings.some(function (w) { return /^Loop/.test(w); })) warnings.push("Loop: the chain comes back to an address it already visited.");
+    if (hidden) warnings.push("The browser hid the intermediate hops; the redirect is shown as one step to the final address.");
+    var summary = (redirects ? plural(redirects, "redirect") + ", " + plural(hops.length, "request") : "no redirect, " + plural(hops.length, "request")) + ", " + total + " ms in all; final: " + final + ".";
+    return { lines: lines, summary: summary, warnings: warnings, redirects: redirects, total: total, final: final };
+  }
+
+  function formatChainReport(chain) {
+    var d = describeChain(chain.hops, chain.stopped);
+    var lines = ["Redirect chain of " + chain.start + " — " + d.summary];
+    d.lines.forEach(function (l) { lines.push("  " + l); });
+    d.warnings.forEach(function (w) { lines.push("⚠ " + w); });
+    return lines.join("\n");
+  }
+
+  // ── response headers ────────────────────────────────────────────────────
+
+  var HSTS_MIN_AGE = 15552000; // 180 days
+
+  /** One GET with the redirects followed; the response headers as a lower-case object. → { url, status, redirected, headers, setCookie: [lines], ms } or { url, error, ms }. */
+  async function fetchHeaders(url) {
+    var ctrl = typeof AbortController === "function" ? new AbortController() : null;
+    var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, CFG.urlTimeout) : null;
+    var t0 = Date.now();
+    try {
+      var res = await globalThis.fetch(url, { method: "GET", redirect: "follow", cache: "no-store", credentials: "include", signal: ctrl ? ctrl.signal : undefined });
+      if (res.body && res.body.cancel) res.body.cancel().catch(function () {});
+      var headers = {};
+      if (res.headers && typeof res.headers.forEach === "function") res.headers.forEach(function (v, k) { headers[String(k).toLowerCase()] = String(v); });
+      var setCookie = res.headers && typeof res.headers.getSetCookie === "function" ? res.headers.getSetCookie() : headers["set-cookie"] ? [headers["set-cookie"]] : [];
+      return { url: res.url || url, status: res.status, redirected: !!res.redirected || (!!res.url && res.url !== url), headers: headers, setCookie: setCookie || [], ms: Date.now() - t0 };
+    } catch (e) {
+      return { url: url, error: ctrl && ctrl.signal.aborted ? "timeout after " + CFG.urlTimeout / 1000 + " s" : String((e && e.message) || e), ms: Date.now() - t0 };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /** Set-Cookie lines → [{ secure, httpOnly, sameSite }] (names and values are dropped). */
+  function cookieFlags(lines) {
+    return (lines || []).map(function (line) {
+      var attrs = String(line).split(";").slice(1).map(function (a) { return a.trim().toLowerCase(); });
+      var ss = attrs.filter(function (a) { return a.indexOf("samesite=") === 0; })[0];
+      return { secure: attrs.indexOf("secure") >= 0, httpOnly: attrs.indexOf("httponly") >= 0, sameSite: ss ? ss.slice(9).replace(/^./, function (c) { return c.toUpperCase(); }) : "" };
+    });
+  }
+
+  /** chrome.cookies entries → the same flags; its sameSite names are no_restriction / lax / strict / unspecified. */
+  function storedCookieFlags(list) {
+    return (list || []).map(function (c) {
+      var ss = String(c.sameSite || "").toLowerCase();
+      return { secure: !!c.secure, httpOnly: !!c.httpOnly, sameSite: ss === "lax" ? "Lax" : ss === "strict" ? "Strict" : ss === "no_restriction" ? "None" : "" };
+    });
+  }
+
+  function protocolLabel(p) {
+    p = String(p || "").toLowerCase();
+    if (!p) return "";
+    if (p === "h2" || p === "h2c") return "HTTP/2";
+    if (p === "h3" || /^h3-/.test(p)) return "HTTP/3";
+    if (/^http\/1/.test(p)) return "HTTP/" + p.slice(5);
+    return p;
+  }
+
+  /**
+   * The findings over a response's headers (lower-case keys): [{ ok, name, detail, security }], in a fixed
+   * order; the entries with security=true make the "security headers n/7" verdict. extra: { cookies:
+   * [{ secure, httpOnly, sameSite }] or null when unknown, cookieSource, protocol }.
+   */
+  function headerFindings(headers, url, extra) {
+    var h = {};
+    Object.keys(headers || {}).forEach(function (k) { if (headers[k] != null) h[String(k).toLowerCase()] = String(headers[k]); });
+    extra = extra || {};
+    var https = schemeOf(url) === "https";
+    var out = [];
+    function add(ok, name, detail, security) { out.push({ ok: !!ok, name: name, detail: detail, security: !!security }); }
+    add(!h["x-powered-by"], "server", (h.server ? h.server : "not disclosed") + (h["x-powered-by"] ? "; x-powered-by " + h["x-powered-by"] + " — drop it, it advertises the stack" : ""));
+    var ct = h["content-type"] || "", mime = ct.split(";")[0].trim().toLowerCase(), charset = /charset=([^;\s]+)/i.exec(ct);
+    var isText = /^text\//.test(mime), compressible = isText || /json|xml|javascript|svg/.test(mime);
+    add(!!mime && (!isText || !!charset), "content-type", mime ? mime + (charset ? "; charset=" + charset[1] : isText ? " — no charset declared, add ; charset=utf-8" : "") : "missing");
+    var enc = (h["content-encoding"] || "").toLowerCase();
+    add(!compressible || !!enc, "compression", enc ? "content-encoding " + enc : compressible ? "none — enable gzip or brotli for " + (mime || "text") : "none (not a text type, fine)");
+    var cc = h["cache-control"], exp = h.expires, validators = [h.etag ? "etag" : "", h["last-modified"] ? "last-modified" : ""].filter(Boolean);
+    add(!!(cc || exp), "caching", (cc ? "cache-control " + cc : exp ? "expires " + exp + " (no cache-control)" : "no cache-control or expires — browsers guess the lifetime") +
+      (validators.length ? "; validators: " + validators.join(", ") : cc || exp ? "; no etag or last-modified — add one so revalidation is cheap" : ""));
+    var hsts = h["strict-transport-security"], maxAge = hsts ? Number((/max-age=(\d+)/i.exec(hsts) || [])[1]) || 0 : 0;
+    add(!!hsts && maxAge >= HSTS_MIN_AGE, "strict-transport-security",
+      !hsts ? (https ? "missing — add max-age=31536000; includeSubDomains" : "missing (the address is http — serve it over https first)") :
+      "max-age " + maxAge + " (" + plural(Math.round(maxAge / 86400), "day") + (maxAge < HSTS_MIN_AGE ? ", short — aim for a year" : "") + ")" + (/includesubdomains/i.test(hsts) ? ", includeSubDomains" : "") + (/preload/i.test(hsts) ? ", preload" : ""), true);
+    var csp = h["content-security-policy"], cspRo = h["content-security-policy-report-only"];
+    add(!!csp, "content-security-policy", csp ? "present, " + csp.length + " chars" + (/unsafe-inline/i.test(csp) ? ", allows 'unsafe-inline'" : "") + (/unsafe-eval/i.test(csp) ? ", allows 'unsafe-eval'" : "") : cspRo ? "report-only (" + cspRo.length + " chars) — not enforced" : "missing", true);
+    var xfo = h["x-frame-options"], fa = csp ? /frame-ancestors\s+([^;]+)/i.exec(csp) : null;
+    add(!!(xfo || fa), "frame protection", fa ? "CSP frame-ancestors " + fa[1].trim() + (xfo ? "; x-frame-options " + xfo : "") : xfo ? "x-frame-options " + xfo : "missing — add x-frame-options: DENY or CSP frame-ancestors (clickjacking)", true);
+    var xcto = (h["x-content-type-options"] || "").toLowerCase();
+    add(xcto === "nosniff", "x-content-type-options", xcto || "missing — add nosniff", true);
+    add(!!h["referrer-policy"], "referrer-policy", h["referrer-policy"] || "missing — e.g. strict-origin-when-cross-origin", true);
+    add(!!h["permissions-policy"], "permissions-policy", h["permissions-policy"] ? "present, " + h["permissions-policy"].length + " chars" : h["feature-policy"] ? "only the legacy feature-policy — add permissions-policy" : "missing — e.g. camera=(), microphone=(), geolocation=()", true);
+    var cs = extra.cookies;
+    if (!cs) add(true, "cookies", "none set by this response", true);
+    else if (!cs.length) add(true, "cookies", "none" + (extra.cookieSource ? " " + extra.cookieSource : ""), true);
+    else {
+      var secure = cs.filter(function (c) { return c.secure; }).length, httpOnly = cs.filter(function (c) { return c.httpOnly; }).length;
+      var ss = { Lax: 0, Strict: 0, None: 0, unset: 0 };
+      cs.forEach(function (c) { ss[c.sameSite in ss ? c.sameSite : "unset"]++; });
+      var bad = [];
+      if (https && secure < cs.length) bad.push(cs.length - secure + " without Secure");
+      if (ss.unset) bad.push(ss.unset + " without SameSite");
+      if (ss.None > secure) bad.push("SameSite=None needs Secure");
+      add(!bad.length, "cookies", plural(cs.length, "cookie") + (extra.cookieSource ? " " + extra.cookieSource : "") + ": Secure " + secure + ", HttpOnly " + httpOnly + ", SameSite Lax " + ss.Lax + " / Strict " + ss.Strict + " / None " + ss.None + " / unset " + ss.unset + (bad.length ? " — " + bad.join(", ") : ""), true);
+    }
+    add(true, "http version", protocolLabel(extra.protocol) || "not exposed");
+    return out;
+  }
+
+  /** The report of a headers check: the address and status, the verdict with the security count, one ✓/⚠ line per header. */
+  function formatHeadersReport(r, start) {
+    var f = headerFindings(r.headers, r.url, { cookies: r.cookies, cookieSource: r.cookieSource, protocol: r.protocol });
+    var sec = f.filter(function (x) { return x.security; }), secOk = sec.filter(function (x) { return x.ok; }).length;
+    var lines = ["Response headers of " + r.url + " — HTTP " + r.status + (r.redirected && start && start !== r.url ? " (after redirect from " + start + ")" : "") + ", " + r.ms + " ms — security headers " + secOk + "/" + sec.length + "; " + verdictOf(f)];
+    f.forEach(function (x) { lines.push((x.ok ? "✓ " : "⚠ ") + x.name + ": " + x.detail); });
+    return lines.join("\n");
+  }
+
+  /** The address a tool works on: the argument, or the current tab's URL. */
+  async function targetUrl(given) {
+    if (given) {
+      var p = parseHttp(given);
+      if (!p) throw new Error("Not an http(s) address: " + given);
+      return p;
+    }
+    var tab = await H.currentTab();
+    var u = parseHttp(tab && tab.url);
+    if (!u) throw new Error("The current tab isn't a website — pass url.");
+    return u;
+  }
+
   // ── tools ───────────────────────────────────────────────────────────────
 
   T.register("browser_check_url", async function (a) {
@@ -684,6 +1258,45 @@
   T.register("browser_check_sitemap", async function (a) {
     a = a || {};
     return text(formatSitemapReport(await sitemapCheck({ url: a.url, max: a.max })));
+  });
+
+  T.register("browser_check_accessibility", async function () {
+    var d = await H.inTop(readA11y, [A11Y_SAMPLES, A11Y_SCAN, GENERIC_LINK_TEXTS]);
+    if (!d || !d.url) throw new Error("Couldn't read the page for the accessibility audit.");
+    return text(formatA11yReport(d));
+  });
+
+  T.register("browser_check_mobile", async function () {
+    var d = await H.inTop(readMobile, [MOBILE]);
+    if (!d || !d.url) throw new Error("Couldn't read the page for the mobile audit.");
+    return text(formatMobileReport(d));
+  });
+
+  T.register("browser_check_redirects", async function (a) {
+    a = a || {};
+    var start = await targetUrl(a.url);
+    var max = Math.max(1, Math.min(MAX_HOPS, Math.floor(Number(a.max)) || DEFAULT_HOPS));
+    return text(formatChainReport(await followChain(start, max)));
+  });
+
+  T.register("browser_check_headers", async function (a) {
+    a = a || {};
+    var start = await targetUrl(a.url);
+    var r = await fetchHeaders(start);
+    if (r.error) throw new Error("No response from " + start + ": " + r.error);
+    // Set-Cookie is hidden from fetch in a browser: the cookies stored for the address stand in (flags only).
+    r.cookies = null;
+    r.cookieSource = "";
+    if (r.setCookie && r.setCookie.length) { r.cookies = cookieFlags(r.setCookie); r.cookieSource = "set by this response"; }
+    else if (typeof chrome !== "undefined" && chrome.cookies && typeof chrome.cookies.getAll === "function") {
+      try { r.cookies = storedCookieFlags(await chrome.cookies.getAll({ url: r.url })); r.cookieSource = "stored for this address"; } catch (_) { r.cookies = null; }
+    }
+    r.protocol = "";
+    try {
+      var entries = typeof performance !== "undefined" && performance.getEntriesByName ? performance.getEntriesByName(r.url) : [];
+      if (entries.length) r.protocol = entries[entries.length - 1].nextHopProtocol || "";
+    } catch (_) {}
+    return text(formatHeadersReport(r, start));
   });
 
   // ── 🔗 Checks tab ───────────────────────────────────────────────────────
@@ -800,7 +1413,15 @@
     { group: "Monitoring", icon: "⚡", name: "Page speed report",
       prompt: "Measure this page's speed with browser_check_speed and explain the numbers: what is slow, which resources weigh most, and what would help." },
     { group: "Monitoring", icon: "🗺", name: "Check the sitemap",
-      prompt: "Check this site's sitemap with browser_check_sitemap: robots.txt, the sitemaps it lists, how many URLs they contain and whether the first ones answer. Report anything missing or broken." }
+      prompt: "Check this site's sitemap with browser_check_sitemap: robots.txt, the sitemaps it lists, how many URLs they contain and whether the first ones answer. Report anything missing or broken." },
+    { group: "Monitoring", icon: "♿", name: "Accessibility audit of this page",
+      prompt: "Audit this page's accessibility with browser_check_accessibility and tell me what to fix first, naming the elements concerned." },
+    { group: "Monitoring", icon: "📱", name: "Mobile readiness of this page",
+      prompt: "Check this page's mobile readiness with browser_check_mobile and explain what would break on a phone and how to fix it." },
+    { group: "Monitoring", icon: "↪", name: "Redirect chain of this URL",
+      prompt: "Follow the redirect chain of this URL with browser_check_redirects and tell me each hop, the final address and anything wrong (loops, a drop to http, slow hops): ", partial: true },
+    { group: "Monitoring", icon: "📋", name: "Response headers of this page",
+      prompt: "Check this page's response headers with browser_check_headers and tell me which security, caching and compression headers are missing or wrong, and what to set." }
   );
 
   // Pure helpers for the unit tests (and other extras).
@@ -834,5 +1455,24 @@
     readSitemaps: readSitemaps,
     sitemapCheck: sitemapCheck,
     formatSitemapReport: formatSitemapReport,
+    // accessibility, mobile, redirects, headers
+    GENERIC_LINK_TEXTS: GENERIC_LINK_TEXTS,
+    MOBILE: MOBILE,
+    readA11y: readA11y,
+    a11yFindings: a11yFindings,
+    formatA11yReport: formatA11yReport,
+    readMobile: readMobile,
+    parseViewport: parseViewport,
+    mobileFindings: mobileFindings,
+    formatMobileReport: formatMobileReport,
+    hop: hop,
+    followChain: followChain,
+    describeChain: describeChain,
+    formatChainReport: formatChainReport,
+    fetchHeaders: fetchHeaders,
+    cookieFlags: cookieFlags,
+    storedCookieFlags: storedCookieFlags,
+    headerFindings: headerFindings,
+    formatHeadersReport: formatHeadersReport,
   };
 })();

@@ -16,6 +16,7 @@ import { elements } from "./elements";
 import { overlay } from "./overlay";
 import { skills } from "./skills";
 import { autofill } from "./autofill";
+import { forms } from "./forms";
 
-export const EXTRAS: ExtraFeature[] = [clips, sessions, rewrite, snippets, checks, uptime, accounts, audit, styles, palette, elements, overlay, skills, autofill];
+export const EXTRAS: ExtraFeature[] = [clips, sessions, rewrite, snippets, checks, uptime, accounts, audit, styles, palette, elements, overlay, skills, autofill, forms];
 export type { ExtraFeature } from "./types";

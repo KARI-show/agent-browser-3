@@ -10,7 +10,10 @@
 // model writes, the module carries whole looks (browser_style_preset: reading, focus, compact, dyslexia,
 // print — one "Preset: <name>" override per site), a fonts override (browser_style_font, with a Google
 // Fonts @import — the one @import the validator lets through, hoisted to the top of the injected text
-// where a browser honours it) and a Stylus/UserCSS export and import of the overrides.
+// where a browser honours it), a Stylus/UserCSS export and import of the overrides, a pause/resume of
+// overrides for the model (browser_style_toggle, the ⏸ button's path: one by name or every override of the site)
+// and a design-tokens override (browser_style_tokens: the site's own custom properties redeclared on :root
+// with !important, merged into one "Tokens" override per site, so every var(--name) follows).
 //
 // Page-side functions are injected with chrome.scripting.executeScript, so each is self-contained (no
 // closures over this file). The tab's DOM is built with ctx.el, never innerHTML: names and CSS are data.
@@ -30,6 +33,7 @@
   var STALE = "That element is gone — the page changed. Call browser_read_page again.";
   var PRESET_PREFIX = "Preset: "; // a site has one preset override at a time
   var FONTS_NAME = "Fonts"; // the override browser_style_font writes
+  var TOKENS_NAME = "Tokens"; // the override browser_style_tokens writes (merged on every call)
   // The one @import an override may carry: a Google Fonts stylesheet (browser_style_font googleFont) — any
   // other @import would pull a stylesheet from elsewhere.
   var GOOGLE_FONTS_IMPORT = /^@import\s+url\(\s*(?:"https:\/\/fonts\.googleapis\.com\/css2?\?[^"\s]*"|'https:\/\/fonts\.googleapis\.com\/css2?\?[^'\s]*')\s*\)\s*;?$/i;
@@ -282,6 +286,42 @@
     group[key].enabled = a.enabled !== false;
     await saveAll(all);
     return { site: site, name: key, enabled: group[key].enabled };
+  }
+
+  /**
+   * Pause or resume overrides without deleting them — the 🎨 tab's ⏸ / ⏵ for the model: one override by
+   * name, or every override of the site with name "*". Without `enabled` the state flips (for "*": paused
+   * when any is on, resumed when all are paused). A paused override stays saved; the content script leaves
+   * it out on every later load until it is resumed. → { site, enabled, all, changed: [names], unchanged: [names] }
+   */
+  async function toggleOverrides(a) {
+    a = a || {};
+    var site = normHost(a.site);
+    if (!site) throw new Error("site is required — a host like example.com, or '*'.");
+    var all = await loadAll();
+    var group = siteGroup(all, site);
+    var names = group ? Object.keys(group).filter(function (n) { return group[n] && typeof group[n] === "object"; }).sort() : [];
+    var name = cleanName(a.name);
+    if (!name) throw new Error("name is required — the override to pause or resume, or '*' for every override of " + siteWords(site) + "." + (names.length ? " Its overrides: " + names.join(", ") + "." : ""));
+    var every = name === "*", targets;
+    if (every) {
+      if (!names.length) throw new Error("No overrides saved for " + siteWords(site) + " — nothing to pause or resume.");
+      targets = names;
+    } else {
+      var key = nameKey(group, name);
+      if (key === null) throw new Error("No override named '" + a.name + "' on " + siteWords(site) + "." + (names.length ? " Its overrides: " + names.join(", ") + "." : " It has no overrides."));
+      targets = [key];
+    }
+    function on(n) { return group[n].enabled !== false; }
+    var enabled = typeof a.enabled === "boolean" ? a.enabled : !targets.some(on);
+    var changed = [], unchanged = [];
+    targets.forEach(function (n) {
+      if (on(n) === enabled) { unchanged.push(n); return; }
+      group[n].enabled = enabled;
+      changed.push(n);
+    });
+    if (changed.length) await saveAll(all);
+    return { site: site, enabled: enabled, all: every, changed: changed, unchanged: unchanged };
   }
 
   // ── Page side ────────────────────────────────────────────────────────────
@@ -565,6 +605,70 @@
     if (f.code) out.push("code, pre, kbd, samp, var, tt { font-family: " + f.code + " !important; }");
     if (f.size !== null) out.push("html { font-size: " + f.size + "px !important; }");
     return out.join("\n");
+  }
+
+  // A custom property name: "--" and identifier characters (letters, digits, - and _, non-ASCII), at most 80.
+  var TOKEN_NAME = /^--[\w -￿-]{1,78}$/;
+  /** The tokens of a Tokens override (or any CSS): the custom properties of its :root / html rules, in order, the !important stripped → [{ name, value }]. */
+  function parseTokens(css) {
+    var sp = splitRules(css || "");
+    var out = [], seen = {};
+    if (!sp.rules) return out;
+    sp.rules.forEach(function (rule) {
+      var open = rule.indexOf("{"), close = rule.lastIndexOf("}");
+      if (open === -1 || close < open || !/^(:root|html)(\s*,\s*(:root|html))*$/.test(rule.slice(0, open).trim())) return;
+      splitDecls(rule.slice(open + 1, close)).forEach(function (d) {
+        var m = /^(--[^\s:]+)\s*:\s*([\s\S]*)$/.exec(d);
+        if (!m) return;
+        var value = m[2].replace(/\s*!\s*important\s*$/i, "").trim();
+        if (seen[m[1]] !== undefined) out[seen[m[1]]].value = value;
+        else { seen[m[1]] = out.length; out.push({ name: m[1], value: value }); }
+      });
+    });
+    return out;
+  }
+  /**
+   * One entry of browser_style_tokens, checked: the name is a custom property, the value one declaration
+   * value of at most 200 characters that cannot end the declaration or the rule early (no ; { } or comment
+   * markers, balanced quotes and parentheses) and pulls nothing in (no url(), expression(), javascript:).
+   * An empty value means "drop the token". → { name, value }; throws with the reason.
+   */
+  function checkToken(name, value) {
+    name = String(name == null ? "" : name).trim();
+    if (!TOKEN_NAME.test(name)) throw new Error("'" + short(name, 40) + "' is not a custom property name — names start with -- and use letters, digits, - and _ (e.g. --brand-color), at most 80 characters.");
+    value = value === null || value === undefined ? "" : String(value).replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+    value = value.replace(/\s*!\s*important\s*$/i, ""); // the override adds its own
+    if (!value) return { name: name, value: "" };
+    if (value.length > 200) throw new Error(name + ": the value is too long (" + value.length + " characters; at most 200).");
+    if (/[;{}]/.test(value) || /\/\*|\*\//.test(value)) throw new Error(name + ": the value may not contain ; { } or comment markers — one declaration value, e.g. '#0a7' or '1.25rem'.");
+    if (/url\s*\(|expression\s*\(|javascript:|@import|-moz-binding|behavior\s*:/i.test(value)) throw new Error(name + ": url(), expression() and javascript: are not allowed in a token value — a token holds a colour, a length, a font stack or another plain value.");
+    if ((value.match(/"/g) || []).length % 2 || (value.match(/'/g) || []).length % 2) throw new Error(name + ": a quote in the value is not closed.");
+    var depth = 0;
+    for (var i = 0; i < value.length && depth >= 0; i++) { if (value[i] === "(") depth++; else if (value[i] === ")") depth--; }
+    if (depth !== 0) throw new Error(name + ": the parentheses in the value are not balanced.");
+    return { name: name, value: value };
+  }
+  /**
+   * The "Tokens" override for `map` (custom property name → value) merged over `previousCss` (the earlier
+   * override of that name): a :root rule with every token !important, so each rule that uses var(--name)
+   * follows. Names already set keep their place and take the new value, new names are appended, an empty
+   * value drops a token; "" when nothing is left. Throws on a bad name or value (checkToken) or an empty map.
+   */
+  function tokensCss(map, previousCss) {
+    var names = map && typeof map === "object" && !Array.isArray(map) ? Object.keys(map) : [];
+    if (!names.length) throw new Error("set is required — an object of custom property name → value, e.g. { \"--brand-color\": \"#0a7\", \"--radius\": \"4px\" }.");
+    var tokens = parseTokens(previousCss), index = {};
+    tokens.forEach(function (t, i) { index[t.name] = i; });
+    names.forEach(function (raw) {
+      var t = checkToken(raw, map[raw]);
+      var at = index[t.name];
+      if (!t.value) { if (at !== undefined) tokens[at] = null; return; }
+      if (at !== undefined && tokens[at]) tokens[at].value = t.value;
+      else { index[t.name] = tokens.length; tokens.push(t); }
+    });
+    tokens = tokens.filter(Boolean);
+    if (!tokens.length) return "";
+    return "/* Tokens: the site's design tokens, changed everywhere they are used (browser_style_tokens) */\n:root {\n" + tokens.map(function (t) { return "  " + t.name + ": " + t.value + " !important;"; }).join("\n") + "\n}";
   }
 
   function commentSafe(s) { return String(s == null ? "" : s).replace(/\*\//g, "* /").replace(/\s+/g, " ").trim(); }
@@ -907,6 +1011,56 @@
     return text("Imported " + saved + " override" + (saved === 1 ? "" : "s") + " named '" + name + "'" + (ap.applies ? " (the current tab is updated)" : "") + ":\n" + lines.join("\n") + "\nThe sites keep them until browser_style_remove.");
   });
 
+  T.register("browser_style_toggle", async function (a) {
+    a = a || {};
+    var tab = null;
+    try { tab = await H.currentTab(); } catch (e) { if (!a.site) throw e; }
+    var site = await siteOf(a, tab);
+    var r = await toggleOverrides({ site: site, name: a.name, enabled: a.enabled });
+    var state = r.enabled ? "on" : "paused", them = r.all ? "them" : "it";
+    if (!r.changed.length) return text((r.all ? "Every override of " + siteWords(site) + " is already " + state + " (" + r.unchanged.join(", ") + ")" : "Override '" + r.unchanged[0] + "' on " + siteWords(site) + " is already " + state) + " — nothing changed.");
+    var out = r.all
+      ? (r.enabled ? "Resumed" : "Paused") + " every override of " + siteWords(site) + " (" + r.changed.length + ": " + r.changed.join(", ") + (r.unchanged.length ? "; already " + state + ": " + r.unchanged.join(", ") : "") + ")"
+      : (r.enabled ? "Resumed" : "Paused") + " override '" + r.changed[0] + "' on " + siteWords(site);
+    out += r.enabled ? "." : " — " + (r.all ? "they stay" : "it stays") + " saved; browser_style_toggle name=\"" + (r.all ? "*" : r.changed[0]) + "\" enabled=true resumes " + them + ".";
+    var ap = tab ? await applyToTab(tab) : { applies: false };
+    var keeps = r.enabled ? "the site applies " + them + " again on every visit." : "the site leaves " + them + " out on every visit until resumed.";
+    return text(out + (ap.applies ? " The current tab is updated; " + keeps : ap.error && ap.host ? " The current tab could not be updated (" + ap.error + "); " + keeps : " " + keeps.charAt(0).toUpperCase() + keeps.slice(1)));
+  });
+
+  T.register("browser_style_tokens", async function (a) {
+    a = a || {};
+    var map = a.set;
+    if (!map || typeof map !== "object" || Array.isArray(map) || !Object.keys(map).length) throw new Error("set is required — an object of custom property name → value, e.g. { \"--brand-color\": \"#0a7\", \"--radius\": \"4px\" }.");
+    var tab = null;
+    try { tab = await H.currentTab(); } catch (e) { if (!a.site) throw e; }
+    var site = await siteOf(a, tab);
+    var name = cleanName(a.name) || TOKENS_NAME;
+    var group = siteGroup(await loadAll(), site);
+    var key = nameKey(group, name);
+    var prevCss = key !== null && group[key] ? String(group[key].css || "") : "";
+    var before = parseTokens(prevCss);
+    var css = tokensCss(map, prevCss); // throws with the reason on a bad entry; nothing is saved then
+    var set = [], dropped = [];
+    Object.keys(map).forEach(function (raw) {
+      var t = checkToken(raw, map[raw]);
+      if (t.value) set.push(t.name + ": " + t.value);
+      else if (before.some(function (b) { return b.name === t.name; })) dropped.push(t.name);
+    });
+    if (!css) {
+      if (key === null) throw new Error("Nothing to set — every value in set is empty and " + siteWords(site) + " has no '" + name + "' override to drop tokens from.");
+      await removeOverride({ site: site, name: key });
+      var apGone = tab ? await applyToTab(tab) : { applies: false };
+      return text("Dropped " + dropped.join(", ") + " — every token of the '" + key + "' override of " + siteWords(site) + " is gone, so the override was removed." + (apGone.applies ? " The current tab is updated." : ""));
+    }
+    var r = await saveOverride({ site: site, name: key !== null ? key : name, css: css });
+    var ap = tab ? await applyToTab(tab) : { applies: false, error: "no tab" };
+    var kept = parseTokens(css).length - set.length;
+    return text((set.length ? "Set " + set.length + " token" + (set.length === 1 ? "" : "s") + " on " + siteWords(site) + " (override '" + r.name + "', " + kb(r.size) + "): " + set.join("; ") + "." : "Changed the '" + r.name + "' override of " + siteWords(site) + " (" + kb(r.size) + ").") +
+      (kept ? " " + kept + " token" + (kept === 1 ? "" : "s") + " from before kept." : "") + (dropped.length ? " Dropped " + dropped.join(", ") + "." : "") +
+      " " + appliedWords(ap, site) + "; the site keeps it until browser_style_remove name=" + r.name + ". Every rule that uses var(--name) follows; a token the site redeclares on a component (.card { --name: … }) keeps its own value there — a browser_style_apply rule for that selector fixes it. Check with browser_screenshot.");
+  });
+
   // ── The 🎨 Styles tab ────────────────────────────────────────────────────
 
   function item(el, icon, name, desc, onclick) {
@@ -1010,7 +1164,9 @@
     { group: "Design", icon: "📚", name: "Reading mode for this site", prompt: "Switch this site to the reading preset (browser_style_preset preset=reading): a comfortable measure, bigger text with more line-height, sidebars and promo blocks hidden, animations off — the site keeps it. Take a screenshot; if something I need is hidden or broken, fix it with a small browser_style_apply rule (never consent or security UI). preset=off switches it off." },
     { group: "Design", icon: "🔤", name: "Dyslexia-friendly text", prompt: "Make this site's text dyslexia-friendly with browser_style_preset preset=dyslexia (a plain sans, wider letter and word spacing, 1.8 line-height, left-aligned dark text on cream, underlined links), take a screenshot and fix anything that became unreadable with a targeted browser_style_apply rule." },
     { group: "Design", icon: "🔠", name: "Change the site's fonts", prompt: "Change this site's fonts with browser_style_font (body text, headings, code, base size; a Google Fonts family loads with googleFont) to: ", partial: true },
-    { group: "Design", icon: "📤", name: "Export my styles for Stylus", prompt: "Export my style overrides for this site as a UserCSS file for Stylus (browser_style_export with save=true), tell me where it landed and how to install it in Stylus; if this site has none, export every site's instead." }
+    { group: "Design", icon: "📤", name: "Export my styles for Stylus", prompt: "Export my style overrides for this site as a UserCSS file for Stylus (browser_style_export with save=true), tell me where it landed and how to install it in Stylus; if this site has none, export every site's instead." },
+    { group: "Design", icon: "⏸", name: "Pause this site's styles", prompt: "Pause every style override of this site (browser_style_toggle name=\"*\" enabled=false) so I see the page as the site made it — they stay saved. Tell me what was paused, and that browser_style_toggle name=\"*\" enabled=true (or the ⏵ button in the 🎨 tab) brings them back." },
+    { group: "Design", icon: "🧬", name: "Change a design token…", prompt: "Change one of this site's design tokens everywhere it is used (browser_style_tokens set={\"--name\": \"value\"} redeclares the site's own CSS custom property on :root with !important; find the token's name in the site's stylesheets first — browser_style_inspect on an element shows the rules that style it, browser_palette_tokens lists every token with its uses where the Palette tools are on — and check the result with a screenshot). The token and the new value: ", partial: true }
   );
 
   // ── Exports: the pure parts and the storage, for tests and the palette extra ──
@@ -1024,5 +1180,6 @@
     formatInspect: formatInspect, formatList: formatList, pageApplyStyles: pageApplyStyles, pageInspect: pageInspect,
     PRESET_PREFIX: PRESET_PREFIX, FONTS_NAME: FONTS_NAME, PRESETS: PRESETS, PRESET_NAMES: PRESET_NAMES, presetsOf: presetsOf,
     fontOptions: fontOptions, fontCss: fontCss, toUserCss: toUserCss, parseUserCss: parseUserCss, preludeSites: preludeSites, exportFilename: exportFilename, downloadText: downloadText,
+    TOKENS_NAME: TOKENS_NAME, toggleOverrides: toggleOverrides, parseTokens: parseTokens, checkToken: checkToken, tokensCss: tokensCss,
   };
 })();

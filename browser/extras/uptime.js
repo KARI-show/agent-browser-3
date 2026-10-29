@@ -5,9 +5,9 @@
 // same notification + Telegram path — and appends { at, ms, code, ok } to the watcher's `history` (a ring
 // of the last 288 checks, 24 h at 5 min). This module adds the tools (declared in
 // browser/host/extras/uptime.ts: add, list, delete, toggle = pause/resume, report = availability, latency
-// percentiles, flips and the longest outage over the history), the ⏱ Uptime tab and the quick commands;
-// the pure helpers (state, sparkline, uptime %, summarizeHistory, formatting) are exposed on
-// AgentExtras.uptime for the unit tests.
+// percentiles, flips and the longest outage over the history, export = the history as CSV/JSON, as text or
+// a file in Downloads), the ⏱ Uptime tab and the quick commands; the pure helpers (state, sparkline,
+// uptime %, summarizeHistory, historyToCsv, formatting) are exposed on AgentExtras.uptime for the unit tests.
 // Built into extras.js only for brands that switch the feature on. No innerHTML: names and addresses come
 // from storage.
 (function () {
@@ -218,6 +218,102 @@
     return lines.join("\n");
   }
 
+  // ── export of the history ───────────────────────────────────────────────
+
+  var DEFAULT_EXPORT_HOURS = 168, EXPORT_CAP = 200 * 1024;
+  var CSV_HEADER = "monitor,url,time,status,ok,ms";
+
+  /** One CSV field: quoted when it holds a comma, a quote or a line break. */
+  function csvField(v) {
+    var s = v == null ? "" : String(v);
+    return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }
+  function iso(ts) { return new Date(ts).toISOString(); }
+
+  /** The rows of an export ({ monitor, url, at, code, ok, ms }) as CSV: a header line, then one line per check, the time in ISO 8601 (UTC), status 0 for no answer. */
+  function historyToCsv(rows) {
+    var lines = [CSV_HEADER];
+    (rows || []).forEach(function (r) {
+      lines.push([csvField(r.monitor), csvField(r.url), iso(r.at), Number(r.code) || 0, r.ok ? "true" : "false", Number(r.ms) || 0].join(","));
+    });
+    return lines.join("\n") + "\n";
+  }
+
+  /** The checks of the monitors inside the window, monitor by monitor, oldest first. → [{ id, monitor, url, at, code, ok, ms }] */
+  function exportRows(ws, sinceTs, nowTs) {
+    var rows = [];
+    (ws || []).forEach(function (w) {
+      (w.history || [])
+        .filter(function (e) { return e && e.at >= sinceTs && e.at <= nowTs; })
+        .sort(function (a, b) { return a.at - b.at; })
+        .forEach(function (e) { rows.push({ id: w.id, monitor: w.name, url: w.url, at: e.at, code: Number(e.code) || 0, ok: !!e.ok, ms: Number(e.ms) || 0 }); });
+    });
+    return rows;
+  }
+
+  /** The same export as JSON: the window, then one object per monitor with its checks. */
+  function historyToJson(ws, rows, hours, now) {
+    var since = now - hours * 3600000;
+    return JSON.stringify({
+      exported: iso(now),
+      hours: hours,
+      since: iso(since),
+      monitors: ws.map(function (w) {
+        return {
+          id: w.id, name: w.name, url: w.url, every: w.every, expect: w.expect || DEFAULT_EXPECT, enabled: !!w.enabled,
+          checks: rows.filter(function (r) { return r.id === w.id; }).map(function (r) { return { time: iso(r.at), status: r.code, ok: r.ok, ms: r.ms }; }),
+        };
+      }),
+    }, null, 2) + "\n";
+  }
+
+  /** "uptime-<monitor or all>-<YYYYMMDD>.<csv|json>" — the name as a slug. */
+  function exportFilename(name, format, now) {
+    var slug = String(name || "all").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "all";
+    var d = new Date(now);
+    return "uptime-" + slug + "-" + d.getFullYear() + pad2(d.getMonth() + 1) + pad2(d.getDate()) + "." + format;
+  }
+
+  /** Save `body` as a text file in Downloads (a data: URL; the download id comes back) → { id, filename, size }. */
+  async function downloadText(filename, body, mime) {
+    var dl = typeof chrome !== "undefined" && chrome.downloads;
+    if (!dl || typeof dl.download !== "function") throw new Error("This build cannot save files (no downloads permission) — call again without save and copy the text.");
+    var id = await dl.download({ url: "data:" + mime + ";charset=utf-8," + encodeURIComponent(body), filename: filename, conflictAction: "uniquify" });
+    return { id: id, filename: filename, size: body.length };
+  }
+  function kb(n) { return (n / 1024).toFixed(n < 10240 ? 1 : 0) + " kB"; }
+
+  /** The export behind the tool. a: { id, hours, format, save } → the text for the model. */
+  async function exportHistory(a) {
+    a = a || {};
+    var hours = Math.max(1, Math.min(MAX_REPORT_HOURS, Math.floor(Number(a.hours)) || DEFAULT_EXPORT_HOURS));
+    var format = String(a.format || "csv").toLowerCase() === "json" ? "json" : "csv";
+    var ws = a.id ? [await findMonitor({ id: String(a.id).trim() })] : statusWatchers(await auto().loadWatchers());
+    if (!ws.length) return "No uptime monitors. browser_uptime_add checks a site's HTTP status on a schedule and reports when it goes down or comes back.";
+    var now = Date.now(), since = now - hours * 3600000;
+    var rows = exportRows(ws, since, now);
+    var scope = a.id ? "monitor '" + ws[0].name + "' (" + ws[0].id + ")" : ws.length + " monitor" + (ws.length === 1 ? "" : "s");
+    if (!rows.length) {
+      var older = ws.reduce(function (n, w) { return n + (w.history || []).length; }, 0);
+      return "No checks in the last " + hours + " h for " + scope + " — nothing to export." + (older ? " " + older + " older check" + (older === 1 ? " is" : "s are") + " in the history: raise hours (up to " + MAX_REPORT_HOURS + ")." : "");
+    }
+    var body = format === "csv" ? historyToCsv(rows) : historyToJson(ws, rows, hours, now);
+    var summary = rows.length + " check" + (rows.length === 1 ? "" : "s") + " of " + scope + " over the last " + hours + " h (" + stamp(since) + " → " + stamp(now) + ")";
+    if (a.save) {
+      var filename = exportFilename(a.id ? ws[0].name : "all", format, now);
+      var dl = await downloadText(filename, body, format === "csv" ? "text/csv" : "application/json");
+      return "Saved " + filename + " to Downloads (download id " + dl.id + ", " + kb(dl.size) + "): " + summary + ".";
+    }
+    if (body.length > EXPORT_CAP) {
+      if (format === "json") throw new Error("The JSON export is " + kb(body.length) + ", over the " + kb(EXPORT_CAP) + " limit — narrow hours, pick one monitor with id, or pass save=true to write the file.");
+      var cut = body.lastIndexOf("\n", EXPORT_CAP - 1);
+      body = body.slice(0, cut + 1);
+      var shown = body.split("\n").length - 2; // the header and the trailing newline
+      return summary + " — CSV cut to the first " + shown + " rows (" + kb(EXPORT_CAP) + " cap; save=true writes the full file):\n" + body;
+    }
+    return summary + ", " + format.toUpperCase() + ":\n" + body;
+  }
+
   // ── tools ───────────────────────────────────────────────────────────────
 
   /** A status watcher by id or name — never a page watcher. */
@@ -289,6 +385,10 @@
     var hours = Math.max(1, Math.min(MAX_REPORT_HOURS, Math.floor(Number(a.hours)) || DEFAULT_REPORT_HOURS));
     var ws = a.id ? [await findMonitor({ id: String(a.id).trim() })] : statusWatchers(await auto().loadWatchers());
     return text(formatReport(ws, hours, Date.now()));
+  });
+
+  T.register("browser_uptime_export", async function (a) {
+    return text(await exportHistory(a || {}));
   });
 
   // ── ⏱ Uptime tab ────────────────────────────────────────────────────────
@@ -382,7 +482,9 @@
     { group: "Monitoring", icon: "📈", name: "Show my uptime monitors",
       prompt: "Show my uptime monitors with browser_uptime_list: which are up or down, the last status and latency, and the uptime over the stored history." },
     { group: "Monitoring", icon: "📊", name: "Uptime report",
-      prompt: "Give me an uptime report for the last 24 hours with browser_uptime_report: availability, latency (average, median, p95), flips and the longest outage per monitor, and tell me which monitor needs attention." }
+      prompt: "Give me an uptime report for the last 24 hours with browser_uptime_report: availability, latency (average, median, p95), flips and the longest outage per monitor, and tell me which monitor needs attention." },
+    { group: "Monitoring", icon: "📤", name: "Export uptime history",
+      prompt: "Export the stored uptime history of the last 7 days with browser_uptime_export as a CSV file in Downloads (save=true) and tell me the file name and how many checks it holds." }
   );
 
   // Pure helpers for the unit tests (and other extras).
@@ -405,5 +507,13 @@
     fmtDuration: fmtDuration,
     stamp: stamp,
     formatReport: formatReport,
+    DEFAULT_EXPORT_HOURS: DEFAULT_EXPORT_HOURS,
+    EXPORT_CAP: EXPORT_CAP,
+    csvField: csvField,
+    historyToCsv: historyToCsv,
+    exportRows: exportRows,
+    historyToJson: historyToJson,
+    exportFilename: exportFilename,
+    exportHistory: exportHistory,
   };
 })();

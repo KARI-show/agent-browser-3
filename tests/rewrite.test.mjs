@@ -1,9 +1,10 @@
 // Selection editing (browser/extras/rewrite.js) against fakes of chrome and the tool runtime: what
 // browser_selection_get reports for a selection in a field, in a rich-text editor, in plain content
 // and when nothing is selected; what browser_selection_replace refuses and reports; the text
-// statistics (textStats, browser_selection_stats) and find & replace (replaceInText,
-// browser_selection_replace_all); the ✍️ tab and the "Writing" quick commands. The page-side
-// functions themselves run in tests/e2e/extras-quill.e2e.mjs.
+// statistics (textStats, browser_selection_stats), find & replace (replaceInText,
+// browser_selection_replace_all) and the case transforms (transformCase, browser_selection_case); the
+// ✍️ tab and the "Writing" quick commands. The page-side functions themselves run in
+// tests/e2e/extras-quill.e2e.mjs.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fakeCtx, fakeDom, loadExtra, runTool } from "./mocks/extras-quill.mjs";
@@ -11,14 +12,14 @@ import { fakeCtx, fakeDom, loadExtra, runTool } from "./mocks/extras-quill.mjs";
 const load = (opts) => loadExtra("rewrite", opts);
 const plain = (x) => JSON.parse(JSON.stringify(x)); // values made inside the vm have another realm's prototypes
 
-test("loads only for a brand with the feature; registers its four tools, the tab and nine Writing commands", () => {
+test("loads only for a brand with the feature; registers its five tools, the tab and nine Writing commands", () => {
   const off = load({ features: { rewrite: false, snippets: true } });
   assert.deepEqual(off.T.names, []);
   assert.deepEqual(off.AgentExtras.tabs, []);
   assert.equal(off.X, undefined);
 
   const { T, tab, commands, X } = load();
-  assert.deepEqual(T.names, ["browser_selection_get", "browser_selection_replace", "browser_selection_stats", "browser_selection_replace_all"]);
+  assert.deepEqual(T.names, ["browser_selection_get", "browser_selection_replace", "browser_selection_stats", "browser_selection_replace_all", "browser_selection_case"]);
   assert.equal(tab.label, "✍️ Rewrite");
   assert.equal(typeof tab.render, "function");
   assert.deepEqual(commands.map((c) => c.group), Array(9).fill("Writing"));
@@ -252,4 +253,90 @@ test("browser_selection_replace_all: validates the pattern before injecting, pas
   await assert.rejects(T.run("browser_selection_replace_all", { find: "a", replace: "b", scope: "selection" }), /use scope 'field'/);
   scripting.results.pageReplaceAll = { error: "No text field or editor has focus on the page — ask the user to click into the field first." };
   await assert.rejects(T.run("browser_selection_replace_all", { find: "a", replace: "b" }), /No text field or editor has focus/);
+});
+
+test("transformCase: upper, lower, title (small words lower except first/last and after a colon), sentence (first letters, i → I), slug (transliterated), plain (whitespace and quotes tidied)", () => {
+  const { X } = load();
+  const t = X.transformCase;
+  assert.deepEqual(plain(X.MODES), ["upper", "lower", "title", "sentence", "slug", "plain"]);
+  assert.equal(t("MiXed Case ß", "upper"), "MIXED CASE SS");
+  assert.equal(t("MiXed Case É", "lower"), "mixed case é");
+  assert.equal(t("the war of the worlds: a story for all", "title"), "The War of the Worlds: A Story for All");
+  assert.equal(t("step-by-step guide to the end", "title"), "Step-by-Step Guide to the End", "hyphenated parts are words of their own");
+  assert.equal(t("DON'T PANIC\nin the beginning", "title"), "Don't Panic\nIn the Beginning", "per line, the rest of a word lowered");
+  assert.equal(t("HELLO WORLD. this is it! i think i’m fine, i said.\n\"quoted\" start", "sentence"), "Hello world. This is it! I think I’m fine, I said.\n\"Quoted\" start");
+  assert.equal(t("e.g. prices rose 3.5 percent", "sentence"), "E.g. Prices rose 3.5 percent", "a known cost: 'e.g.' ends a sentence, '3.5' does not");
+  assert.equal(t("Crème brûlée & Co — Straße/Øl  “quoted”", "slug"), "creme-brulee-and-co-strasse-ol-quoted");
+  assert.equal(t("  Hello  World! It's 100% ", "slug"), "hello-world-its-100");
+  assert.equal(t("  Hello “world”   it’s   me  \n\n\n\nnext  ", "plain"), " Hello \"world\" it's me\n\nnext ", "runs collapsed, one empty line at most, nothing trimmed");
+  assert.equal(t("zero​width soft­hyphen", "plain"), "zerowidth softhyphen");
+  assert.equal(t("", "upper"), "");
+  assert.equal(t(null, "slug"), "");
+  assert.throws(() => t("x", "camel"), /^Error: mode is required — one of upper, lower, title, sentence, slug, plain\./);
+  assert.equal(X.titleCase("a tale of two cities"), "A Tale of Two Cities");
+  assert.equal(X.slugify("Ærø & Łódź"), "aero-and-lodz");
+});
+
+test("browser_selection_case: reads the selection, transforms it and writes it back like browser_selection_replace; an unchanged text injects nothing more", async () => {
+  const { T, scripting } = load();
+  scripting.results.pageSelectionGet = { selected: true, editable: true, kind: "textarea", label: "Subject", text: "the quick brown fox", length: 19 };
+  scripting.results.pageSelectionReplace = (newText, wholeField) => ({ ok: true, verified: true, kind: "textarea", label: "Subject", replaced: 19, wholeField, now: newText });
+  let out = await runTool(T, "browser_selection_case", { mode: "title" });
+  assert.equal(out, 'Changed the selection in the textarea "Subject" to title case: 19 → 19 chars, now "The Quick Brown Fox"; the new text is left selected in the field.');
+  assert.deepEqual(scripting.calls.map((c) => [c.func, c.args]), [["pageSelectionGet", []], ["pageSelectionReplace", ["The Quick Brown Fox", false]]]);
+
+  // Nothing selected but a field focused: the whole value, written back with wholeField=true.
+  scripting.calls.length = 0;
+  scripting.results.pageSelectionGet = { selected: false, wholeField: true, editable: true, kind: "input:text", label: "Slug", text: "Crème Brûlée & Co", length: 17 };
+  out = await runTool(T, "browser_selection_case", { mode: "slug" });
+  assert.match(out, /^Changed the whole text input "Slug" to a slug: 17 → 19 chars, now "creme-brulee-and-co"/);
+  assert.deepEqual(scripting.calls.at(-1).args, ["creme-brulee-and-co", true]);
+
+  // Already in that case: no write.
+  scripting.calls.length = 0;
+  scripting.results.pageSelectionGet = { selected: true, editable: true, kind: "textarea", label: "Subject", text: "ALL CAPS", length: 8 };
+  assert.equal(await runTool(T, "browser_selection_case", { mode: "upper" }), 'Nothing changed: the selection in the textarea "Subject" is already upper case.');
+  assert.deepEqual(scripting.calls.map((c) => c.func), ["pageSelectionGet"]);
+
+  // "plain" in a rich-text editor puts the same text back (that strips the formatting); in a field it tidies the text.
+  scripting.calls.length = 0;
+  scripting.results.pageSelectionGet = { selected: true, editable: true, kind: "editable", label: "Body", text: "Bold  and “quoted”", length: 18 };
+  scripting.results.pageSelectionReplace = (newText) => ({ ok: true, verified: true, kind: "editable", label: "Body", replaced: 18, now: newText });
+  out = await runTool(T, "browser_selection_case", { mode: "plain" });
+  assert.match(out, /^Changed the selection in the rich-text editor "Body" to plain text: 18 → 18 chars/);
+  assert.deepEqual(scripting.calls.at(-1).args, ["Bold  and “quoted”", false], "the editor's text as it is, as plain text");
+  scripting.results.pageSelectionGet = { selected: true, editable: true, kind: "textarea", label: "Body", text: "Bold  and “quoted”", length: 18 };
+  scripting.results.pageSelectionReplace = (newText) => ({ ok: true, verified: true, kind: "textarea", label: "Body", replaced: 18, now: newText });
+  await runTool(T, "browser_selection_case", { mode: "plain" });
+  assert.deepEqual(scripting.calls.at(-1).args, ['Bold and "quoted"', false]);
+
+  // The field does not show the result: the text is handed over for the chat.
+  scripting.results.pageSelectionReplace = { ok: true, verified: false, kind: "textarea", label: "Body", replaced: 18, now: "Bold  and “quoted”" };
+  out = await runTool(T, "browser_selection_case", { mode: "upper" });
+  assert.match(out, /^Put the text in upper case into the selection in the textarea "Body", but the field does not show it \(it holds: "Bold and “quoted”"\)\. .*paste it:\nBOLD  AND “QUOTED”$/, "the preview of what the field holds is collapsed to one line");
+});
+
+test("browser_selection_case: scope field reads the whole field and replaces all of it; refusals (page content, password, nothing, empty, bad mode) inject nothing further", async () => {
+  const { T, scripting } = load();
+  scripting.results.pageFieldText = { ok: true, kind: "textarea", label: "Message", text: "hello there. how are you? i am fine" };
+  scripting.results.pageFieldReplace = (newText) => ({ ok: true, verified: true, kind: "textarea", label: "Message", replaced: 35, now: newText });
+  const out = await runTool(T, "browser_selection_case", { mode: "sentence", scope: "field" });
+  assert.equal(out, 'Changed the whole textarea "Message" to sentence case: 35 → 35 chars, now "Hello there. How are you? I am fine"; the new text is left selected in the field.');
+  assert.deepEqual(scripting.calls.map((c) => [c.func, c.args]), [["pageFieldText", []], ["pageFieldReplace", ["Hello there. How are you? I am fine"]]]);
+  scripting.results.pageFieldText = { error: "No text field or editor has focus on the page — ask the user to click into the field, or measure the selection (scope 'selection') or the page (scope 'page')." };
+  await assert.rejects(T.run("browser_selection_case", { mode: "upper", scope: "field" }), /No text field or editor has focus/);
+
+  scripting.calls.length = 0;
+  scripting.results.pageSelectionGet = { selected: true, editable: false, text: "some article text", length: 17, where: "p" };
+  await assert.rejects(T.run("browser_selection_case", { mode: "title" }), /not in an editable field.*Show it in the chat instead — in title case:\nSome Article Text$/s);
+  scripting.results.pageSelectionGet = { selected: false, editable: true, wholeField: true, kind: "input:password", label: "Password", text: "", length: 6, password: true };
+  await assert.rejects(T.run("browser_selection_case", { mode: "upper" }), /password field — it is never edited/);
+  scripting.results.pageSelectionGet = { selected: false, editable: false, text: "", length: 0 };
+  await assert.rejects(T.run("browser_selection_case", { mode: "upper" }), /Nothing is selected on the page and no text field has focus/);
+  scripting.results.pageSelectionGet = { selected: false, editable: true, wholeField: true, kind: "textarea", label: "Message", text: "   ", length: 3 };
+  await assert.rejects(T.run("browser_selection_case", { mode: "upper" }), /Nothing to change: the whole textarea "Message" is empty\./);
+  assert.deepEqual(scripting.calls.map((c) => c.func), ["pageSelectionGet", "pageSelectionGet", "pageSelectionGet", "pageSelectionGet"], "no write for a refusal");
+  await assert.rejects(T.run("browser_selection_case", { mode: "camel" }), /mode is required — one of upper, lower, title, sentence, slug, plain/);
+  await assert.rejects(T.run("browser_selection_case", {}), /mode is required/);
+  assert.equal(scripting.calls.length, 4, "a bad mode injects nothing");
 });

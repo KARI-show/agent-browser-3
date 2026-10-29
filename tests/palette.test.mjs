@@ -45,18 +45,24 @@ const CONTRAST = {
   ],
 };
 
-test("loads only with the feature; registers four tools, the 🧪 tab and four Design commands; without the styles extra its tools say so", async () => {
+test("loads only with the feature; registers seven tools, the 🧪 tab and seven Design commands; without the styles extra its tools say so", async () => {
   const off = load({ features: { styles: true, palette: false } });
   assert.deepEqual(off.T.names.filter((n) => /palette/.test(n)), []);
   assert.deepEqual(off.tabs.map((t) => t.id), ["styles"]);
   assert.equal(off.P, undefined);
 
   const { T, tabs, commands, P } = load();
-  assert.deepEqual(T.names.filter((n) => /palette/.test(n)), ["browser_palette_extract", "browser_palette_contrast", "browser_palette_theme", "browser_palette_harmony"]);
+  assert.deepEqual(T.names.filter((n) => /palette/.test(n)), ["browser_palette_extract", "browser_palette_contrast", "browser_palette_theme", "browser_palette_harmony", "browser_palette_tokens", "browser_palette_recolor", "browser_palette_from_image"]);
   assert.deepEqual(plain(tabs.map((t) => [t.id, t.label, t.storageKeys])), [["styles", "🎨 Styles", ["agentSiteStyles"]], ["palette", "🧪 Palette", ["agentSiteStyles"]]]);
-  assert.deepEqual(commands.filter((c) => /browser_palette_/.test(c.prompt)).map((c) => [c.group, c.name]), [
-    ["Design", "What colours and fonts does this page use?"], ["Design", "Check this page's contrast"], ["Design", "Dark theme for this site"], ["Design", "Colour harmonies from this site's accent"],
+  // The styles extra's "Change a design token…" names browser_palette_tokens too (it comes first: styles.js loads first).
+  assert.deepEqual(commands.filter((c) => /browser_palette_/.test(c.prompt)).map((c) => [c.group, c.name, !!c.partial]), [
+    ["Design", "Change a design token…", true],
+    ["Design", "What colours and fonts does this page use?", false], ["Design", "Check this page's contrast", false], ["Design", "Dark theme for this site", false], ["Design", "Colour harmonies from this site's accent", false],
+    ["Design", "Design tokens of this page", false], ["Design", "Recolor this site…", true], ["Design", "Palette from this image", false],
   ]);
+  assert.match(commands.find((c) => c.name === "Design tokens of this page").prompt, /browser_palette_tokens[^]*browser_style_tokens/);
+  assert.match(commands.find((c) => c.name === "Recolor this site…").prompt, /browser_palette_recolor from=… to=…[^]*Replace: $/);
+  assert.match(commands.find((c) => c.name === "Palette from this image").prompt, /browser_palette_from_image/);
   assert.match(commands.find((c) => c.name === "Colour harmonies from this site's accent").prompt, /browser_palette_harmony with no arguments/);
   assert.equal(commands.filter((c) => c.name === "Dark theme for this site").length, 1, "defined once, by the palette");
   assert.match(commands.find((c) => c.name === "Dark theme for this site").prompt, /browser_palette_theme mode=dark/);
@@ -410,4 +416,204 @@ test("harmony: the wheel rotations (complementary 180° away, split ±150°, ana
   scripting.fail = "Cannot access a chrome:// URL";
   await assert.rejects(T.run("browser_palette_harmony", {}), /Couldn't read the page's palette \(Cannot access a chrome:\/\/ URL\) — pass color/);
   assert.match(await runTool(T, "browser_palette_harmony", { color: "#e0457b" }), /contrast against #ffffff:[^]*\n\(the page could not be read: Cannot access a chrome:\/\/ URL; measured against white\)$/);
+});
+
+/** A raw token reading like pageTokens returns. */
+const TOKENS = {
+  url: "https://www.example.com/", sheets: 5, readable: 3, unreadable: 2, rules: 1204, totalUses: 310,
+  tokens: [
+    { name: "--brand", declared: "#ff6600", value: "#ff6600", selector: ":root", sheet: "site.css", root: true, decls: 1, uses: 41 },
+    { name: "--ink", declared: "var(--gray-9)", value: "rgb(34, 34, 34)", selector: ":root", sheet: "site.css", root: true, decls: 2, uses: 30 },
+    { name: "--gap", declared: "16px", value: "16px", selector: ":root, html", sheet: "inline <style>", root: true, decls: 1, uses: 12 },
+    { name: "--font-body", declared: '"Inter", sans-serif', value: '"Inter", sans-serif', selector: ":root", sheet: "site.css", root: true, decls: 1, uses: 5 },
+    { name: "--shadow", declared: "0 1px 2px rgba(0, 0, 0, 0.1)", value: "", selector: ".card", sheet: "site.css", root: false, decls: 1, uses: 3 },
+    { name: "--ghost", declared: "", value: "", selector: "", sheet: "", root: false, decls: 0, uses: 2 },
+    { name: "--unused", declared: "#123456", value: "#123456", selector: ":root", sheet: "site.css", root: true, decls: 1, uses: 0 },
+  ],
+};
+
+test("tokenKind / groupTokens / rankTokens: colours, lengths, fonts and other by the look of the value (the name settles a bare family or weight), most used first", () => {
+  const { P } = load();
+  const kinds = [
+    ["--brand", "#ff6600", "colour"], ["--ink", "rgb(34, 34, 34)", "colour"], ["--x", "hsl(10 50% 50%)", "colour"], ["--x", "oklch(70% 0.1 200)", "colour"], ["--x", "color-mix(in srgb, red, blue)", "colour"], ["--x", "transparent", "colour"], ["--x", "white", "colour"],
+    ["--gap", "16px", "length"], ["--pad", "8px 16px", "length"], ["--w", "calc(100% - 2rem)", "length"], ["--h", "clamp(1rem, 2vw, 2rem)", "length"], ["--z", "0", "length"], ["--m", "-0.5em", "length"],
+    ["--font-body", '"Inter", sans-serif', "font"], ["--font-heading", "Inter", "font"], ["--mono", "monospace", "font"], ["--weight-bold", "700", "font"], ["--style", "italic", "font"],
+    ["--shadow", "0 1px 2px rgba(0,0,0,.1)", "other"], ["--z", "10", "other"], ["--ease", "cubic-bezier(.2,0,0,1)", "other"], ["--grad", "linear-gradient(red, blue)", "other"], ["--none", "", "other"], ["--d", "none", "other"],
+  ];
+  for (const [name, value, kind] of kinds) assert.equal(P.tokenKind(name, value), kind, name + ": " + value);
+  const g = P.groupTokens([{ name: "--brand", value: "#ff6600" }, { name: "--gap", value: "16px" }, { name: "--font-body", value: "Inter, sans-serif" }, { name: "--shadow", value: "0 1px 2px #000" }, { name: "--ink", declared: "var(--gray-9)", value: "rgb(34, 34, 34)" }, { name: "--only-declared", declared: "#abc", value: "" }]);
+  assert.deepEqual(plain(g.colour.map((t) => [t.name, t.kind, t.hex])), [["--brand", "colour", "#ff6600"], ["--ink", "colour", "#222222"], ["--only-declared", "colour", "#aabbcc"]]);
+  assert.deepEqual(plain(g.length.map((t) => t.name)), ["--gap"]);
+  assert.deepEqual(plain(g.font.map((t) => t.name)), ["--font-body"]);
+  assert.deepEqual(plain(g.other.map((t) => t.name)), ["--shadow"]);
+  assert.deepEqual(plain(P.groupTokens([])), { colour: [], length: [], font: [], other: [] });
+  assert.deepEqual(plain(P.rankTokens(TOKENS.tokens).map((t) => t.name)), ["--brand", "--ink", "--gap", "--font-body", "--shadow", "--ghost", "--unused"]);
+  assert.deepEqual(plain(P.rankTokens([{ name: "--b", uses: 1, decls: 1 }, { name: "--a", uses: 1, decls: 2 }, { name: "--c", uses: 1, decls: 2 }]).map((t) => t.name)), ["--a", "--c", "--b"], "ties: more declarations, then the name");
+});
+
+test("browser_palette_tokens: the report — counts and unreadable sheets, the four groups with resolved values, uses and where declared, the filter, how to change one; nothing found", async () => {
+  const { T, P, scripting } = load();
+  scripting.results.pageTokens = TOKENS;
+  const out = await runTool(T, "browser_palette_tokens", {});
+  assert.deepEqual(scripting.calls.at(-1).args, [400]);
+  assert.equal(out, [
+    "Design tokens of example.com: 7 custom properties in 3 readable stylesheets (1 204 rules, 310 var() uses); 2 cross-origin stylesheets could not be read (tokens declared or used there are not counted).",
+    "",
+    "Colours (3):",
+    "  --brand: #ff6600  ×41 uses  (:root, site.css)",
+    "  --ink: var(--gray-9) → rgb(34, 34, 34) (#222222)  ×30 uses  (:root, site.css, 2 declarations)",
+    "  --unused: #123456  ×0 uses  (:root, site.css)",
+    "",
+    "Lengths (1):",
+    "  --gap: 16px  ×12 uses  (:root, html, inline <style>)",
+    "",
+    "Fonts (1):",
+    '  --font-body: "Inter", sans-serif  ×5 uses  (:root, site.css)',
+    "",
+    "Other (2):",
+    "  --shadow: 0 1px 2px rgba(0, 0, 0, 0.1)  ×3 uses  (.card, site.css)",
+    "  --ghost: (empty)  ×2 uses  (declared in a stylesheet that could not be read)",
+    "",
+    "Change one everywhere it is used: browser_style_tokens set={\"--brand\": \"#0a7\"} — saved as the site's 'Tokens' override, applied at once and kept on every visit. A token the site redeclares on a component keeps its own value there (a browser_style_apply rule for that selector fixes it).",
+  ].join("\n"));
+  // The filter; the cap on what is listed.
+  const f = await runTool(T, "browser_palette_tokens", { filter: "FONT" });
+  assert.match(f, /^Design tokens of example\.com: 7 custom properties[^\n]* Named like 'font': 1\.\n\nFonts \(1\):\n  --font-body/);
+  assert.doesNotMatch(f, /--brand/);
+  assert.equal(await runTool(T, "browser_palette_tokens", { filter: "nope" }), "None of the 7 custom properties of example.com is named like 'nope' — browser_palette_tokens without filter lists them.");
+  const many = { ...TOKENS, tokens: Array.from({ length: 50 }, (_, i) => ({ name: "--t" + i, declared: i + "px", value: i + "px", selector: ":root", sheet: "a.css", root: true, decls: 1, uses: 50 - i })) };
+  const capped = P.formatTokens(many);
+  assert.match(capped, /50 custom properties in 3 readable stylesheets [^\n]* The 40 most used:\n\nLengths \(40\):\n  --t0: 0px  ×50 uses/);
+  assert.doesNotMatch(capped, /--t45/);
+  // A page without tokens.
+  scripting.results.pageTokens = { url: "https://x.example/", sheets: 2, readable: 1, unreadable: 1, rules: 40, totalUses: 0, tokens: [] };
+  assert.equal(await runTool(T, "browser_palette_tokens", {}), "No CSS custom properties found in the 1 readable stylesheet of x.example (1 cross-origin stylesheet could not be read (tokens declared or used there are not counted)). The site styles its elements directly: browser_palette_extract shows its colours and fonts, browser_style_apply changes them.");
+});
+
+test("colorDistance / recolorCss / browser_palette_recolor: the 0–100 sRGB distance, one !important rule per property over de-duplicated selectors, the override 'Recolor <from>→<to>' saved and applied; arguments checked; nothing saved when nothing matches", async () => {
+  const { T, P, data, scripting, S } = load();
+  assert.equal(P.colorDistance("#000000", "#ffffff"), 100);
+  assert.equal(P.colorDistance("#ffffff", "#000000"), 100);
+  assert.equal(P.colorDistance("#ff0000", "#00ff00"), 81.65);
+  assert.equal(P.colorDistance("#0066cc", "rgb(0, 102, 204)"), 0);
+  assert.equal(P.colorDistance("#0066cc", "#0070d0"), 2.44);
+  assert.ok(P.colorDistance("#ff6600", "#ff8800") < 12 && P.colorDistance("#ff6600", "#ffaa00") > 12, "the default tolerance takes a near shade, not a far one");
+  assert.throws(() => P.colorDistance("junk", "#fff"), /'junk' is not a colour/);
+  assert.equal(P.recolorCss([{ selector: "a", props: ["color"] }, { selector: "a.btn", props: ["color", "background"] }, { selector: "a", props: ["color"] }, { selector: "div.card", props: ["border"] }, { selector: "", props: ["color"] }], "rgb(224, 69, 123)"), [
+    "a, a.btn { color: #e0457b !important; }",
+    "a.btn { background-color: #e0457b !important; }",
+    "div.card { border-color: #e0457b !important; }",
+  ].join("\n"));
+  assert.equal(P.recolorCss([], "#fff"), "");
+  assert.throws(() => P.recolorCss([{ selector: "a", props: ["color"] }], "nope"), /'nope' is not a colour/);
+  assert.deepEqual(plain(P.recolorProps()), ["color", "background", "border"]);
+  assert.deepEqual(plain(P.recolorProps(["background-color", "Border", "bg"])), ["background", "border"]);
+  assert.throws(() => P.recolorProps(["fill"]), /properties: 'fill' is not one of color, background, border/);
+  assert.throws(() => P.recolorProps([]), /properties must be a list/);
+  assert.equal(P.recolorName("#0066cc", "#e0457b"), "Recolor #0066cc→#e0457b");
+
+  await assert.rejects(T.run("browser_palette_recolor", { to: "#fff" }), /from is required/);
+  await assert.rejects(T.run("browser_palette_recolor", { from: "junk", to: "#fff" }), /from is required[^\n]*'junk' is not one/);
+  await assert.rejects(T.run("browser_palette_recolor", { from: "#0066cc" }), /to is required/);
+  await assert.rejects(T.run("browser_palette_recolor", { from: "#0066cc", to: "transparent" }), /to is required/);
+  await assert.rejects(T.run("browser_palette_recolor", { from: "#0066cc", to: "#fff", tolerance: 41 }), /tolerance must be a number from 0/);
+  await assert.rejects(T.run("browser_palette_recolor", { from: "#0066cc", to: "#fff", properties: ["fill"] }), /properties: 'fill'/);
+  assert.deepEqual(scripting.calls, [], "arguments are checked before the page is read");
+  scripting.results.pageRecolor = {
+    url: "https://www.example.com/", total: 400, scanned: 300, elements: 37, unselectable: 3, shades: { "#0066cc": 30, "#0070d0": 7 },
+    selectors: [{ selector: "a", props: ["color"], n: 20 }, { selector: "button.btn-primary", props: ["background", "border"], n: 10 }, { selector: "div.badge", props: ["color", "background"], n: 4 }], truncated: 0, closest: { hex: "#0066cc", distance: 0 },
+  };
+  const out = await runTool(T, "browser_palette_recolor", { from: "rgb(0, 102, 204)", to: "#E0457B" });
+  assert.deepEqual(plain(scripting.calls[0]), { func: "pageRecolor", args: [3000, { r: 0, g: 102, b: 204 }, 12, ["color", "background", "border"], 60], world: "ISOLATED", target: { tabId: 7 } });
+  assert.equal(out.split("\n")[0], "Saved override 'Recolor #0066cc→#e0457b' for example.com (0.3 KB, 3 rules): 37 elements within 12 of #0066cc (2 shades: #0066cc ×30, #0070d0 ×7) in 3 selectors — color on 2, background on 2, border on 1 → #e0457b. 3 elements have no stable selector and are not covered. Applied in the current tab; the site keeps it until browser_style_remove name=\"Recolor #0066cc→#e0457b\".");
+  assert.equal(out.split("\n")[1], "Selectors: a (color, ×20), button.btn-primary (background+border, ×10), div.badge (color+background, ×4).");
+  assert.match(out, /\nCheck with browser_screenshot — a missed spot gets a browser_style_apply rule[^\n]*browser_style_tokens is the cleaner change/);
+  const saved = data.agentSiteStyles["example.com"]["Recolor #0066cc→#e0457b"];
+  assert.ok(saved && saved.enabled === true, "saved through the styles key");
+  assert.match(saved.css, /^\/\* Recolor #0066cc → #e0457b \(tolerance 12; color, background, border\): 37 elements, 3 selectors, \d{4}-\d\d-\d\d \*\/\na, div\.badge \{ color: #e0457b !important; \}\nbutton\.btn-primary, div\.badge \{ background-color: #e0457b !important; \}\nbutton\.btn-primary \{ border-color: #e0457b !important; \}$/);
+  assert.deepEqual(plain(S.validateCss(saved.css)), { ok: true, rules: 3 });
+  assert.equal(scripting.calls.at(-1).func, "pageApplyStyles");
+  assert.equal(scripting.calls.at(-1).args[0], S.cssFor(data.agentSiteStyles, "example.com"));
+  // Options: tolerance, properties and site reach the page / the store; the same from→to replaces.
+  await runTool(T, "browser_palette_recolor", { from: "#0066cc", to: "#e0457b", tolerance: 0, properties: ["background"], site: "www.Other.com" });
+  assert.deepEqual(plain(scripting.calls.at(-2).args), [3000, { r: 0, g: 102, b: 204 }, 0, ["background"], 60]);
+  assert.ok(data.agentSiteStyles["other.com"]["Recolor #0066cc→#e0457b"]);
+  assert.match(await runTool(T, "browser_palette_recolor", { from: "#0066cc", to: "#e0457b" }), /^Replaced override 'Recolor #0066cc→#e0457b' for example\.com/);
+  assert.equal(Object.keys(data.agentSiteStyles["example.com"]).length, 1);
+  // Nothing matched: an error naming the closest colour, nothing saved.
+  scripting.results.pageRecolor = { url: "https://www.example.com/", total: 400, scanned: 300, elements: 0, unselectable: 0, shades: {}, selectors: [], truncated: 0, closest: { hex: "#0a5fc0", distance: 14.2 } };
+  await assert.rejects(T.run("browser_palette_recolor", { from: "#0066cc", to: "#fff", properties: ["color"] }), /No visible element of example\.com uses a colour within 12 of #0066cc for color \(the closest is #0a5fc0, at 14\.2\) — raise tolerance \(up to 40\)[^\n]*Nothing was saved\./);
+  assert.equal(data.agentSiteStyles["example.com"]["Recolor #0066cc→#ffffff"], undefined);
+  scripting.results.pageRecolor = { url: "https://www.example.com/", total: 400, scanned: 300, elements: 2, unselectable: 2, shades: { "#0066cc": 2 }, selectors: [], truncated: 0, closest: { hex: "#0066cc", distance: 0 } };
+  await assert.rejects(T.run("browser_palette_recolor", { from: "#0066cc", to: "#fff" }), /; 2 matched but had no stable selector — raise tolerance/);
+  // palette.js alone: the override needs the styles extra.
+  const lone = loadExtras({ ids: ["palette"], features: { palette: true } });
+  await assert.rejects(lone.T.run("browser_palette_recolor", { from: "#0066cc", to: "#fff" }), /The styles extra is not in this build/);
+});
+
+test("quantize / browser_palette_from_image: median cut on a fixed pixel array (exact colours, shares, most first, fewer when the image has fewer), the report with contrast and a :root block, by ref through the ref's frame / by selector / the largest image; a tainted canvas and page errors are explained", async () => {
+  const { T, P, scripting } = load();
+  const px = [];
+  for (let i = 0; i < 60; i++) px.push(255, 0, 0);
+  for (let i = 0; i < 30; i++) px.push(0, 0, 255);
+  for (let i = 0; i < 10; i++) px.push(255, 255, 255);
+  assert.deepEqual(plain(P.quantize(px, 3)), [{ hex: "#ff0000", share: 0.6, n: 60 }, { hex: "#0000ff", share: 0.3, n: 30 }, { hex: "#ffffff", share: 0.1, n: 10 }]);
+  assert.deepEqual(plain(P.quantize(px, 8)).map((c) => c.hex), ["#ff0000", "#0000ff", "#ffffff"], "no more colours than the image has");
+  assert.deepEqual(plain(P.quantize(px, 2)).map((c) => [c.hex, c.n]), [["#ff2424", 70], ["#0000ff", 30]], "two boxes (the cut closest to half the weight): blue, and red with the white folded in");
+  assert.deepEqual(plain(P.quantize(px, 1)), [{ hex: "#b31a66", share: 1, n: 100 }], "one box: the weighted mean");
+  assert.deepEqual(plain(P.quantize([[10, 20, 30], [10, 20, 30], [12, 22, 32]], 2)), [{ hex: "#0a141e", share: 0.6667, n: 2 }, { hex: "#0c1620", share: 0.3333, n: 1 }], "triples work too; a bucket keeps exact sums");
+  assert.deepEqual(plain(P.quantize([10, 20, 30, 11, 21, 31], 2)), [{ hex: "#0b151f", share: 1, n: 2 }], "two pixels in one 5-bit bucket cannot split (their mean, rounded)");
+  assert.deepEqual(plain(P.quantize([], 3)), []);
+  assert.deepEqual(plain(P.quantize([1, 2], 3)), [], "a short array holds no pixel");
+  // A gradient: the top colour of each end of a 4-step quantisation is dark / light and shares sum to 1.
+  const grad = []; for (let v = 0; v < 256; v++) grad.push(v, v, v);
+  const q = P.quantize(grad, 4);
+  assert.equal(q.length, 4);
+  assert.ok(Math.abs(q.reduce((s, c) => s + c.share, 0) - 1) < 0.001);
+  assert.ok(q.some((c) => P.luminance(c.hex) < 0.05) && q.some((c) => P.luminance(c.hex) > 0.7));
+
+  await assert.rejects(T.run("browser_palette_from_image", { count: 1 }), /count must be a whole number from 2 to 8/);
+  await assert.rejects(T.run("browser_palette_from_image", { count: 2.5 }), /count must be a whole number/);
+  await assert.rejects(T.run("browser_palette_from_image", { ref: 3 }), /No element \[3\] — call browser_read_page first/);
+  assert.deepEqual(scripting.calls, []);
+  const IMG = { tag: "img", kind: "img", src: "https://www.example.com/img/hero.jpg", alt: "A harbour at dusk", shown: { width: 600, height: 400 }, how: "largest", crossOrigin: false, pageBg: "rgb(255, 255, 255)", pixels: px, natural: { width: 1200, height: 800 }, sampled: { width: 64, height: 43 }, transparent: 4 };
+  scripting.results.pageImagePixels = IMG;
+  const out = await runTool(T, "browser_palette_from_image", {});
+  assert.deepEqual(plain(scripting.calls.at(-1)), { func: "pageImagePixels", args: [0, "", 64, 3000], world: "ISOLATED", target: { tabId: 7 } });
+  assert.equal(out, [
+    'Dominant colours of the <img> hero.jpg (alt "A harbour at dusk", 1200×800, shown at 600×400) — the largest visible image: 100 pixels sampled (4 transparent skipped), 3 colours, contrast against the page background #ffffff:',
+    "  1. #ff0000  60%  4.00:1 ⚠ large only  (hue 0°, 100% sat, 50% light)",
+    "  2. #0000ff  30%  8.59:1 ✓ AA  (hue 240°, 100% sat, 50% light)",
+    "  3. #ffffff  10%  1.00:1 ⚠  (hue 0°, 0% sat, 100% light)",
+    "",
+    ":root {",
+    "  --image-1: #ff0000; /* 60% */",
+    "  --image-2: #0000ff; /* 30% */",
+    "  --image-3: #ffffff; /* 10% */",
+    "}",
+    "",
+    "✓ AA = 4.5:1 or more, fine for text on the page background; ⚠ large only = 3:1 or more (large text, icons, borders); ⚠ = decorative use only. Use a colour with browser_style_tokens (set={\"--brand\": \"#ff0000\"}), browser_palette_theme mode=custom (overrides={ accent: \"…\" }) or a browser_style_apply rule; browser_palette_harmony color=#ff0000 gives its harmonies.",
+  ].join("\n"));
+  // count caps the colours; the page background changes the ratios; a selector goes to the top frame; a ref to its frame.
+  assert.match(await runTool(T, "browser_palette_from_image", { count: 2, selector: ".hero img" }), /, 2 colours, contrast against the page background #ffffff:\n  1\. #ff2424  70%[^\n]*\n  2\. #0000ff  30%/);
+  assert.deepEqual(scripting.calls.at(-1).args, [0, ".hero img", 64, 3000]);
+  scripting.results.pageImagePixels = { ...IMG, how: "ref", kind: "background", tag: "div", alt: "", pageBg: "rgb(18, 18, 18)" };
+  T.refs[3] = { documentId: "doc-1", local: 2, loc: { kind: "image", text: "" } };
+  const byRef = await runTool(T, "browser_palette_from_image", { ref: 3, count: 3 });
+  assert.deepEqual(plain(scripting.calls.at(-1).target), { tabId: 7, documentIds: ["doc-1"] }, "runs in the frame that owns the ref");
+  assert.deepEqual(scripting.calls.at(-1).args, [2, "", 64, 3000]);
+  assert.match(byRef, /^Dominant colours of the background image of <div> hero\.jpg \(1200×800, shown at 600×400\): 100 pixels sampled[^\n]*contrast against the page background #121212:\n  1\. #ff0000  60%  4\.69:1 ✓ AA/, "the ratios follow the page background");
+  assert.match(byRef, /\n  2\. #0000ff  30%  2\.18:1 ⚠  /);
+  assert.match(byRef, /\n  3\. #ffffff  10%  18\.\d\d:1 ✓ AA/);
+  // Unreadable: another origin without CORS → the canvas is tainted; the advice is to describe it.
+  scripting.results.pageImagePixels = { tag: "img", kind: "img", src: "https://cdn.example.net/hero.jpg", alt: "", shown: { width: 600, height: 400 }, how: "largest", crossOrigin: true, pageBg: "rgb(255, 255, 255)", unreadable: true, reason: "tainted", loadError: "" };
+  assert.equal(await runTool(T, "browser_palette_from_image", {}), "The colours of the <img> hero.jpg (shown at 600×400) — the largest visible image cannot be read: it comes from another origin (cdn.example.net) that does not allow cross-origin reads, so the browser taints the canvas and the pixels cannot be read in the page. Describe it instead: open https://cdn.example.net/hero.jpg in a tab (browser_navigate) and look at it with browser_screenshot, or pass the URL to the agent for a description. browser_palette_extract still gives the page's own colours.");
+  scripting.results.pageImagePixels = { tag: "img", kind: "img", src: "https://www.example.com/x.svg", alt: "", shown: { width: 10, height: 10 }, how: "selector", crossOrigin: false, pageBg: "rgb(255, 255, 255)", unreadable: true, reason: "load", loadError: "the image has no size yet (not loaded)" };
+  assert.match(await runTool(T, "browser_palette_from_image", { selector: "img" }), /cannot be read: it could not be drawn — the image has no size yet \(not loaded\)\. Describe it instead/);
+  // Page-side errors come through; a stale ref is explained.
+  scripting.results.pageImagePixels = { error: "No visible image on this page (no loaded <img> and no element with a background-image) — pass a ref or a selector." };
+  await assert.rejects(T.run("browser_palette_from_image", {}), /No visible image on this page/);
+  scripting.results.pageImagePixels = { error: "stale" };
+  await assert.rejects(T.run("browser_palette_from_image", { ref: 3 }), /That element is gone — the page changed\. Call browser_read_page again\./);
+  assert.equal(P.imageWords({ tag: "img", kind: "img", src: "data:image/png;base64,AAAA", how: "selector" }), "the <img> a data: URL");
 });

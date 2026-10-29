@@ -14,7 +14,8 @@ export const rewrite: ExtraFeature = {
 - browser_selection_replace works only inside an editable control (input, textarea, rich-text editor). When the selection is plain page content (an article, a received message), show the rewritten text in the chat instead.
 - If nothing is selected but a text field has focus, browser_selection_get returns its whole value (wholeField: true). Rewrite the whole field only when the user asked for the whole text; pass wholeField=true to browser_selection_replace then.
 - Before replacing anything longer than a paragraph (or a whole field), show the new text and ask the user to confirm with AskUserQuestion. A sentence or a heading can be replaced right away; mention what changed in one line.
-- browser_selection_stats counts words, sentences, reading time and readability (an English heuristic) of the selection, the focused field or the whole page — use it when the user asks how long or how readable a text is. browser_selection_replace_all changes every occurrence of a word or pattern inside the focused field (plain or regex, case-insensitive by default) and keeps the editor's formatting; it reports the count, and 0 matches is a normal answer, not a failure.`,
+- browser_selection_stats counts words, sentences, reading time and readability (an English heuristic) of the selection, the focused field or the whole page — use it when the user asks how long or how readable a text is. browser_selection_replace_all changes every occurrence of a word or pattern inside the focused field (plain or regex, case-insensitive by default) and keeps the editor's formatting; it reports the count, and 0 matches is a normal answer, not a failure.
+- browser_selection_case is the mechanical transform of the selection (or, with scope field, of the whole focused field): upper, lower, title, sentence, slug or plain (formatting stripped, whitespace runs and curly quotes tidied). Use it instead of rewriting when the user asks for "all caps", "title case", "a slug" or "plain text" — it is deterministic and changes nothing else.`,
   tools: [
     {
       name: "browser_selection_get",
@@ -72,6 +73,23 @@ export const rewrite: ExtraFeature = {
         regex: z.boolean().optional().describe("Treat find as a JavaScript regular expression (default false — literal text)"),
         caseSensitive: z.boolean().optional().describe("Match case exactly (default false)"),
         scope: z.enum(["field", "selection"]).optional().describe("The whole focused field (default) or only the selected part of it"),
+      },
+    },
+    {
+      name: "browser_selection_case",
+      feature: "rewrite",
+      readOnly: false,
+      description:
+        "Change the case or form of the selected text (default; the whole focused field when nothing is " +
+        "selected) or of the whole focused input, textarea or rich-text editor (scope field) by a " +
+        "deterministic rule, then put the result back the way browser_selection_replace does: upper, lower, " +
+        "title (small words such as of/and/the stay lower except first and last), sentence (the first letter " +
+        "of each sentence, 'i' → 'I'), slug (lower-case, dashes, Latin diacritics transliterated) or plain " +
+        "(strips formatting in a rich-text editor; in a plain field collapses whitespace runs and straightens " +
+        "curly quotes). Reports what changed; an unchanged text changes nothing.",
+      shape: {
+        mode: z.enum(["upper", "lower", "title", "sentence", "slug", "plain"]).describe("The transform: upper, lower, title, sentence, slug or plain"),
+        scope: z.enum(["selection", "field"]).optional().describe("The selection (default; the whole field when nothing is selected inside it) or the whole focused field"),
       },
     },
   ],

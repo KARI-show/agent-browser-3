@@ -16,6 +16,7 @@ export const overlay: ExtraFeature = {
 - For a design review draw on the page instead of describing it in the abstract: browser_overlay_grid lays a column grid (and a baseline grid) over the page, browser_overlay_measure draws two elements' boxes with their sizes and the gaps between them and returns the numbers with alignment hints, browser_overlay_note puts numbered markers with labels where you see a problem. Everything is drawn in one layer that never catches clicks; it is gone with browser_overlay_clear or a reload, nothing is saved.
 - After drawing, call browser_screenshot: the screenshot shows the marked-up page, and that is what the user wants to see. Clear the overlays when the review is done.
 - browser_overlay_image lays a design image (an https: or data: URL) over the page at an opacity for pixel comparison — scrolling with the page, or fixed — and browser_overlay_viewport resizes the tab's window so the page's viewport matches a device width (mobile 375, tablet 768, laptop 1280, desktop 1440, or any width); preset=reset puts the window back. Use them for "does it match the design" and "how does it look on a phone" questions, then browser_screenshot.
+- browser_overlay_outline draws labelled boxes around every heading (h1…h6), link and button (numbered), image (with its size), form (field count) or landmark (header/nav/main/aside/footer) — or all of them, a colour per kind — and returns the counts with the first ten of each; browser_overlay_responsive captures the page at several viewport widths in one call (default 375, 768, 1280; fullPage=true scrolls and stitches up to eight screens per width; save=true writes the PNGs to Downloads), puts the window back and reports horizontal overflow per width. Use the outlines for hierarchy and tap-target questions, the responsive captures before saying how a page behaves on other devices.
 - Measure with the tools instead of estimating from a screenshot; quote the numbers (sizes, gaps, offsets) in your answer and name the grid you used (columns, gutter, max width). Headings and paragraphs have no ref — pass a selector.`,
   tools: [
     {
@@ -71,8 +72,8 @@ export const overlay: ExtraFeature = {
       name: "browser_overlay_clear",
       feature: "overlay",
       readOnly: false,
-      description: "Remove the overlays from the page — everything, or only the grid, the measurements or the notes.",
-      shape: { only: z.enum(["grid", "measure", "notes", "image"]).optional().describe("Remove only this kind (default: all)") },
+      description: "Remove the overlays from the page — everything, or only the grid, the measurements, the notes, the image or the outlines.",
+      shape: { only: z.enum(["grid", "measure", "notes", "image", "outline"]).optional().describe("Remove only this kind (default: all)") },
     },
     {
       name: "browser_overlay_image",
@@ -107,6 +108,38 @@ export const overlay: ExtraFeature = {
         preset: z.enum(["mobile", "mobile-landscape", "tablet", "laptop", "desktop", "reset"]).optional().describe("A device preset, or reset to restore the window"),
         width: z.number().int().min(320).max(3840).optional().describe("Or the viewport width in px (320–3840)"),
         height: z.number().int().min(320).max(3840).optional().describe("And the viewport height in px (default: unchanged)"),
+      },
+    },
+    {
+      name: "browser_overlay_outline",
+      feature: "overlay",
+      readOnly: false,
+      description:
+        "Draw labelled outline boxes around every element of a kind, in the click-through overlay layer: headings " +
+        "labelled h1/h2…, links and buttons with their number, images with their size, forms with their field count, " +
+        "landmarks (header/nav/main/aside/footer) with their role; what=all outlines every kind in its own colour. " +
+        "Returns the count per kind and the first ten of each with their text. Calling it again replaces the outlines; " +
+        "off=true or browser_overlay_clear only=outline removes them. Then browser_screenshot.",
+      shape: {
+        what: z.enum(["headings", "links", "buttons", "images", "forms", "landmarks", "all"]).describe("Which elements to outline"),
+        color: z.string().optional().describe("Hex colour for the boxes, e.g. #ff2d78 (default: one colour per kind)"),
+        off: z.boolean().optional().describe("Remove the outlines instead of drawing (default false)"),
+      },
+    },
+    {
+      name: "browser_overlay_responsive",
+      feature: "overlay",
+      readOnly: false,
+      description:
+        "Screenshots of the page at several viewport widths in one call: for each width the tab's window is resized " +
+        "(as browser_overlay_viewport does), the page captured — fullPage=true scrolls through it and stitches up to " +
+        "eight screens — and the window's original bounds are restored at the end, also on an error. Returns one " +
+        "image per width with a line '375 px: 375×812, page 375×2140' and notes horizontal overflow (a page wider " +
+        "than its viewport). save=true also writes each PNG to Downloads.",
+      shape: {
+        widths: z.array(z.number().int().min(320).max(3840)).optional().describe("Viewport widths in px, 320–3840, up to 6 (default [375, 768, 1280])"),
+        fullPage: z.boolean().optional().describe("Capture the whole page, scrolled and stitched (default false: the first screen)"),
+        save: z.boolean().optional().describe("Also save each PNG to Downloads (default false)"),
       },
     },
   ],

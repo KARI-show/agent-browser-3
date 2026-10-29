@@ -1,7 +1,8 @@
 // Research clips (browser/extras/clips.js) against fakes of chrome.storage / tabs / scripting and of
 // the tool registry: save (selection, text, textarea, frames), list grouped by site, the Markdown
-// export, delete by id / host / all, the caps, search, update, the citation of a page (its metadata
-// and the four styles), and the 📎 tab's buttons.
+// export, delete by id / host / all, the caps, search, update, tags, the citation of a page (its
+// metadata and the four styles), reader mode (the page tree scored and rendered as Markdown), the
+// clips marked in the page, and the 📎 tab's buttons.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
@@ -25,13 +26,58 @@ function matches(e, sel) {
   return (!m[1] || e.tagName === m[1].toUpperCase()) && (!m[2] || (m[2] in e.attrs && (m[3] === undefined || e.attrs[m[2]] === m[3])));
 }
 
+// A tiny live DOM for the page-side walkers (reader mode, highlighting): elements with childNodes and
+// parentNode, text nodes that split, marks that wrap — the few calls those functions make.
+class FakeText {
+  constructor(s) { this.nodeType = 3; this.nodeValue = s; this.parentNode = null; }
+  get textContent() { return this.nodeValue; }
+  splitText(at) {
+    const tail = new FakeText(this.nodeValue.slice(at));
+    this.nodeValue = this.nodeValue.slice(0, at);
+    const kids = this.parentNode.childNodes;
+    this.parentNode.insertBefore(tail, kids[kids.indexOf(this) + 1] || null);
+    return tail;
+  }
+}
+class FakeEl {
+  constructor(tag, attrs = {}, kids = []) {
+    this.nodeType = 1; this.tagName = tag.toUpperCase(); this.attrs = { ...attrs }; this.childNodes = []; this.parentNode = null; this.style = {};
+    kids.forEach((k) => this.appendChild(typeof k === "string" ? new FakeText(k) : k));
+  }
+  get href() { return this.attrs.href || ""; }
+  get hidden() { return "hidden" in this.attrs; }
+  get firstChild() { return this.childNodes[0] || null; }
+  get textContent() { return this.childNodes.map((c) => c.textContent).join(""); }
+  getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; }
+  setAttribute(k, v) { this.attrs[k] = String(v); }
+  appendChild(c) { return this.insertBefore(c, null); }
+  insertBefore(c, ref) {
+    if (c.parentNode) c.parentNode.removeChild(c);
+    c.parentNode = this;
+    const i = ref ? this.childNodes.indexOf(ref) : -1;
+    if (i < 0) this.childNodes.push(c); else this.childNodes.splice(i, 0, c);
+    return c;
+  }
+  removeChild(c) { const i = this.childNodes.indexOf(c); if (i >= 0) this.childNodes.splice(i, 1); c.parentNode = null; return c; }
+  /** The subtree's text with each clip mark as «text»: what the highlighter did, at a glance. */
+  outline() { return this.childNodes.map((c) => (c.nodeType === 3 ? c.nodeValue : c.getAttribute("data-agent-clip") != null ? "«" + c.outline() + "»" : c.outline())).join(""); }
+  marks() { const out = []; const walk = (n) => n.childNodes.forEach((c) => { if (c.nodeType !== 1) return; if (c.getAttribute("data-agent-clip") != null) out.push(c); walk(c); }); walk(this); return out; }
+}
+/** E(tag, [kids]) or E(tag, { attrs }, [kids]); strings are text nodes. */
+const E = (tag, attrs, kids) => (Array.isArray(attrs) ? new FakeEl(tag, {}, attrs) : new FakeEl(tag, attrs || {}, kids || []));
+/** A node-like as pageArticleTree() serializes it, for the pure reader-mode helpers: N(tag, [kids]) or N(tag, { id, cls, role, href, alt }, [kids]). */
+const N = (tag, attrs, kids) => (Array.isArray(attrs) ? { tag, id: "", cls: "", role: "", kids: attrs } : { tag, id: attrs.id || "", cls: attrs.cls || "", role: attrs.role || "", href: attrs.href, alt: attrs.alt, kids: kids || [] });
+const PROSE = (i) => `Paragraph ${i} of the article has enough words to count as prose for the reader, and it tells part of the story.`;
+
 function load({ features = ["clips"] } = {}) {
   const { data, storage } = fakeStorage();
   // The page the fake tab shows: what the injected functions find when they run in the vm context.
-  const page = { selection: "", active: null, title: "Example Page", elements: [] };
+  const page = { selection: "", active: null, title: "Example Page", elements: [], body: E("body", []) };
   const document = {
     get activeElement() { return page.active; },
     get title() { return page.title; },
+    get body() { return page.body; },
+    createElement: (tag) => new FakeEl(tag),
     querySelectorAll: (sel) => page.elements.filter((e) => sel.split(",").some((one) => matches(e, one))),
     querySelector: (sel) => document.querySelectorAll(sel)[0] || null,
   };
@@ -220,9 +266,13 @@ test("clips: the 📎 tab and the Research quick commands", async () => {
     ["Research", "Export my clips as Markdown", false],
     ["Research", "Search my clips", true],
     ["Research", "Cite this page", false],
+    ["Research", "Save this article as a clip", false],
+    ["Research", "Show my clips on this page", false],
   ]);
-  for (const c of X.commands) { assert.ok(c.icon); assert.match(c.prompt, /browser_clip_(save|export|search|cite)/); }
+  for (const c of X.commands) { assert.ok(c.icon); assert.match(c.prompt, /browser_clip_(save|export|search|cite|article|highlight)/); }
   assert.match(X.commands[3].prompt, /browser_clip_search.*for: $/);
+  assert.match(X.commands[5].prompt, /browser_clip_article/);
+  assert.match(X.commands[6].prompt, /browser_clip_highlight/);
 
   const dom = fakeDom();
   const render = () => X.tabs[0].render(dom.content, dom.ctx);
@@ -439,4 +489,277 @@ test("clips: browser_clip_cite reads the page's metadata in order of trust and n
   await assert.rejects(tools.browser_clip_cite({}), /^Error: Couldn't read this page's metadata \(Cannot access a chrome:\/\/ URL\) — citations work on regular websites\.$/);
   T.noTab = true;
   await assert.rejects(tools.browser_clip_cite({}), /No active tab in this window\./);
+});
+
+test("clips: tags are normalised and capped, shown in the list, and filter the list and the search", async () => {
+  const { tools, data, tab, C, X } = load();
+  assert.deepEqual(plain(C.normTags([" #Berlin ", "Q3 Budget", "ümlaut!", "a,b", "", "x".repeat(30), "berlin", "--_", null])), ["berlin", "q3-budget", "ümlaut", "a", "b", "x".repeat(24)]);
+  assert.deepEqual(plain(C.normTags("One, Two")), ["one", "two"]);
+  assert.equal(C.MAX_TAG, 24);
+  assert.equal(C.MAX_TAGS, 10);
+
+  await tools.browser_clip_save({ text: "Berlin has 3.7 million inhabitants." });
+  tab.url = "https://other.org/x";
+  await tools.browser_clip_save({ text: "Growth figures" });
+  const [growth, berlin] = clips(data);
+  await assert.rejects(tools.browser_clip_tag({ add: ["x"] }), /id is required/);
+  await assert.rejects(tools.browser_clip_tag({ id: "clp_nope", add: ["x"] }), /^Error: No clip with id clp_nope — browser_clip_list shows the ids\.$/);
+  await assert.rejects(tools.browser_clip_tag({ id: berlin.id }), /Give add and\/or remove/);
+  await assert.rejects(tools.browser_clip_tag({ id: berlin.id, add: ["!!!"] }), /Give add and\/or remove/, "a tag with nothing left after normalising is no tag");
+  assert.equal(clips(data)[1].tags, undefined);
+  assert.equal(outText(await tools.browser_clip_tag({ id: berlin.id, add: ["#Berlin", "Population", "berlin"] })), `Tagged clip ${berlin.id} (example.com): added #berlin #population.\n  tags: #berlin #population`);
+  assert.deepEqual(clips(data)[1].tags, ["berlin", "population"]);
+  assert.equal(outText(await tools.browser_clip_tag({ id: berlin.id, add: ["stats"], remove: ["population", "nope"] })), `Tagged clip ${berlin.id} (example.com): added #stats, removed #population.\n  tags: #berlin #stats`);
+  assert.equal(outText(await tools.browser_clip_tag({ id: berlin.id, add: ["berlin"] })), `Clip ${berlin.id} already has these tags: #berlin #stats — nothing changed.`);
+  // At most 10 tags: the rest is named, not added; removing them all drops the field.
+  const many = Array.from({ length: 12 }, (_, i) => "t" + i);
+  assert.equal(
+    outText(await tools.browser_clip_tag({ id: growth.id, add: many })),
+    `Tagged clip ${growth.id} (other.org): added #t0 #t1 #t2 #t3 #t4 #t5 #t6 #t7 #t8 #t9.\n  tags: #t0 #t1 #t2 #t3 #t4 #t5 #t6 #t7 #t8 #t9\n  A clip holds at most 10 tags; not added: #t10 #t11.`
+  );
+  assert.equal(clips(data)[0].tags.length, 10);
+  assert.equal(outText(await tools.browser_clip_tag({ id: growth.id, add: ["t11"] })), `Clip ${growth.id} already has these tags: #t0 #t1 #t2 #t3 #t4 #t5 #t6 #t7 #t8 #t9 — nothing changed. A clip holds at most 10 tags; not added: #t11.`);
+  assert.equal(outText(await tools.browser_clip_tag({ id: growth.id, remove: many })), `Tagged clip ${growth.id} (other.org): removed #t0 #t1 #t2 #t3 #t4 #t5 #t6 #t7 #t8 #t9.\n  tags: (none)`);
+  assert.equal(clips(data)[0].tags, undefined);
+
+  // The list shows the tags and filters by one; so does the search.
+  assert.match(outText(await tools.browser_clip_list({})), /\n  clp_[a-z0-9]{6}  "Berlin has 3\.7 million inhabitants\."  —  Example Page · just now  #berlin #stats$/);
+  assert.match(outText(await tools.browser_clip_list({ tag: "#BERLIN" })), /^Clips \(1 on 1 site, tagged #berlin\):\nexample\.com \(1\):\n  clp_[a-z0-9]{6}  "Berlin has 3\.7 million inhabitants\."  —  Example Page · just now  #berlin #stats$/);
+  assert.equal(outText(await tools.browser_clip_list({ tag: "nope" })), "No clips tagged #nope.");
+  assert.equal(outText(await tools.browser_clip_list({ tag: "berlin", host: "other.org" })), "No clips tagged #berlin from other.org.");
+  await assert.rejects(tools.browser_clip_list({ tag: "!!!" }), /tag '!!!' holds no letters or digits\./);
+  assert.match(outText(await tools.browser_clip_search({ query: "million", tag: "stats" })), /^Clips matching "million" \(1 on 1 site, tagged #stats\):\nexample\.com \(1\):\n  clp_[a-z0-9]{6}  "Berlin has 3\.7 million inhabitants\."  —  Example Page · just now  #berlin #stats$/);
+  assert.equal(outText(await tools.browser_clip_search({ query: "growth", tag: "stats" })), 'No clips match "growth" tagged #stats (1 clip searched).');
+  assert.equal(outText(await tools.browser_clip_search({ query: "growth", tag: "zzz" })), 'No clips match "growth" tagged #zzz — no clips carry that tag.');
+  assert.match(outText(await tools.browser_clip_search({ query: "growth" })), /^Clips matching "growth" \(1 on 1 site\):\nother\.org \(1\):\n  clp_[a-z0-9]{6}  "Growth figures"  —  Example Page · just now$/);
+  // The pure helpers leave the store alone.
+  const r = C.tagClip(clips(data), berlin.id, { add: ["pure"] });
+  assert.deepEqual(plain([r.added, r.removed, r.dropped, r.clip.tags, r.list[1].tags]), [["pure"], [], [], ["berlin", "stats", "pure"], ["berlin", "stats", "pure"]]);
+  assert.deepEqual(clips(data)[1].tags, ["berlin", "stats"]);
+  assert.deepEqual(C.withTag(clips(data), "#Stats").map((c) => c.id), [berlin.id]);
+  assert.equal(C.withTag(clips(data), "").length, 2);
+  assert.throws(() => C.withTag(clips(data), "!!"), /holds no letters or digits/);
+  // The 📎 tab shows the tags on the source line.
+  const dom = fakeDom();
+  await X.tabs[0].render(dom.content, dom.ctx);
+  assert.deepEqual(dom.content.byClass("cmd-item")[3].byClass("cmd-desc").map((n) => n.text()), ["Example Page · just now · #berlin #stats"]);
+});
+
+test("clips: reader mode picks the article by its paragraph text and renders it as Markdown (pure helpers)", () => {
+  const { C } = load();
+  const menu = N("div", { cls: "menu" }, [N("a", { href: "https://x.test/a" }, ["Home"]), N("a", { href: "https://x.test/b" }, ["About"])]);
+  const links = N("div", [N("a", { href: "https://x.test/a" }, ["Only"]), N("a", { href: "https://x.test/b" }, ["links here"])]);
+  const body = N("div", { cls: "article-body" }, [
+    N("p", ["Berlin has ", N("strong", ["3.7 million"]), " inhabitants, the ", N("a", { href: "https://x.test/census" }, ["census [2024]"]), " says."]),
+    N("h2", ["Growth"]),
+    N("p", [PROSE(1)]),
+    N("ul", [N("li", ["First point"]), N("li", ["Second ", N("em", ["point"]), N("ul", [N("li", ["nested"])])])]),
+    N("figure", [N("img", { alt: " The skyline " }), N("figcaption", ["Berlin at dusk"])]),
+    N("blockquote", [N("p", ["A quoted line."]), N("p", ["And another."])]),
+    N("pre", ["  code\n    indented\n"]),
+    N("table", [N("tbody", [N("tr", [N("th", ["City"]), N("th", ["People"])]), N("tr", [N("td", ["Berlin"]), N("td", ["3.7 | million"])])])]),
+    N("hr", []),
+    N("p", [PROSE(2), N("br", []), "Second line with ", N("code", ["code"]), "."]),
+    N("div", { cls: "ad-slot" }, [N("p", ["Buy now! Buy now! Buy now! Buy now! Buy now! Buy now!"])]),
+    N("div", { cls: "share-tools" }, [N("p", [PROSE(3)])]),
+    links,
+    N("div", [N("span", ["tiny"])]),
+    N("img", { alt: "" }),
+  ]);
+  const article = N("article", { cls: "post" }, [N("header", { cls: "article-header" }, [N("h1", ["Title"]), N("p", { cls: "byline" }, ["By Someone"])]), body]);
+  const page = N("body", [
+    N("header", { cls: "site-header" }, [N("a", { href: "https://x.test/" }, ["Example"]), N("nav", [N("a", { href: "https://x.test/a" }, ["Politics"])])]),
+    N("div", { id: "content" }, [article, N("aside", { id: "sidebar" }, [N("p", ["Related: " + PROSE(4)])]), N("div", { cls: "comments" }, [N("p", [PROSE(5)]), N("p", [PROSE(6)])])]),
+    N("footer", [N("p", ["© Example"])]),
+  ]);
+  assert.equal(C.pickMain(page), body, "down from <article> into the container that keeps its text");
+  assert.equal(C.scoreCandidate(menu), 0, "an ad/menu/share-ish class or id is page furniture");
+  assert.equal(C.scoreCandidate(N("nav", [N("p", [PROSE(1)])])), 0);
+  assert.equal(C.scoreCandidate(N("div", { role: "navigation" }, [N("p", [PROSE(1)])])), 0);
+  assert.equal(C.scoreCandidate(links), 0, "text that is all links scores nothing");
+  assert.ok(C.scoreCandidate(article) > C.scoreCandidate(page), "<article> gets a bonus over the page");
+  assert.ok(C.scoreCandidate(N("div", { cls: "article-header" }, [N("p", ["x".repeat(50)])])) > 0, "'header' next to 'article' in the name is the article's own");
+  assert.ok(C.scoreCandidate(N("div", [N("p", ["x".repeat(50)])])) > C.scoreCandidate(N("div", [N("span", ["x".repeat(50)])])), "paragraph text counts most");
+
+  const md = C.articleToMarkdown(body);
+  assert.equal(md, [
+    "Berlin has **3.7 million** inhabitants, the [census \\[2024\\]](https://x.test/census) says.",
+    "## Growth",
+    PROSE(1),
+    "- First point\n- Second _point_\n  - nested",
+    "[image: The skyline]",
+    "Berlin at dusk",
+    "> A quoted line.\n>\n> And another.",
+    "```\n  code\n    indented\n```",
+    "| City | People |\n| --- | --- |\n| Berlin | 3.7 \\| million |",
+    "---",
+    PROSE(2) + "\nSecond line with `code`.",
+  ].join("\n\n"));
+  assert.equal(C.articleToMarkdown(article).split("\n\n").slice(0, 3).join("\n\n"), "# Title\n\nBy Someone\n\n" + md.split("\n\n")[0], "from the <article> itself the header comes first");
+  assert.equal(C.articleToMarkdown(null), "");
+  assert.equal(C.articleToMarkdown(N("p", ["  spaced   out  "])), "spaced out");
+  const spans = N("body", [N("div", [N("span", ["no paragraphs, only spans of text in a div"])])]);
+  assert.equal(C.pickMain(spans), spans.kids[0], "without paragraphs the other text decides");
+  assert.equal(C.pickMain(N("body", [])), null);
+  assert.throws(() => C.extractArticle(N("body", [N("div", [N("a", { href: "https://x.test/" }, ["Only a link"])])])), /No readable text on this page/);
+  const art = C.extractArticle(page);
+  assert.deepEqual([art.root, art.where, art.markdown, art.minutes], [body, "div.article-body", md, 1]);
+  assert.equal(art.words, C.countWords(md));
+  assert.equal(C.countWords("Hello **world** [link](https://x.y/z) 3.7 don't\n```\n[image: Berlin]"), 6, "link targets, fences and markers are not words");
+  assert.equal(Math.round(1100 / 220), 5);
+  assert.equal(C.cutMarkdown("short", 100), "short");
+  const cut = C.cutMarkdown("para one\n\npara two\n\n".repeat(50), 120);
+  assert.ok(cut.length <= 120 && cut.endsWith("e\n… (cut)") && cut.startsWith("para one\n\npara two"), cut);
+  assert.equal(C.cutMarkdown("a".repeat(50) + " " + "b".repeat(50), 60, "…"), "a".repeat(50) + "\n…", "at a word when no line break is near");
+});
+
+test("clips: browser_clip_article reads the page, returns the Markdown and saves it as a clip", async () => {
+  const { tools, data, page, tab, chrome, T, C } = load();
+  page.title = "Berlin facts | Example";
+  page.elements = [
+    elem("meta", { property: "og:title", content: "Berlin population reaches 3.7 million" }),
+    elem("meta", { name: "author", content: "Jane Q. Doe" }),
+    elem("meta", { property: "article:published_time", content: "2024-10-05" }),
+    elem("meta", { property: "og:site_name", content: "Example News" }),
+  ];
+  page.body = E("body", [
+    E("header", { class: "site-header" }, [E("a", { href: "https://www.example.com/" }, ["Example News"]), E("nav", [E("a", { href: "https://www.example.com/a" }, ["Politics"])])]),
+    E("article", [
+      E("h1", ["Berlin population reaches 3.7 million"]),
+      E("div", { class: "body" }, [
+        E("p", ["Berlin has ", E("strong", ["3.7 million"]), " inhabitants, the ", E("a", { href: "https://www.example.com/census" }, ["census"]), " says."]),
+        E("p", [PROSE(1)]),
+        E("p", { hidden: "" }, ["Hidden paragraph that must not appear in the article at all."]),
+        E("script", ["alert('not text')"]),
+        E("div", { class: "comments" }, [E("p", [PROSE(2)])]),
+      ]),
+    ]),
+    E("footer", [E("p", ["© Example"])]),
+  ]);
+  // The serializer: the visible tree as plain data, hidden elements and scripts left out, a cap.
+  const raw = C.pageArticleTree({ nodes: 20000, chars: 600000 });
+  assert.equal(raw.truncated, false);
+  assert.deepEqual(plain(raw.tree.kids.map((k) => k.tag)), ["header", "article", "footer"]);
+  assert.deepEqual(plain(raw.tree.kids[1].kids[1].kids.map((k) => k.tag + "." + k.cls)), ["p.", "p.", "div.comments"]);
+  assert.deepEqual(plain(raw.tree.kids[1].kids[1].kids[0].kids[3]), { tag: "a", id: "", cls: "", role: "", href: "https://www.example.com/census", kids: ["census"] });
+  assert.equal(C.pageArticleTree({ nodes: 3, chars: 600000 }).truncated, true);
+
+  const md = "Berlin has **3.7 million** inhabitants, the [census](https://www.example.com/census) says.\n\n" + PROSE(1);
+  const words = C.countWords(md);
+  const out = outText(await tools.browser_clip_article({}));
+  assert.equal(clips(data).length, 1);
+  const c = clips(data)[0];
+  assert.equal(out, `Article: "Berlin population reaches 3.7 million" (by Jane Q. Doe · 2024-10-05 · Example News) — ${words} words, ~1 min read; main content from <div.body>.\nSaved as clip ${c.id}.\n\n${md}`);
+  assert.deepEqual(plain({ ...c, id: "x", t: 0 }), { id: "x", t: 0, text: md, note: `article · ${words} words`, title: "Berlin population reaches 3.7 million", url: "https://www.example.com/page?x=1", host: "example.com" });
+  assert.deepEqual(chrome.scripting.calls.slice(-2).map((o) => [o.func.name, o.target.allFrames]), [["pageArticleTree", undefined], ["pageCitationMeta", undefined]], "the top frame: the tree, then the metadata as the cite tool reads it");
+  assert.deepEqual(plain(chrome.scripting.calls.at(-2).args), [{ nodes: 20000, chars: 600000 }]);
+  assert.equal(outText(await tools.browser_clip_article({ save: false })), `Article: "Berlin population reaches 3.7 million" (by Jane Q. Doe · 2024-10-05 · Example News) — ${words} words, ~1 min read; main content from <div.body>.\n\n${md}`);
+  assert.equal(clips(data).length, 1, "save: false keeps nothing");
+
+  // A long read: the reply is cut to maxChars, the clip to its cap, both marked; the note keeps the full word count.
+  page.title = "Long read";
+  page.elements = [];
+  page.body = E("body", [E("article", Array.from({ length: 60 }, (_, i) => E("p", [PROSE(i)])))]);
+  const long = outText(await tools.browser_clip_article({ maxChars: 1000 }));
+  assert.match(long, /^Article: "Long read" \(example\.com\) — 1320 words, ~6 min read; main content from <article>\.\nSaved as clip clp_[a-z0-9]{6} \(the first 4000 characters, marked "… \(cut\)"\)\.\n\n/);
+  const reply = long.slice(long.indexOf("\n\n") + 2);
+  assert.ok(reply.length <= 1000 && reply.startsWith(PROSE(0) + "\n\n" + PROSE(1)), reply.length);
+  assert.match(reply, /\n… \(cut: \d{4} characters in all — raise maxChars for the rest\)$/);
+  const saved = clips(data)[0];
+  assert.ok(saved.text.length <= 4000 && saved.text.endsWith("\n… (cut)") && saved.text.startsWith(PROSE(0)), saved.text.length);
+  assert.equal(saved.note, "article · 1320 words");
+  assert.equal(saved.title, "Long read");
+  assert.doesNotMatch(outText(await tools.browser_clip_article({ save: false, maxChars: 40000 })), /raise maxChars/, "a big enough budget gets the whole text");
+  assert.ok(outText(await tools.browser_clip_article({ save: false, maxChars: 5 })).length < 1200, "maxChars is clamped to its range");
+
+  // Pages without readable text, pages the extension can't read, no tab.
+  page.body = E("body", [E("div", [E("a", { href: "https://x.test/" }, ["Only a link"])])]);
+  await assert.rejects(tools.browser_clip_article({}), /^Error: No readable text on this page — browser_clip_article works on articles and other text pages\.$/);
+  chrome.scripting.fail = "Cannot access a chrome:// URL";
+  await assert.rejects(tools.browser_clip_article({}), /^Error: Couldn't read this page \(Cannot access a chrome:\/\/ URL\) — reader mode works on regular websites\.$/);
+  T.noTab = true;
+  await assert.rejects(tools.browser_clip_article({}), /No active tab in this window\./);
+  assert.equal(clips(data).length, 2, "a refused extraction saves nothing");
+});
+
+test("clips: browser_clip_highlight marks this site's clips in the page (quotes, dashes and node boundaries ignored) and names the missing ones", async () => {
+  const { tools, data, page, tab, chrome, T, C } = load();
+  assert.equal(C.normalizeForMatch("  Berlin has  “3.7­ million”\n— inhabitants ’ "), "berlin has \"3.7 million\" - inhabitants '");
+  assert.equal(C.normalizeForMatch(null), "");
+  assert.equal(C.NEEDLE_CHARS, 80);
+  assert.deepEqual(C.clipsForHost([{ id: "a", host: "example.com" }, { id: "b", host: "other.org" }, { id: "c", host: "" }], "www.Example.com").map((c) => c.id), ["a"]);
+  assert.deepEqual(plain(C.clipsForHost([{ id: "c", host: "" }], "")), []);
+
+  page.body = E("body", [
+    E("h1", ["Berlin facts"]),
+    E("p", ["Berlin has ", E("strong", ["3.7 million"]), " inhabitants, the ", E("a", { href: "https://www.example.com/census" }, ["census"]), " says."]),
+    E("p", ["Growth of 1.2% in 2024 — it’s steady."]),
+    E("script", ["Not here at all"]),
+  ]);
+  const [h1, p1, p2] = page.body.childNodes;
+  await tools.browser_clip_save({ text: "berlin HAS  3.7 million", note: "population" });
+  await tools.browser_clip_save({ text: "Growth of 1.2% in 2024 - it's steady" });
+  await tools.browser_clip_save({ text: "Not here at all" });
+  tab.url = "https://other.org/x";
+  await tools.browser_clip_save({ text: "Berlin facts" });
+  tab.url = "https://www.example.com/page?x=1";
+  const [, notHere, growth, berlin] = clips(data);
+
+  const out = outText(await tools.browser_clip_highlight({}));
+  assert.equal(out, [
+    "Marked 2 of 3 clips from example.com on this page (3 marks):",
+    `  ✓ ${growth.id}  "Growth of 1.2% in 2024 - it's steady"`,
+    `  ✓ ${berlin.id}  "berlin HAS  3.7 million"`,
+    `  ✗ ${notHere.id}  "Not here at all"  — not on this page`,
+    "A clip not found here may come from another page of example.com, from text that has changed, or from an image or a part behind a login.",
+    "The marks last until the page reloads; mode 'off' removes them.",
+  ].join("\n"));
+  assert.equal(p1.outline(), "«Berlin has »«3.7 million» inhabitants, the census says.", "across the text node and the <strong> in it");
+  assert.equal(p2.outline(), "«Growth of 1.2% in 2024 — it’s steady».", "the page's dash and apostrophe match the clip's plain ones");
+  const marks = page.body.marks();
+  assert.deepEqual(marks.map((m) => [m.tagName, m.getAttribute("data-agent-clip"), m.getAttribute("title")]), [["MARK", berlin.id, "population"], ["MARK", berlin.id, "population"], ["MARK", growth.id, "Clip " + growth.id]]);
+  assert.match(marks[0].style.cssText, /background:#fff3a3/);
+  const call = chrome.scripting.calls.at(-1);
+  assert.equal(call.func.name, "pageHighlightClips");
+  assert.deepEqual(plain(call.args), [[
+    { id: notHere.id, needle: "not here at all", title: "Clip " + notHere.id },
+    { id: growth.id, needle: "growth of 1.2% in 2024 - it's steady", title: "Clip " + growth.id },
+    { id: berlin.id, needle: "berlin has 3.7 million", title: "population" },
+  ], "on"]);
+  // Again: the old marks go first, the page ends up the same.
+  assert.equal(outText(await tools.browser_clip_highlight({ mode: "on" })), out);
+  assert.equal(page.body.marks().length, 3);
+  assert.equal(p1.outline(), "«Berlin has »«3.7 million» inhabitants, the census says.");
+  // Off: the page is as it was.
+  assert.equal(outText(await tools.browser_clip_highlight({ mode: "off" })), "Removed 3 clip marks from the page.");
+  assert.equal(page.body.marks().length, 0);
+  assert.equal(p1.textContent, "Berlin has 3.7 million inhabitants, the census says.");
+  assert.equal(outText(await tools.browser_clip_highlight({ mode: "off" })), "No clip marks on this page.");
+
+  // A clip across two blocks (the heading and the paragraph) and one longer than the needle: the first 80 characters decide.
+  page.body.appendChild(E("p", [PROSE(1)]));
+  await tools.browser_clip_save({ text: "Berlin facts\n\nBerlin has 3.7 million" });
+  await tools.browser_clip_save({ text: PROSE(1).slice(0, 90) + " BUT A DIFFERENT ENDING" });
+  const [longer, across] = clips(data);
+  const again = outText(await tools.browser_clip_highlight({}));
+  assert.match(again, /^Marked 4 of 5 clips from example\.com on this page \(7 marks\):\n/);
+  assert.deepEqual(again.split("\n").slice(1, 6).map((l) => l.slice(0, 14)), [`  ✓ ${longer.id}`, `  ✓ ${across.id}`, `  ✓ ${growth.id}`, `  ✓ ${berlin.id}`, `  ✗ ${notHere.id}`]);
+  assert.equal(h1.outline(), "«Berlin facts»");
+  assert.equal(p1.outline(), "««Berlin has »»««3.7 million»» inhabitants, the census says.", "a clip inside another clip's text is marked inside its mark");
+  const needle = C.normalizeForMatch(PROSE(1)).slice(0, 80).trim();
+  assert.equal(needle.length, 80);
+  assert.equal(page.body.childNodes[4].outline(), "«" + PROSE(1).slice(0, 80) + "»" + PROSE(1).slice(80));
+  assert.equal(outText(await tools.browser_clip_highlight({ mode: "off" })), "Removed 7 clip marks from the page.");
+  assert.equal(page.body.marks().length, 0);
+
+  // Not a website, a site without clips, a page the extension can't touch, no tab.
+  tab.url = "chrome://newtab/";
+  await assert.rejects(tools.browser_clip_highlight({}), /^Error: Open a website tab first — clips are marked on regular web pages \(this tab is chrome:\/\/newtab\/\)\.$/);
+  tab.url = "https://nothing.test/";
+  assert.equal(outText(await tools.browser_clip_highlight({})), "No clips from nothing.test to show on this page — browser_clip_save keeps a passage with its source.");
+  tab.url = "https://www.example.com/page?x=1";
+  chrome.scripting.fail = "Cannot access a chrome:// URL";
+  await assert.rejects(tools.browser_clip_highlight({}), /^Error: Couldn't mark the page \(Cannot access a chrome:\/\/ URL\) — highlighting works on regular websites\.$/);
+  T.noTab = true;
+  await assert.rejects(tools.browser_clip_highlight({}), /No active tab in this window\./);
 });

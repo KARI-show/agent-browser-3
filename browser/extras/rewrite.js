@@ -1,7 +1,8 @@
 // Extra feature "rewrite" (side panel): selection editing. The agent reads what the user selected on
 // the page (browser_selection_get) and puts a rewritten version back into the same field
 // (browser_selection_replace); browser_selection_stats counts words, sentences and readability of the
-// selection, a field or the page, and browser_selection_replace_all is find & replace inside a field.
+// selection, a field or the page, browser_selection_replace_all is find & replace inside a field and
+// browser_selection_case applies a deterministic transform (upper, lower, title, sentence, slug, plain).
 // Built into extras.js only for brands that switch the feature on; the tools are declared in
 // browser/host/extras/rewrite.ts. Also adds the ✍️ Rewrite tab of the 🧩 panel
 // and the "Writing" quick commands (automations.js and commands.js pick them up from AgentExtras).
@@ -192,6 +193,81 @@
     }
     if (host) return { ok: true, kind: "editable", label: labelOf(host), text: host.innerText || host.textContent || "" };
     return { error: "No text field or editor has focus on the page — ask the user to click into the field, or measure the selection (scope 'selection') or the page (scope 'page')." };
+  }
+
+  // Replace the whole value of the focused text field or rich-text editor with newText, whatever is
+  // selected inside it (scope "field" of browser_selection_case). Reads the field back after a beat.
+  function pageFieldReplace(newText) {
+    var TEXT_INPUT = /^(text|search|url|tel|email|password|number|)$/i;
+    function deepActive() {
+      var a = document.activeElement;
+      while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement;
+      return a && a !== document.body && a !== document.documentElement ? a : null;
+    }
+    function isField(el) { return el instanceof HTMLTextAreaElement || (el instanceof HTMLInputElement && TEXT_INPUT.test(el.type || "text")); }
+    function kindOf(el) { return el instanceof HTMLTextAreaElement ? "textarea" : el instanceof HTMLInputElement ? "input:" + (el.type || "text") : "editable"; }
+    function clean(s) { return String(s || "").replace(/\s+/g, " ").trim().slice(0, 80); }
+    function labelOf(el) {
+      var t = el.getAttribute("aria-label") || "";
+      if (!t && el.getAttribute("aria-labelledby")) t = el.getAttribute("aria-labelledby").split(/\s+/).map(function (id) { var n = document.getElementById(id); return n ? n.textContent : ""; }).join(" ");
+      if (!t && el.labels && el.labels.length) t = el.labels[0].textContent;
+      if (!t && el.closest("label")) t = el.closest("label").textContent;
+      if (!t) t = el.getAttribute("placeholder") || el.getAttribute("title") || el.getAttribute("name") || "";
+      return clean(t);
+    }
+    function editingHost(el) { var h = el; while (h.parentElement && h.parentElement.isContentEditable) h = h.parentElement; return h; }
+    function fire(el, inputType, data) {
+      el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: inputType, data: data }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    function later(info, read) {
+      return new Promise(function (resolve) { setTimeout(function () { read(info); resolve(info); }, 120); });
+    }
+    var active = deepActive();
+    if (active && isField(active)) {
+      if (active.type === "password") return { error: "The focused field is a password field — it is never edited." };
+      if (active instanceof HTMLInputElement) newText = newText.replace(/\r?\n+/g, " "); // a single-line field
+      var before = active.value || "";
+      try { active.setRangeText(newText, 0, before.length, "select"); } catch (_) {
+        var proto = active instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        Object.getOwnPropertyDescriptor(proto, "value").set.call(active, newText);
+      }
+      fire(active, "insertReplacementText", newText);
+      return later({ ok: true, kind: kindOf(active), label: labelOf(active), replaced: before.length }, function (info) {
+        var now = active.value || "";
+        info.verified = now === newText;
+        info.now = now.slice(0, 200); info.fieldLength = now.length;
+      });
+    }
+    var sel = window.getSelection();
+    var host = active && active.isContentEditable ? editingHost(active) : null;
+    if (!host) {
+      var node = sel && sel.rangeCount ? sel.getRangeAt(0).commonAncestorContainer : null;
+      var elx = node ? (node.nodeType === 1 ? node : node.parentElement) : null;
+      var ed = elx && elx.closest ? elx.closest("[contenteditable]") : null;
+      if (ed && ed.isContentEditable) host = editingHost(ed);
+    }
+    if (!host) return { error: "No text field or editor has focus on the page — ask the user to click into the field first." };
+    var wholeBefore = host.innerText || host.textContent || "";
+    var all = document.createRange(); all.selectNodeContents(host);
+    if (active !== host) host.focus();
+    sel.removeAllRanges(); sel.addRange(all);
+    var done = false;
+    try { done = document.execCommand("insertText", false, newText); } catch (_) {}
+    if (!done) {
+      var r = sel.getRangeAt(0);
+      r.deleteContents();
+      var tn = document.createTextNode(newText);
+      r.insertNode(tn);
+      r.selectNodeContents(tn);
+      fire(host, "insertReplacementText", newText);
+    }
+    return later({ ok: true, kind: "editable", label: labelOf(host), replaced: wholeBefore.length }, function (info) {
+      var now = host.innerText || host.textContent || "";
+      var norm = function (s) { return s.replace(/\s+/g, " ").trim(); };
+      info.verified = norm(now).indexOf(norm(newText).slice(0, 60)) !== -1;
+      info.now = now.slice(0, 200); info.fieldLength = now.length;
+    });
   }
 
   // The page's visible body text, cut to max characters (scope "page" of browser_selection_stats).
@@ -435,6 +511,75 @@
     return { text: out, count: count, first: first };
   }
 
+  // ── Case transforms (pure) ───────────────────────────────────────────────
+
+  var MODES = ["upper", "lower", "title", "sentence", "slug", "plain"];
+  var MODE_WORDS = { upper: "upper case", lower: "lower case", title: "title case", sentence: "sentence case", slug: "a slug", plain: "plain text" };
+  // Words that stay lower inside a title (not first or last of a line, not after a colon or a dash).
+  var SMALL_WORDS = /^(a|an|and|as|at|but|by|for|from|if|in|into|nor|of|off|on|onto|or|out|over|per|so|than|the|to|up|upon|via|vs|with|yet)$/i;
+  // A word for case changes: letters and digits, apostrophes inside ("don't"); a hyphen ends a word.
+  var CASE_WORD = /[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)*/gu;
+  // Latin letters that NFD does not reduce to ASCII (no combining mark), for slugs.
+  var TRANSLIT = { "ß": "ss", "æ": "ae", "Æ": "AE", "œ": "oe", "Œ": "OE", "ø": "o", "Ø": "O", "đ": "d", "Đ": "D", "ł": "l", "Ł": "L", "þ": "th", "Þ": "TH", "ð": "d", "Ð": "D", "ı": "i", "ħ": "h", "Ħ": "H", "ŧ": "t", "Ŧ": "T" };
+
+  function capitalize(w) { return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase(); }
+
+  /** One line in title case: every word capitalised, the small words lower unless first, last or after a colon or dash. */
+  function titleCase(line) {
+    var ms = [], re = new RegExp(CASE_WORD.source, "gu"), m;
+    while ((m = re.exec(line)) !== null) ms.push(m);
+    if (!ms.length) return line;
+    var out = "", pos = 0;
+    ms.forEach(function (x, i) {
+      var w = x[0], before = line.slice(pos, x.index);
+      var edge = i === 0 || i === ms.length - 1 || /[:—–]\s*$/.test(before);
+      out += before + (!edge && SMALL_WORDS.test(w) ? w.toLowerCase() : capitalize(w));
+      pos = x.index + w.length;
+    });
+    return out + line.slice(pos);
+  }
+
+  /** The text in sentence case: everything lower, the first letter of each sentence (and of each line) upper, "i" → "I". */
+  function sentenceCase(t) {
+    return t.toLowerCase()
+      .replace(/(^|\n|[.!?…]["'”’)\]]*\s+)(\s*["'“‘(\[]*)(\p{L})/gu, function (m, pre, open, l) { return pre + open + l.toUpperCase(); })
+      .replace(/(^|[^\p{L}\p{N}'’])i(?=['’]|$|[^\p{L}\p{N}'’])/gu, "$1I");
+  }
+
+  /** A slug: ASCII letters and digits in lower case, dashes between, Latin diacritics transliterated ("Crème brûlée & Co" → "creme-brulee-and-co"). */
+  function slugify(t) {
+    var s = t.normalize("NFD").replace(/[̀-ͯ]/g, "");
+    s = s.replace(/[ßæÆœŒøØđĐłŁþÞðÐıħĦŧŦ]/g, function (c) { return TRANSLIT[c] || c; });
+    s = s.toLowerCase().replace(/&/g, " and ").replace(/['’]/g, "");
+    return s.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  }
+
+  /** Plain text: no-break and zero-width characters, curly quotes and dashes of whitespace tidied; runs of blanks collapsed, at most one empty line. */
+  function plainText(t) {
+    return t
+      .replace(/[​-‍﻿­]/g, "")
+      .replace(/[  -   　]/g, " ")
+      .replace(/[“”„‟]/g, '"').replace(/[‘’‚‛]/g, "'")
+      .replace(/\r\n?/g, "\n")
+      .replace(/[ \t]+/g, " ")
+      .replace(/ *\n */g, "\n")
+      .replace(/\n{3,}/g, "\n\n");
+  }
+
+  /** The text transformed by mode (one of MODES); an unknown mode throws a message for the model. */
+  function transformCase(input, mode) {
+    var t = String(input == null ? "" : input);
+    switch (mode) {
+      case "upper": return t.toUpperCase();
+      case "lower": return t.toLowerCase();
+      case "title": return t.split("\n").map(titleCase).join("\n");
+      case "sentence": return sentenceCase(t);
+      case "slug": return slugify(t);
+      case "plain": return plainText(t);
+      default: throw new Error("mode is required — one of " + MODES.join(", ") + ".");
+    }
+  }
+
   // ── Tools ────────────────────────────────────────────────────────────────
 
   T.register("browser_selection_get", async function () {
@@ -488,6 +633,35 @@
     var out = "Replaced " + r.count + " occurrence" + (r.count === 1 ? "" : "s") + " of " + what + ' with "' + replacement + '" in ' + where + ". First change: " + r.first;
     if (r.verified === false) out += "\nBut the field does not show the change — the editor may reject programmatic edits; show the result in the chat so the user can paste it.";
     return text(out);
+  });
+
+  T.register("browser_selection_case", async function (a) {
+    a = a || {};
+    var mode = String(a.mode || "").toLowerCase();
+    if (MODES.indexOf(mode) === -1) throw new Error("mode is required — one of " + MODES.join(", ") + ".");
+    var field = a.scope === "field";
+    var r;
+    if (field) {
+      r = await H.inTop(pageFieldText, []);
+      if (!r || !r.ok) throw new Error((r && r.error) || "Could not read the focused field.");
+    } else {
+      r = (await H.inTop(pageSelectionGet, [])) || {};
+      if (!r.selected && !r.wholeField) throw new Error("Nothing is selected on the page and no text field has focus. Ask the user to select the text (or to click into the field), then call browser_selection_case again.");
+      if (r.password) throw new Error("The focused field is a password field — it is never edited.");
+      if (!r.editable) throw new Error("The selection is in the page's content, not in an editable field, so it cannot be changed there. Show it in the chat instead — in " + MODE_WORDS[mode] + ":\n" + transformCase(r.text, mode));
+    }
+    var before = r.text || "";
+    var editor = r.kind === "editable";
+    // "plain" in a rich-text editor strips the formatting by putting the same text back as plain text.
+    var after = mode === "plain" && editor ? before : transformCase(before, mode);
+    var whole = field || r.wholeField === true;
+    var where = (whole ? "the whole " : "the selection in the ") + fieldWords(r);
+    if (!before.trim()) throw new Error("Nothing to change: " + where + " is empty.");
+    if (after === before && !(mode === "plain" && editor)) return text("Nothing changed: " + where + " is already " + MODE_WORDS[mode] + ".");
+    var w = field ? await H.inTop(pageFieldReplace, [after]) : await H.inTop(pageSelectionReplace, [after, r.wholeField === true]);
+    if (!w || !w.ok) throw new Error((w && w.error) || "Could not put the text back into the field.");
+    if (!w.verified) return text("Put the text in " + MODE_WORDS[mode] + " into " + where + ", but the field does not show it (it holds: \"" + short(w.now) + "\"). The editor may reject programmatic input — show it in the chat so the user can paste it:\n" + after);
+    return text("Changed " + where + " to " + MODE_WORDS[mode] + ": " + before.length + " → " + after.length + " chars, now \"" + short(after) + "\"; the new text is left selected in the field.");
   });
 
   // ── Presets: the ✍️ tab's buttons and the "Writing" quick commands ───────
@@ -573,5 +747,10 @@
     pageFieldText: pageFieldText,
     pageBodyText: pageBodyText,
     pageReplaceAll: pageReplaceAll,
+    MODES: MODES,
+    transformCase: transformCase,
+    titleCase: titleCase,
+    slugify: slugify,
+    pageFieldReplace: pageFieldReplace,
   };
 })();

@@ -25,7 +25,7 @@ const MANIFEST_DESCRIPTION_MAX = 132; // the Web Store's limit
  * without the feature drops — so the builds differ in what they can do, not only in their name.
  */
 export const FEATURES = ["helper", "remote", "recipes", "watchers", "memory", "profiles", "cookies", "converter", "network", "proxy"];
-export const OPT_IN_FEATURES = ["clips", "sessions", "rewrite", "snippets", "checks", "uptime", "accounts", "audit", "styles", "palette", "elements", "overlay", "skills", "autofill"];
+export const OPT_IN_FEATURES = ["clips", "sessions", "rewrite", "snippets", "checks", "uptime", "accounts", "audit", "styles", "palette", "elements", "overlay", "skills", "autofill", "forms"];
 export const ALL_FEATURES = [...FEATURES, ...OPT_IN_FEATURES];
 export const FEATURE_PERMISSIONS = {
   helper: ["nativeMessaging"],

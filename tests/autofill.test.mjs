@@ -31,14 +31,14 @@ const PAGE = [
 const WORK = { id: "idn_test01", name: "Work", fields: { firstName: "Ann", lastName: "Lee", email: "ann@quill.example", phone: "+1 555 0100", company: "Quill Ltd", country: "United States", zip: "10001", linkedin: "in/annlee" } };
 const planOf = (m) => m.plan.map((p) => [p.field.i, p.key, p.value, p.option, p.shown]);
 
-test("loads only for a brand with the feature; registers four tools, the tab (re-rendered on its storage key) and two Forms commands", () => {
+test("loads only for a brand with the feature; registers five tools, the tab (re-rendered on its storage key) and two Forms commands", () => {
   const off = load({ features: { autofill: false, snippets: true } });
   assert.deepEqual(off.T.names, []);
   assert.deepEqual(off.AgentExtras.tabs, []);
   assert.equal(off.X, undefined);
 
   const { T, tab, commands, X } = load();
-  assert.deepEqual(T.names, ["browser_autofill_save", "browser_autofill_apply", "browser_autofill_list", "browser_autofill_delete"]);
+  assert.deepEqual(T.names, ["browser_autofill_save", "browser_autofill_apply", "browser_autofill_list", "browser_autofill_delete", "browser_autofill_from_page"]);
   assert.equal(tab.label, "🪪 Identities");
   assert.equal(typeof tab.render, "function");
   assert.deepEqual(plain(tab.storageKeys), [X.KEY]);
@@ -299,4 +299,89 @@ test("the 🪪 tab: empty state, the identities with their fields, Fill this pag
   assert.deepEqual(data[X.KEY], []);
   assert.deepEqual(ctx.statuses.at(-1), { text: "Deleted 'Work'.", kind: "good" });
   assert.equal(T.calls.length, 3, "the save and the two fills went through the tool runtime, the delete worked on storage directly");
+});
+
+test("isSecretField: a password, a secret-looking label/name/placeholder, or a cc-/password/one-time-code autocomplete; fieldsToIdentity maps filled fields to keys (each once), lists the rest", () => {
+  const { X } = load();
+  for (const f of [field(0, { type: "password" }), field(0, { label: "Card number" }), field(0, { name: "cc" }), field(0, { placeholder: "CVV" }), field(0, { autocomplete: "cc-number" }), field(0, { autocomplete: "section-a new-password" }), field(0, { autocomplete: "one-time-code" }), field(0, { id: "iban" }), field(0, { name: "otp" }), field(0, { label: "Account PIN" })]) {
+    assert.equal(X.isSecretField(f), true, JSON.stringify(f));
+  }
+  for (const f of [field(0, { label: "Discard changes" }), field(0, { label: "Shipping address" }), field(0, { type: "email", autocomplete: "email" }), field(0, { name: "spinner" }), null]) {
+    assert.equal(X.isSecretField(f), false, JSON.stringify(f));
+  }
+  const filled = PAGE.map((f) => Object.assign({}, f, { value: f.value || { 0: "Ann", 1: "Lee", 3: "old@x.com", 4: "+1 555 0100", 6: "Germany", 7: "annlee", 8: "hunter2", 9: "Hello there", 10: "10001" }[f.i] || "" }));
+  const r = X.fieldsToIdentity(filled.concat([field(11, { label: "Card number", name: "cc", value: "4111" }), field(12, { label: "Website", type: "url", value: "x".repeat(501) })]));
+  assert.deepEqual(plain(r.fields), { firstName: "Ann", lastName: "Lee", email: "old@x.com", phone: "+1 555 0100", country: "Germany", zip: "10001" }, "in page order; the placeholder-only email wins over 'Confirm email'");
+  assert.deepEqual(plain(r.kept.map((k) => [k.field.i, k.key])), [[0, "firstName"], [1, "lastName"], [2, "email"], [4, "phone"], [6, "country"], [10, "zip"]]);
+  assert.deepEqual(plain(r.notKept.map((n) => [n.field.i, n.why])), [[3, "email is already taken"], [7, "no identity key fits it"], [9, "no identity key fits it"], [12, "too long (501 chars; a value holds at most 500)"]]);
+  assert.deepEqual(plain(r.secret.map((f) => f.i)), [8, 11], "the password and the card number");
+  assert.deepEqual(plain(X.fieldsToIdentity([])), { fields: {}, kept: [], notKept: [], secret: [] });
+  assert.deepEqual(plain(X.fieldsToIdentity(PAGE).fields), { email: "old@x.com" }, "only the one field of PAGE that holds a value");
+  assert.deepEqual(plain(X.fieldsToIdentity(PAGE.map((f) => Object.assign({}, f, { value: "" }))).fields), {}, "empty fields are not an identity");
+});
+
+test("browser_autofill_from_page: reads the page's filled fields, saves them as an identity (merge by default, merge=false replaces) and reports kept / not kept / secret", async () => {
+  const { T, scripting, data, X } = load();
+  const filled = PAGE.map((f) => Object.assign({}, f, { value: f.value || { 0: "Ann", 1: "Lee", 4: "+1 555 0100", 7: "annlee", 8: "hunter2" }[f.i] || "" }));
+  scripting.results.pageAutofillCollect = { isTop: true, fields: filled };
+  let out = await runTool(T, "browser_autofill_from_page", { name: "Work" });
+  const id = data[X.KEY][0].id;
+  assert.equal(out, `Saved identity 'Work' (id ${id}) from 4 of 6 filled fields on this page:\n` +
+    "kept: firstName = Ann  ← First name *\n" +
+    "kept: lastName = Lee  ← Last name\n" +
+    "kept: email = old@x.com  ← you@example.com\n" +
+    "kept: phone = +1 555 0100  ← tel input\n" +
+    "not kept: Username (no identity key fits it)\n" +
+    "never kept (secret): Password\n" +
+    "Identity 'Work' now holds 4 fields: firstName, lastName, email, phone.");
+  assert.deepEqual(scripting.calls.map((c) => [c.func, c.args]), [["pageAutofillCollect", [150]]], "the plain collector, nothing filled");
+  assert.deepEqual(data[X.KEY][0].fields, { firstName: "Ann", lastName: "Lee", email: "old@x.com", phone: "+1 555 0100" });
+
+  // Merge (default): new keys join, a changed value is reported, the rest stays.
+  data[X.KEY][0].fields.company = "Quill Ltd";
+  data[X.KEY][0].uses = 3;
+  scripting.results.pageAutofillCollect = { isTop: true, fields: [field(0, { label: "First name", value: "Anne" }), field(1, { label: "Postal code", value: "10001" })] };
+  out = await runTool(T, "browser_autofill_from_page", { name: "work" });
+  assert.equal(out, `Updated identity 'Work' (id ${id}) from 2 of 2 filled fields on this page:\nkept: firstName = Anne  ← First name\nkept: zip = 10001  ← Postal code\nIdentity 'Work' now holds 6 fields: firstName, lastName, email, phone, company, zip. Changed firstName; added zip.`);
+  assert.deepEqual(data[X.KEY][0].fields, { firstName: "Anne", lastName: "Lee", email: "old@x.com", phone: "+1 555 0100", company: "Quill Ltd", zip: "10001" });
+  assert.equal(data[X.KEY][0].uses, 3);
+  assert.equal(data[X.KEY].length, 1);
+
+  // merge=false: the page's fields replace the identity's; id and history stay.
+  out = await runTool(T, "browser_autofill_from_page", { name: "Work", merge: false });
+  assert.equal(out, `Updated identity 'Work' (id ${id}) from 2 of 2 filled fields on this page:\nkept: firstName = Anne  ← First name\nkept: zip = 10001  ← Postal code\nIdentity 'Work' now holds 2 fields: firstName, zip. Removed lastName, email, phone, company.`);
+  assert.deepEqual(data[X.KEY][0].fields, { firstName: "Anne", zip: "10001" });
+  assert.equal(data[X.KEY][0].id, id);
+  assert.equal(data[X.KEY][0].uses, 3);
+
+  // Nothing usable: the form is empty, or only secrets / unknown fields hold a value.
+  scripting.results.pageAutofillCollect = { isTop: true, fields: PAGE.map((f) => Object.assign({}, f, { value: "" })) };
+  await assert.rejects(T.run("browser_autofill_from_page", { name: "Work" }), /Nothing to save: no filled field on this page fits an identity key\. The user fills the form first/);
+  scripting.results.pageAutofillCollect = { isTop: true, fields: [field(0, { label: "Username", value: "ann" }), field(1, { type: "password", label: "Password", value: "x" })] };
+  await assert.rejects(T.run("browser_autofill_from_page", { name: "Work" }), /fits an identity key\. The filled fields fit no identity key: Username\. Never kept \(secret\): Password\./);
+  scripting.results.pageAutofillCollect = { isTop: true, fields: [] };
+  await assert.rejects(T.run("browser_autofill_from_page", { name: "Work" }), /No form field is visible on this page/);
+  await assert.rejects(T.run("browser_autofill_from_page", {}), /name is required/);
+  assert.deepEqual(data[X.KEY][0].fields, { firstName: "Anne", zip: "10001" }, "a refused call changes nothing");
+});
+
+test("collectFields with opts passes them to the collector in every frame and resolves each field's form; the plain call stays as it was", async () => {
+  const { chrome, scripting, X } = load();
+  chrome.scripting.executeScript = async (o) => {
+    scripting.calls.push({ func: o.func.name, args: plain(o.args || []), target: o.target });
+    return [
+      { frameId: 0, documentId: "DOC0", result: { isTop: true, fields: [field(0, { label: "Email", form: 0 }), field(1, { label: "Search", form: -1 })], forms: [{ i: 0, name: "signup", id: "", action: "example.com", submits: ["Go"] }] } },
+      { frameId: 4, documentId: "DOC4", result: { isTop: false, fields: [field(0, { label: "Card", form: 0 })], forms: [{ i: 0, name: "", id: "pay", action: "pay.example", submits: ["Pay now"] }] } },
+    ];
+  };
+  const fields = await X.collectFields({ all: true, maxValue: 2000 });
+  assert.deepEqual(scripting.calls.map((c) => [c.func, c.args, c.target]), [["pageAutofillCollect", [150, { all: true, maxValue: 2000 }], { tabId: 7, allFrames: true }]]);
+  assert.deepEqual(plain(fields.map((f) => [f.label, f.frame, f.documentId, f.form])), [
+    ["Email", 0, "DOC0", { frame: 0, i: 0, name: "signup", id: "", action: "example.com", submits: ["Go"] }],
+    ["Search", 0, "DOC0", null],
+    ["Card", 1, "DOC4", { frame: 1, i: 0, name: "", id: "pay", action: "pay.example", submits: ["Pay now"] }],
+  ]);
+  scripting.calls.length = 0;
+  await X.collectFields();
+  assert.deepEqual(scripting.calls[0].args, [150]);
 });
