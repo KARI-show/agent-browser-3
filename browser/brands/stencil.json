@@ -30,6 +30,5 @@
     "ux-writing",
     "typography",
     "accessibility"
-  ],
-  "_note": "Placeholder brand: rename, rewrite the texts and replace the artwork before use. Logo: node browser/brands/make-logo.mjs stencil --style stencil --bg \"#0c2340\" --fg \"#e8f4ff\" --accent \"#3fb8ff\""
+  ]
 }

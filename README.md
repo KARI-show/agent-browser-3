@@ -1,3 +1,21 @@
+# Stencil — Page Builder Assistant
+
+> Stencil builds on the page in front of you: adds banners, buttons and notes, edits texts, hides what is in the way, lays grids and marks up screenshots for review.
+
+This repository ships **Stencil**, a brand of the Agent Browser engine: the full Tali feature set (53 tools, every base feature) plus this brand's extras. `browser/brands/stencil.json` is the product; `browser/brands/tali.json` is the base reference the tests measure against.
+
+```bash
+npm install
+npm run build            # the shared webview bundle
+npm run build:browser    # Stencil → dist-browser/extension (load unpacked, or zip for the store)
+npm run package:browser  # production build + dist-browser/store/stencil-<version>.zip
+npm test                 # unit tests (348)
+```
+
+Extras, skins, playbooks and the brand format are documented in [browser/README.md](browser/README.md) → Brands. The rest of this file is the shared engine's documentation.
+
+---
+
 # Agent IDE
 
 > **Claude-powered AI agent** that lives in your editor and your browser — reads pages, clicks, types, manages cookies, switches accounts, converts documents, and automates workflows. Does a task once with the model, then **replays it as a recipe for free**, **watches pages for changes** while you're away, reads a site's **own API** instead of scraping, and **remembers each site**. Runs on your Claude subscription (no API key needed).
