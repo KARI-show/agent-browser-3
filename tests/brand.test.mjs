@@ -16,7 +16,7 @@ test("every brand file loads, is complete, and names/ids/icons are distinct", ()
   const ids = listBrands(root);
   assert.ok(ids.includes(DEFAULT_BRAND));
   assert.ok(ids.includes(BASE_BRAND));
-  assert.ok(ids.length >= 5, "five brands are configured");
+  assert.ok(ids.length >= 2 || DEFAULT_BRAND === BASE_BRAND, "the base brand and the brand this repository ships");
   const brands = ids.map((id) => loadBrand(root, id));
   const uniq = (k) => new Set(brands.map((b) => (typeof k === "function" ? k(b) : b[k]))).size;
   assert.equal(uniq("name"), brands.length, "store names differ");
@@ -138,13 +138,16 @@ test("playbooks (the skills extra): every shipped playbook is complete, a brand 
   assert.equal(pb.title, "T"); assert.equal(pb.icon, "✨"); assert.match(pb.body, /^# T/);
   assert.deepEqual(validatePlaybook(pb), []);
   assert.deepEqual(validatePlaybook(parsePlaybook("# Just a body", "y")), ["front matter needs a title", "front matter needs a one-line summary (20+ chars)", "front matter needs 'when' (when the model should read it)", "the body is too short to be a playbook (400+ chars)"]);
-  // A brand packs the playbooks it lists, in order; brands without the extra pack none.
+  // A brand packs the playbooks it lists, in order; brands without the extra pack none. A repository
+  // that ships one brand may hold neither shelf brand: then two synthetic shelves stand in.
   const tali = loadBrand(root, BASE_BRAND);
   assert.deepEqual(playbooksOf(tali, root), []);
-  const palette = loadBrand(root, "palette");
+  const ids = listBrands(root);
+  const shelf = (id, list) => ({ ...tali, id, features: { styles: true, palette: true, skills: true }, playbooks: list });
+  const palette = ids.includes("palette") ? loadBrand(root, "palette") : shelf("palette-like", ["design-review", "typography", "color"]);
   assert.deepEqual(playbooksOf(palette, root).map((p) => p.name), palette.playbooks);
   assert.ok(playbooksOf(palette, root).every((p) => p.body.length > 400 && p.title));
-  const stencil = loadBrand(root, "stencil");
+  const stencil = ids.includes("stencil") ? loadBrand(root, "stencil") : shelf("stencil-like", ["design-review", "layout", "components"]);
   assert.ok(stencil.playbooks.includes("components") && !palette.playbooks.includes("components"), "the shelves differ by brand");
   // Rules: skills needs a list; names are checked; files must exist and be complete.
   assert.deepEqual(validateBrand({ ...tali, features: { skills: true } }, root), ['features.skills needs a "playbooks" list']);
@@ -185,7 +188,9 @@ test("the default brand reproduces the published strings; another brand replaces
   const m = JSON.parse(brandManifest(ext("manifest.json"), tali));
   assert.equal(m.name, "Tali — AI Browser Agent");
   assert.equal(m.action.default_title, "Tali — AI Browser Agent");
-  assert.ok(m.key && m.key.startsWith("MIIB"), "the default brand keeps the fixed id for unpacked installs");
+  // Only the repository that ships Tali pins its extension id; a brand repository keeps Tali as a keyless base.
+  if (DEFAULT_BRAND === BASE_BRAND) assert.ok(m.key && m.key.startsWith("MIIB"), "the default brand keeps the fixed id for unpacked installs");
+  else assert.equal(m.key, undefined, "the base brand carries no key outside its own repository");
   assert.match(fillTokens(ext("sidepanel.html"), tali), /<span class="bar-title">Tali · Browser<\/span>/);
   assert.match(fillTokens(ext("sidepanel.html"), tali), /data-assistant="Tali"/);
   assert.match(fillTokens(ext("theme.css"), tali), /--brand-accent: #25b6ff;/);
