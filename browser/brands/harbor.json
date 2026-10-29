@@ -20,6 +20,5 @@
   "features": {
     "accounts": true,
     "audit": true
-  },
-  "_note": "Placeholder brand: rename, rewrite the texts and replace the artwork before use. Logo: node browser/brands/make-logo.mjs harbor --style harbor --bg #3d5a80 --fg #f7f9fb --accent #2ec4b6"
+  }
 }
