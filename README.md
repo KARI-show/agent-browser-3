@@ -1,3 +1,21 @@
+# Quill — Writing & Forms Assistant
+
+> Quill reads what is on the page, rewrites what you select, keeps your snippets and fills forms for you — a calm assistant for the paperwork of the web.
+
+This repository ships **Quill**, a brand of the Agent Browser engine: the full Tali feature set (53 tools, every base feature) plus this brand's extras. `browser/brands/quill.json` is the product; `browser/brands/tali.json` is the base reference the tests measure against.
+
+```bash
+npm install
+npm run build            # the shared webview bundle
+npm run build:browser    # Quill → dist-browser/extension (load unpacked, or zip for the store)
+npm run package:browser  # production build + dist-browser/store/quill-<version>.zip
+npm test                 # unit tests (348)
+```
+
+Extras, skins, playbooks and the brand format are documented in [browser/README.md](browser/README.md) → Brands. The rest of this file is the shared engine's documentation.
+
+---
+
 # Agent IDE
 
 > **Claude-powered AI agent** that lives in your editor and your browser — reads pages, clicks, types, manages cookies, switches accounts, converts documents, and automates workflows. Does a task once with the model, then **replays it as a recipe for free**, **watches pages for changes** while you're away, reads a site's **own API** instead of scraping, and **remembers each site**. Runs on your Claude subscription (no API key needed).
