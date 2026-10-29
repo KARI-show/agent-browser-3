@@ -16,5 +16,5 @@
     "ink": "#0a1628",
     "radius": "10px"
   },
-  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmK0M8vYbHk62PY7GEujR0ZxYAOXDX4vqI3fMQ/myd80RHgQ22DPssE0BZynMunn0WE5aBHUVrqaECka9QWjRvRoavP/MaUKs11nQyWmlsaES9DT3YpGmkzI1dyESOsZUoDTXRacCn7SW+ilyreRDdIsJ7cNFMVlclj0jMpBXZ0O9VUdAF4YB9oWmPBDEoP2LgEXX9PocCtAQ/Qz+iP3Sx3Smd8irg1M0Z+eS1PyLsjdsRZsNM+UQ79Pl/euaApV17YI/eo9QLxnSlA2Q5sxxuOh1WwCDLlxZX2MSk9f0lKzPP/lX86ViEMyuv8YNtO2ajL9OdMqWrfzCNMkryOmJzwIDAQAB"
+  "_note": "The base reference every brand builds on (all base features, no extras); Tali itself ships from the agent-browser-3 repository."
 }

@@ -1,3 +1,21 @@
+# Orbit — AI Copilot for the Web
+
+> A copilot in your side panel that works in your real tabs: research clips, tab sessions, forms, exports, repeatable routines.
+
+This repository ships **Orbit**, a brand of the Agent Browser engine: the full Tali feature set (53 tools, every base feature) plus this brand's extras. `browser/brands/orbit.json` is the product; `browser/brands/tali.json` is the base reference the tests measure against.
+
+```bash
+npm install
+npm run build            # the shared webview bundle
+npm run build:browser    # Orbit → dist-browser/extension (load unpacked, or zip for the store)
+npm run package:browser  # production build + dist-browser/store/orbit-<version>.zip
+npm test                 # unit tests (348)
+```
+
+Extras, skins, playbooks and the brand format are documented in [browser/README.md](browser/README.md) → Brands. The rest of this file is the shared engine's documentation.
+
+---
+
 # Agent IDE
 
 > **Claude-powered AI agent** that lives in your editor and your browser — reads pages, clicks, types, manages cookies, switches accounts, converts documents, and automates workflows. Does a task once with the model, then **replays it as a recipe for free**, **watches pages for changes** while you're away, reads a site's **own API** instead of scraping, and **remembers each site**. Runs on your Claude subscription (no API key needed).
